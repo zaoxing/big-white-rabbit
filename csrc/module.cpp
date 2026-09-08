@@ -6,17 +6,22 @@
 // /health and every concurrent request.
 
 #include <memory>
+#include <string>
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include "batch.h"
 #include "context.h"
 #include "model.h"
 
 namespace py = pybind11;
 
 PYBIND11_MODULE(_freetoken_metal, m) {
-    m.doc() = "FreeToken-Mac: llama.cpp/Metal bindings (Phase 0)";
+    // pybind11's default translators already map std::invalid_argument and
+    // std::length_error (Batch's overflow guard) onto Python ValueError, so every
+    // bounds check added in Phase 1 reaches Python as an exception, not an abort().
+    m.doc() = "FreeToken-Mac: llama.cpp/Metal bindings (Phase 1)";
 
     m.def("backend_init", &ftm::backend_init_once,
           "Initialize the ggml/llama backend (idempotent; called on module import).");
@@ -49,7 +54,9 @@ PYBIND11_MODULE(_freetoken_metal, m) {
         .def_readwrite("n_seq_max",       &ftm::ContextParams::n_seq_max)
         .def_readwrite("n_threads",       &ftm::ContextParams::n_threads)
         .def_readwrite("n_threads_batch", &ftm::ContextParams::n_threads_batch)
-        .def_readwrite("flash_attn",      &ftm::ContextParams::flash_attn);
+        .def_readwrite("flash_attn",      &ftm::ContextParams::flash_attn)
+        // Unified KV buffer: required for a partial-range memory_seq_cp (prefix fork).
+        .def_readwrite("kv_unified",      &ftm::ContextParams::kv_unified);
 
     py::class_<ftm::SamplerParams>(m, "SamplerParams")
         .def(py::init<>())
@@ -82,6 +89,26 @@ PYBIND11_MODULE(_freetoken_metal, m) {
             return "<freetoken_mac.Model '" + self.desc() + "'>";
         });
 
+    py::class_<ftm::Batch>(m, "Batch")
+        .def(py::init<int32_t, int32_t>(),
+             py::arg("capacity"), py::arg("n_seq_max_per_token") = 1)
+        .def("clear", &ftm::Batch::clear)
+        .def("add", &ftm::Batch::add,
+             py::arg("token"), py::arg("pos"), py::arg("seq_id"), py::arg("logits") = false,
+             "Append a token; returns its batch row index (raises past capacity).")
+        .def("add_shared", &ftm::Batch::add_shared,
+             py::arg("token"), py::arg("pos"), py::arg("seq_ids"), py::arg("logits") = false)
+        .def_property_readonly("n_tokens", &ftm::Batch::n_tokens)
+        .def_property_readonly("capacity", &ftm::Batch::capacity)
+        .def_property_readonly("n_seq_max_per_token", &ftm::Batch::n_seq_max_per_token)
+        .def_property_readonly("max_seq_id", &ftm::Batch::max_seq_id)
+        .def_property_readonly("max_pos", &ftm::Batch::max_pos)
+        .def("__len__", &ftm::Batch::n_tokens)
+        .def("__repr__", [](const ftm::Batch & self) {
+            return "<freetoken_mac.Batch " + std::to_string(self.n_tokens()) + "/" +
+                   std::to_string(self.capacity()) + " tokens>";
+        });
+
     py::class_<ftm::Context>(m, "Context")
         .def(py::init<std::shared_ptr<ftm::Model>, const ftm::ContextParams &, const ftm::SamplerParams &>(),
              py::arg("model"),
@@ -93,9 +120,30 @@ PYBIND11_MODULE(_freetoken_metal, m) {
         .def("sample_last", &ftm::Context::sample_last,
              py::call_guard<py::gil_scoped_release>())
         .def("accept", &ftm::Context::accept, py::arg("token"))
+        // Batched step. The caller's reference keeps `batch` alive for the whole call,
+        // so releasing the GIL cannot let Python free the arrays llama_decode reads.
+        .def("decode", &ftm::Context::decode, py::arg("batch"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("set_seq_sampler", &ftm::Context::set_seq_sampler,
+             py::arg("seq_id"), py::arg("sampler") = ftm::SamplerParams())
+        .def("reset_seq_sampler", &ftm::Context::reset_seq_sampler, py::arg("seq_id"))
+        .def("has_seq_sampler", &ftm::Context::has_seq_sampler, py::arg("seq_id"))
+        .def("sample_seq", &ftm::Context::sample_seq, py::arg("seq_id"), py::arg("idx"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("accept_seq", &ftm::Context::accept_seq, py::arg("seq_id"), py::arg("token"))
+        .def("row_has_logits", &ftm::Context::row_has_logits, py::arg("idx"))
+        // sample_last()'s precondition, exposed so a caller can ask instead of catching.
+        .def_property_readonly("any_row_has_logits", &ftm::Context::any_row_has_logits)
         .def("memory_seq_rm", &ftm::Context::memory_seq_rm,
              py::arg("seq_id"), py::arg("p0") = -1, py::arg("p1") = -1)
-        .def_property_readonly("n_ctx",    &ftm::Context::n_ctx)
-        .def_property_readonly("n_batch",  &ftm::Context::n_batch)
-        .def_property_readonly("n_ubatch", &ftm::Context::n_ubatch);
+        .def("memory_seq_cp", &ftm::Context::memory_seq_cp,
+             py::arg("src"), py::arg("dst"), py::arg("p0") = -1, py::arg("p1") = -1)
+        .def("memory_seq_keep", &ftm::Context::memory_seq_keep, py::arg("seq_id"))
+        .def_property_readonly("decode_calls", &ftm::Context::decode_calls)
+        .def_property_readonly("n_ctx",     &ftm::Context::n_ctx)
+        .def_property_readonly("n_batch",   &ftm::Context::n_batch)
+        .def_property_readonly("n_ubatch",  &ftm::Context::n_ubatch)
+        .def_property_readonly("n_seq_max", &ftm::Context::n_seq_max)
+        .def_property_readonly("n_ctx_seq", &ftm::Context::n_ctx_seq)
+        .def_property_readonly("kv_unified", &ftm::Context::kv_unified);
 }

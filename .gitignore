@@ -22,3 +22,6 @@ venv/
 
 # macOS
 .DS_Store
+
+# loop-eng working state (contract, evidence logs, round history)
+.loop/

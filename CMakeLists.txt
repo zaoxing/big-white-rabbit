@@ -43,6 +43,7 @@ pybind11_add_module(_freetoken_metal
     csrc/module.cpp
     csrc/model.cpp
     csrc/context.cpp
+    csrc/batch.cpp
 )
 
 target_link_libraries(_freetoken_metal PRIVATE llama ggml)

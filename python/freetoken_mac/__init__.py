@@ -1,13 +1,15 @@
 """FreeToken-Mac: edge-native MoE serving on Apple Silicon.
 
 Phase 0 surface: load a GGUF model onto the Metal backend and generate from it.
-The engine/control-plane layers (``freetoken_mac.engine``, ``freetoken_mac.server``)
-arrive in Phases 1-2.
+Phase 1 adds ``freetoken_mac.engine``: N requests interleaved through one
+``llama_decode`` per step behind a pluggable ``AdmissionPolicy``. The
+control-plane layer (``freetoken_mac.server``) arrives in Phase 2.
 """
 
 from __future__ import annotations
 
 from ._freetoken_metal import (  # noqa: F401
+    Batch,
     Context,
     ContextParams,
     LazyMode,
@@ -17,18 +19,41 @@ from ._freetoken_metal import (  # noqa: F401
     SamplerParams,
     backend_init,
 )
+from .engine import (  # noqa: F401
+    AdmissionPolicy,
+    EngineConfig,
+    FCFSPolicy,
+    MetalEngine,
+    RequestParams,
+    RequestState,
+    SeqIdExhausted,
+    StepBudget,
+    StepOutput,
+    StepPlan,
+)
 from .generate import generate
 
 __version__ = "0.0.1.dev0"
 
 __all__ = [
+    "AdmissionPolicy",
+    "Batch",
     "Context",
     "ContextParams",
+    "EngineConfig",
+    "FCFSPolicy",
     "LazyMode",
     "LoadMode",
+    "MetalEngine",
     "Model",
     "ModelParams",
+    "RequestParams",
+    "RequestState",
     "SamplerParams",
+    "SeqIdExhausted",
+    "StepBudget",
+    "StepOutput",
+    "StepPlan",
     "backend_init",
     "generate",
     "__version__",
