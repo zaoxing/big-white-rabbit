@@ -1,0 +1,42 @@
+[build-system]
+requires = ["scikit-build-core>=0.9", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "freetoken-mac"
+version = "0.0.1.dev0"
+description = "Edge-native MoE serving engine for Apple Silicon, built on llama.cpp/Metal"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+]
+dependencies = []
+
+[project.optional-dependencies]
+# The control-plane port (Phase 2) pulls these in; the Phase 0/1 engine needs none of them.
+serve = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "transformers>=4.44",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+ftm = "freetoken_mac.cli:main"
+
+[tool.scikit-build]
+wheel.packages = ["python/freetoken_mac"]
+cmake.version = ">=3.21"
+cmake.build-type = "Release"
+build-dir = "build/{wheel_tag}"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

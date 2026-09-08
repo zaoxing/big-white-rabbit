@@ -1,0 +1,24 @@
+# Build
+build/
+dist/
+*.egg-info/
+_skbuild/
+*.so
+*.dylib
+*.metallib
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Calibration profiles / caches (machine-specific, see placement/calibrate.py)
+.freetoken-mac/
+*.calib.json
+
+# Models
+*.gguf
+
+# macOS
+.DS_Store

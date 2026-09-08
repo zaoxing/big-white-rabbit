@@ -1,0 +1,25 @@
+FreeToken-Mac
+Copyright 2026 the FreeToken-Mac authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+------------------------------------------------------------------------
+This product includes and adapts third-party software:
+
+1. llama.cpp / ggml — MIT License
+   Copyright (c) 2023-2026 The ggml authors
+   https://github.com/ggml-org/llama.cpp
+   Vendored as a git submodule at third_party/llama.cpp and linked into the
+   _freetoken_metal extension module. Unmodified unless noted in patches/.
+
+2. FreeToken — Apache License 2.0
+   Copyright 2026 FlashML
+   https://github.com/FlashML-org/FreeToken
+   Portions of the Python control plane (FastAPI route and schema layer,
+   tokenizer handling, GGUF metadata reading, and the radix prefix-cache
+   bookkeeping) are adapted from FreeToken. Adapted files carry a header
+   noting their FreeToken origin.
