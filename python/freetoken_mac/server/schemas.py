@@ -13,11 +13,68 @@ import time
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_serializer
+from pydantic import BaseModel, Field, field_validator, model_serializer
 
 
 def _rid(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:24]}"
+
+
+# --- sampling-parameter bounds -------------------------------------------------------
+#
+# The engine's SamplerParams is `uint32_t seed` / `int32_t top_k` in C++ (csrc/context.h),
+# and pybind11 raises TypeError on a value that does not fit. That conversion happens
+# deep inside admission (RequestParams.to_sampler_params, called by
+# MetalEngine.add_request), which is no place for a client's out-of-range number to
+# land -- it used to surface as a 500. The bound therefore belongs at the protocol
+# boundary, and it is declared on the request MODEL rather than checked in the route so
+# that every path parsing one of these bodies (streaming, non-streaming, and any route
+# added later) is covered by construction, and so the error names the offending field
+# the way a missing `messages` already does. The Anthropic surface reuses these, for the
+# same reason it reuses one prompt renderer: two copies of a bound would drift.
+
+SEED_MAX = 2**32 - 1  # uint32_t
+TOP_K_MIN = -(2**31)  # int32_t
+TOP_K_MAX = 2**31 - 1
+# llama.cpp's LLAMA_DEFAULT_SEED -- "draw a seed for me" (see engine/config.py).
+LLAMA_DEFAULT_SEED = 0xFFFFFFFF
+
+
+def validate_seed(value: int | None) -> int | None:
+    """Bound `seed` to uint32, translating the `-1` idiom instead of refusing it.
+
+    BEHAVIOUR CHOICE: `seed: -1` is llama.cpp's and ollama's spelling of "give me a
+    random seed", and clients send it as a matter of course, so it is NORMALISED to
+    LLAMA_DEFAULT_SEED -- which is exactly what the engine's own default means. Any other
+    value outside the C++ field's range is a client bug with no defensible reading (which
+    seed did they mean?), so it is rejected rather than silently truncated.
+    """
+    if value is None:
+        return None
+    if value == -1:
+        return LLAMA_DEFAULT_SEED
+    if not 0 <= value <= SEED_MAX:
+        raise ValueError(
+            f"seed must be between 0 and {SEED_MAX} inclusive, or -1 for a random seed; "
+            f"got {value}"
+        )
+    return value
+
+
+def validate_top_k(value: int | None) -> int | None:
+    """Bound `top_k` to int32.
+
+    Negative values stay legal: `top_k <= 0` is llama.cpp's "no top-k truncation", and
+    -1 is the conventional spelling of it, so only values the C++ field cannot hold are
+    refused.
+    """
+    if value is None:
+        return None
+    if not TOP_K_MIN <= value <= TOP_K_MAX:
+        raise ValueError(
+            f"top_k must be between {TOP_K_MIN} and {TOP_K_MAX} inclusive; got {value}"
+        )
+    return value
 
 
 class FunctionDef(BaseModel):
@@ -79,6 +136,11 @@ class ChatCompletionRequest(BaseModel):
     # default (see tools.resolve_tool_choice) instead of 422-ing a request that would
     # otherwise have been served.
     tool_choice: str | NamedToolChoice | None = None
+
+    # Range-checked here so an out-of-range value is a 4xx naming the field rather than a
+    # TypeError raised inside engine admission. See validate_seed / validate_top_k.
+    _bound_seed = field_validator("seed")(validate_seed)
+    _bound_top_k = field_validator("top_k")(validate_top_k)
 
     def resolved_max_tokens(self, default: int) -> int:
         return self.max_completion_tokens or self.max_tokens or default

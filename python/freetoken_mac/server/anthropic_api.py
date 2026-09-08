@@ -179,6 +179,29 @@ def _openai_tools(req: A.MessagesRequest) -> list[dict[str, Any]]:
     return [t.to_openai_shape() for t in (req.tools or [])]
 
 
+def _parsing_names(
+    oai_tools: list[dict[str, Any]], oai_choice: Any
+) -> set[str] | None:
+    """Tool names to accept in the output, or None meaning "do not parse at all".
+
+    The same rule as the OpenAI surface's `app._parsing_names`, on the translated
+    request: no `tools` means this is not a tool turn, and `tool_choice: none` means the
+    client will not dispatch calls -- either way `<tool_call>` text the model produced
+    anyway (replaying a prior tool exchange primes it to) is just text, and turning it
+    into a `tool_use` block would hand the client a call it never offered to make.
+
+    `None` is safe to pass straight to the parser: it is the parser's own spelling of
+    "off". It used to also be its spelling of "accept ANY name", which is how this route
+    ended up emitting tool_use blocks for a request with no tools at all.
+    """
+    if not oai_tools:
+        return None
+    mode, _forced = resolve_tool_choice(oai_choice)
+    if mode == "none":
+        return None
+    return tool_names(oai_tools)
+
+
 def _request_params(req: A.MessagesRequest) -> RequestParams:
     params = RequestParams(max_tokens=req.max_tokens)
     if req.temperature is not None:
@@ -231,8 +254,7 @@ def register_anthropic_routes(
         # inject_tools is a no-op for "none" or an empty tool list, so this is the same
         # single path the OpenAI route takes.
         pairs = inject_tools(pairs, oai_tools, oai_choice)
-        mode, _forced = resolve_tool_choice(oai_choice)
-        known = tool_names(oai_tools) if (oai_tools and mode != "none") else None
+        known = _parsing_names(oai_tools, oai_choice)
 
         prompt = render_prompt(pairs)
         n_prompt = len(model.tokenize(prompt, add_special=True, parse_special=True))
@@ -303,8 +325,10 @@ async def _stream(
     """Emit the Anthropic event sequence.
 
     Text is streamed incrementally through the shared parser (so `<tool_call>` syntax is
-    withheld rather than leaking into a text block). Tool calls are emitted as their own
-    blocks once complete: their arguments are only known to be well-formed after the
+    withheld rather than leaking into a text block); `known=None` makes that parser a
+    pass-through, because it means the client offered no tools -- or said it will not
+    dispatch calls -- so there is nothing to withhold. Tool calls are emitted as their
+    own blocks once complete: their arguments are only known to be well-formed after the
     closing tag, and streaming `input_json_delta` fragments before that would force a
     client to handle a call we might still reject.
     """

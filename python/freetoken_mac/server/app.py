@@ -173,6 +173,10 @@ def _parsing_names(req: ChatCompletionRequest) -> set[str] | None:
     behave exactly as it did before tool calling existed, even if the model spontaneously
     emits something that looks like a call. Same for `tool_choice="none"` -- the client
     said it will not dispatch calls, so `<tool_call>` text is just text.
+
+    `None` is the parser's own spelling of "off" (see tools.ToolCallStreamParser), so it
+    is handed over as-is rather than branched on here; the Anthropic surface derives the
+    same value the same way in `anthropic_api._parsing_names`.
     """
     if not req.tools:
         return None
@@ -282,21 +286,23 @@ def build_app(
         text = "".join(pieces)
         content: str | None = text
         tool_calls: list[ToolCall] | None = None
-        if known_tools is not None:
-            try:
-                parsed = parse_tool_calls(text, known_tools)
-            except Exception:
-                # Nothing in the parser is supposed to raise, but the whole server is one
-                # process: falling back to the raw text costs a tool call, whereas a 500
-                # here would also mean the engine slot was burned for nothing.
-                parsed = None
-            if parsed is not None:
-                content = parsed.content
-                if parsed.tool_calls:
-                    tool_calls = [_tool_call(c) for c in parsed.tool_calls]
-                    # The engine's reasons are eog/length/context/cancelled; "tool_calls"
-                    # exists only at the protocol boundary, so it is set here.
-                    finish_reason = "tool_calls"
+        try:
+            # `known_tools is None` means parsing is off, which the parser implements as a
+            # pass-through (content == text, no calls) -- so the pre-tools response shape
+            # is preserved without a second guard restating what "off" means here.
+            parsed = parse_tool_calls(text, known_tools)
+        except Exception:
+            # Nothing in the parser is supposed to raise, but the whole server is one
+            # process: falling back to the raw text costs a tool call, whereas a 500
+            # here would also mean the engine slot was burned for nothing.
+            parsed = None
+        if parsed is not None:
+            content = parsed.content
+            if parsed.tool_calls:
+                tool_calls = [_tool_call(c) for c in parsed.tool_calls]
+                # The engine's reasons are eog/length/context/cancelled; "tool_calls"
+                # exists only at the protocol boundary, so it is set here.
+                finish_reason = "tool_calls"
         return ChatCompletion(
             model=model_name,
             choices=[
@@ -343,8 +349,10 @@ async def _sse(
     """Emit OpenAI-shaped SSE frames, then `[DONE]`."""
     completion_id = _rid("chatcmpl")
     # Same state machine the non-streaming path runs, so the assembled deltas cannot
-    # drift from the whole-response body. None = tool parsing is off for this request.
-    parser = ToolCallStreamParser(known_tools) if known_tools is not None else None
+    # drift from the whole-response body. `known_tools is None` means tool parsing is off
+    # for this request, and the parser answers that by passing every chunk through
+    # untouched -- so this path needs no "no parser" variant of itself.
+    parser = ToolCallStreamParser(known_tools)
 
     def frame(choice: ChunkChoice) -> bytes:
         chunk = ChatCompletionChunk(id=completion_id, model=model_name, choices=[choice])
@@ -364,9 +372,9 @@ async def _sse(
 
         Text may lag the tokens here: a chunk that could still turn out to be the start
         of `<tool_call>` is withheld until it is decided, which is the only way a call
-        split across token pieces can be recognised at all.
+        split across token pieces can be recognised at all. With parsing off nothing is
+        withheld, so each piece becomes exactly one content frame.
         """
-        assert parser is not None
         try:
             text, calls = parser.push(piece)
             if final:
@@ -393,15 +401,12 @@ async def _sse(
             if await http_request.is_disconnected():
                 await engine.cancel(request_id)
                 return
-            if parser is None:
-                if out.piece:
-                    yield frame(ChunkChoice(delta=Delta(content=out.piece)))
-            elif out.piece or out.finished:
+            if out.piece or out.finished:
                 for f in tool_frames(out.piece, final=out.finished):
                     yield f
             if out.finished:
                 reason = _openai_finish_reason(out.finish_reason)
-                if parser is not None and parser.n_calls:
+                if parser.n_calls:
                     reason = "tool_calls"
                 yield frame(ChunkChoice(delta=Delta(), finish_reason=reason))
         yield b"data: [DONE]\n\n"

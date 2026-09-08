@@ -641,10 +641,15 @@ def test_parse_malformed_unknown_tool_degrades_to_text() -> None:
     assert [c.name for c in got.tool_calls] == ["get_time"]
     assert got.content is not None and "rm_rf" in got.content
 
-    # known_names=None means "accept anything", which is what makes the parser usable
-    # outside the route; the route always passes the offered set.
-    anything = T.parse_tool_calls(text, None, id_factory=_ids())
-    assert [c.name for c in anything.tool_calls] == ["rm_rf"]
+    # CONTRACT CHANGE: known_names=None used to mean "accept anything", while both
+    # routes were already using None to mean the opposite -- "do not parse at all" (see
+    # app._parsing_names). One sentinel with two opposite meanings let /v1/messages,
+    # which forwarded it without a guard, return a tool_use block for a request that
+    # offered no tools. None now means OFF and nothing else, so an unoffered call is
+    # text through this path too, and "parse but accept any name" no longer exists.
+    off = T.parse_tool_calls(text, None, id_factory=_ids())
+    assert off.tool_calls == []
+    assert off.content == text
 
 
 def test_parse_malformed_never_raises_on_fuzzed_input() -> None:

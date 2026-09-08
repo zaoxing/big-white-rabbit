@@ -98,10 +98,26 @@ class MetalEngine:
         request_id = self._next_request_id
         self._next_request_id += 1
 
-        # A retired predecessor may have left KV behind on this slot.
-        self.ctx.memory_seq_rm(seq_id, -1, -1)
-        rp = params or self.default_params
-        self.ctx.set_seq_sampler(seq_id, rp.to_sampler_params())
+        # From here to the _states registration below, the slot is owned by nobody:
+        # _retire is the ONLY thing that returns a seq_id to the pool and it needs a
+        # RequestState to do it, so anything that raises in this window would lose the
+        # slot permanently -- one leaked slot per failed admission, n_seq_max of them and
+        # the engine refuses every further request. Rolling the pop back on ANY exception
+        # keeps that true for lines added here later, not just today's (a params object
+        # whose sampler values do not fit the C++ SamplerParams raises from
+        # to_sampler_params).
+        try:
+            # A retired predecessor may have left KV behind on this slot.
+            self.ctx.memory_seq_rm(seq_id, -1, -1)
+            rp = params or self.default_params
+            self.ctx.set_seq_sampler(seq_id, rp.to_sampler_params())
+        except BaseException:  # noqa: BLE001 - re-raised; this only undoes the pop
+            # Back to the front, so a rejected request leaves the pool as it found it.
+            # Pure list surgery: nothing here can raise and strand the slot again. Any
+            # KV or sampler left on the slot is harmless -- the next admission clears the
+            # KV and overwrites the sampler before use.
+            self._free_seq_ids.insert(0, seq_id)
+            raise
 
         self._states[request_id] = RequestState(
             request_id=request_id, seq_id=seq_id, prompt=tokens, params=rp

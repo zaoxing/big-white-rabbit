@@ -20,7 +20,12 @@ import time
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# One bound, two surfaces. `top_k` reaches the same `int32_t` in the engine's
+# SamplerParams whichever API it arrived through, so the range check is imported rather
+# than restated -- a second copy would be free to drift from the first.
+from .schemas import validate_top_k
 
 
 def new_message_id() -> str:
@@ -106,6 +111,11 @@ class MessagesRequest(BaseModel):
     tools: list[ToolParam] | None = None
     tool_choice: ToolChoiceParam | dict[str, Any] | None = None
     metadata: dict[str, Any] | None = None
+
+    # Out-of-range top_k must be a 4xx naming the field, not a TypeError from inside
+    # engine admission. (This surface has no `seed`; the Messages API does not define
+    # one, and an unknown field is ignored, so it never reaches the sampler.)
+    _bound_top_k = field_validator("top_k")(validate_top_k)
 
 
 # --- response blocks ----------------------------------------------------------------

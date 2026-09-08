@@ -47,6 +47,11 @@ class _Stream:
 
     queue: "asyncio.Queue[object]" = field(default_factory=asyncio.Queue)
     done: bool = False
+    # True only when the ENGINE retired the request itself (a StepOutput with
+    # finished=True reached _deliver). `done` is weaker: it is also set when the stream
+    # is closed early or failed, which is exactly the case where the engine still owns
+    # the seq_id. release() needs to tell those two apart -- see its docstring.
+    retired: bool = False
 
 
 class AsyncEngine:
@@ -121,6 +126,11 @@ class AsyncEngine:
     async def cancel(self, request_id: int) -> None:
         """Ask the worker to drop a request. Returns once the command is queued; the
         stream closes when the worker acts on it."""
+        self._post_cancel(request_id)
+
+    def _post_cancel(self, request_id: int) -> None:
+        """Queue a cancel. Safe from either thread and safe to repeat: the worker's
+        handler tolerates an unknown or already-finished request."""
         self._commands.put(_Command(kind="cancel", request_id=request_id))
 
     async def stream(self, request_id: int) -> AsyncIterator[StepOutput]:
@@ -227,6 +237,7 @@ class AsyncEngine:
         st.queue.put_nowait(out)
         if out.finished:
             st.done = True
+            st.retired = True  # the engine freed the slot in MetalEngine._retire
             st.queue.put_nowait(_END)
 
     def _deliver_error(self, request_id: int, exc: BaseException) -> None:
@@ -245,9 +256,32 @@ class AsyncEngine:
         st.queue.put_nowait(_END)
 
     def release(self, request_id: int) -> None:
-        """Forget a finished request's channel. Handlers call this in a finally block;
-        without it the dict grows for the life of the process."""
-        self._streams.pop(request_id, None)
+        """Give up a request's channel, CANCELLING it unless the engine already retired it.
+
+        Handlers call this from a finally block, so it runs on the abnormal exits too: a
+        stream that ended in an error (the worker reported a failed step through
+        `_deliver_error`), or a handler killed by CancelledError because the client hung
+        up. Popping the channel is not enough on those paths -- `_streams` is only the
+        delivery side, and `MetalEngine._retire` is the ONLY thing that returns a seq_id
+        to the pool. Dropping the channel alone therefore stranded the request inside the
+        engine: its slot was never freed, and since `MetalEngine.has_work` is "any request
+        not finished", the worker kept re-running the same failing step forever, at one
+        core and tens of thousands of wasted decodes.
+
+        The cancel lives here rather than in each handler's finally block because the two
+        surfaces have four such blocks (streaming and non-streaming x OpenAI and
+        Anthropic) and any route added later would need a fifth; "release" is exactly the
+        point where the caller stops being able to consume the request, which is what
+        makes it the right place to decide the request must die.
+
+        Normal completion does NOT cancel: `_deliver` marks the channel `retired` when it
+        sees the engine's finished StepOutput, i.e. after `_retire` has already freed the
+        slot. A cancel then would be a no-op anyway (`MetalEngine.cancel` returns False
+        for a finished request), but not posting it keeps the worker's queue honest.
+        """
+        st = self._streams.pop(request_id, None)
+        if st is not None and not st.retired:
+            self._post_cancel(request_id)
 
     # --- plumbing ----------------------------------------------------------------
 

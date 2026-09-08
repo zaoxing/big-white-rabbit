@@ -322,6 +322,16 @@ class ToolCallStreamParser:
     held back and dropped if the response turns out to be calls only -- that is what
     makes `content` `null` for a pure tool-call response through *both* paths, without
     the streaming client having to know the rule.
+
+    `known_names` is the set of names the client OFFERED, and `None` means tool parsing
+    is OFF: every byte the model produced is content, `<tool_call>` syntax included.
+    There is deliberately no spelling of "parse, but accept any name". `None` used to
+    mean exactly that -- while both routes were already using `None` to mean the
+    opposite, "do not parse" -- so one sentinel carried two contradictory meanings, and
+    the surface that forwarded it without a second guard (`/v1/messages`) emitted
+    `tool_use` blocks for a request that offered no tools at all. Accepting only declared
+    names is the whole point of the check (an undispatchable call is not a call), so the
+    ambiguity is resolved by dropping the meaning nothing legitimately wanted.
     """
 
     def __init__(
@@ -336,6 +346,11 @@ class ToolCallStreamParser:
         self._pending_ws = ""
         self._in_call = False
         self._n_calls = 0
+
+    @property
+    def enabled(self) -> bool:
+        """False when this parser is the pass-through (`known_names=None`)."""
+        return self._known is not None
 
     @property
     def n_calls(self) -> int:
@@ -364,7 +379,8 @@ class ToolCallStreamParser:
         name = obj.get("name")
         if not isinstance(name, str) or not name:
             return None
-        if self._known is not None and name not in self._known:
+        if self._known is None or name not in self._known:
+            # Never offered (or parsing is off): not dispatchable, so it is text.
             return None
         args = obj.get("arguments")
         if args is None:
@@ -386,6 +402,11 @@ class ToolCallStreamParser:
 
     def push(self, new_text: str) -> tuple[str, list[ParsedToolCall]]:
         """Feed generated text; return `(text_delta, calls_completed_by_this_chunk)`."""
+        if self._known is None:
+            # Parsing off: pass the chunk straight through, byte for byte and with the
+            # caller's own chunk boundaries. Nothing is buffered, so a request that
+            # offered no tools streams exactly as it did before tool calling existed.
+            return new_text, []
         if not new_text:
             return "", []
         self._buffer += new_text
@@ -428,6 +449,8 @@ class ToolCallStreamParser:
 
     def flush(self) -> tuple[str, list[ParsedToolCall]]:
         """Finish the response: release held text, degrade an unterminated block."""
+        if self._known is None:
+            return "", []  # parsing off: push() held nothing back
         texts: list[str] = []
         if self._in_call:
             # `<tool_call>` that never closed -- generation was cut off by max_tokens or
@@ -455,7 +478,9 @@ def parse_tool_calls(
     """One-shot parse: the streaming state machine fed a single chunk.
 
     Sharing the implementation is the point -- it is what guarantees that assembling the
-    SSE deltas reproduces the non-streaming body instead of merely resembling it.
+    SSE deltas reproduces the non-streaming body instead of merely resembling it. That
+    includes the off state: `known_names=None` yields `content == text` and no calls
+    here, exactly as `push` passes the chunk through there.
     """
     parser = ToolCallStreamParser(known_names, id_factory=id_factory)
     text_a, calls_a = parser.push(text)
