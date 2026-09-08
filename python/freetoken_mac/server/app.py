@@ -127,6 +127,20 @@ def _message_pairs(req: ChatCompletionRequest) -> list[tuple[str, str]]:
     return pairs
 
 
+def render_pairs(model: Model, pairs: list[tuple[str, str]]) -> str:
+    """Apply the model's chat template to prepared `(role, text)` pairs.
+
+    Shared with the Anthropic surface (server/anthropic_api.py), which prepares its own
+    pairs but must not reimplement templating or the error mapping.
+    """
+    try:
+        return model.apply_chat_template(pairs, True)
+    except (RuntimeError, ValueError) as exc:
+        # No template, or one llama.cpp cannot apply. That is a request-level problem the
+        # caller can act on (send a raw prompt / use another model), not a 500.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _render_prompt(model: Model, req: ChatCompletionRequest) -> str:
     if not req.messages:
         raise HTTPException(status_code=400, detail="messages must not be empty")
@@ -136,12 +150,7 @@ def _render_prompt(model: Model, req: ChatCompletionRequest) -> str:
         # it pattern-matches templates instead of running jinja), so they go into the
         # system message text before templating. See server/tools.py.
         pairs = inject_tools(pairs, req.tools, req.tool_choice)
-    try:
-        return model.apply_chat_template(pairs, True)
-    except (RuntimeError, ValueError) as exc:
-        # No template, or one llama.cpp cannot apply. That is a request-level problem the
-        # caller can act on (send a raw prompt / use another model), not a 500.
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return render_pairs(model, pairs)
 
 
 def _request_params(req: ChatCompletionRequest) -> RequestParams:
@@ -302,6 +311,24 @@ def build_app(
                 total_tokens=n_prompt + n_completion,
             ),
         )
+
+    # --- Anthropic Messages surface -------------------------------------------------
+    # Mounted on the same app so one server serves both protocols against one loaded
+    # model. `render_pairs` is passed in rather than reimplemented: prompt construction
+    # is the one thing the two surfaces must never disagree about.
+    from fastapi import APIRouter
+
+    from .anthropic_api import register_anthropic_routes
+
+    anthropic_router = APIRouter()
+    register_anthropic_routes(
+        anthropic_router,
+        model=model,
+        async_engine=async_engine,
+        model_name=model_name,
+        render_prompt=lambda pairs: render_pairs(model, pairs),
+    )
+    app.include_router(anthropic_router)
 
     return app
 

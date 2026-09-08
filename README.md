@@ -5,8 +5,8 @@ An edge-native MoE serving engine for Apple Silicon — the ideas behind
 semantic-aware KV caching, an Anthropic/OpenAI-compatible API for coding agents) rebuilt on
 [llama.cpp](https://github.com/ggml-org/llama.cpp)'s Metal/ggml backend.
 
-> **Status: Phase 2.** Serves an OpenAI-compatible API with continuous
-> batching. No MoE placement policy or semantic KV caching yet (Phases 3-4).
+> **Status: serving.** OpenAI- *and* Anthropic-compatible APIs with continuous
+> batching and tool calling. No MoE placement policy or semantic KV caching yet.
 
 ## Why this is a rewrite, not a port
 
@@ -77,7 +77,8 @@ ftm generate -m /path/to/model.gguf -p "Hello" -n 64
 ftm info     -m /path/to/model.gguf
 ```
 
-Point any OpenAI client at it:
+Point either an OpenAI or an Anthropic client at it — one server, one loaded model,
+both protocols:
 
 ```python
 from openai import OpenAI
@@ -85,7 +86,22 @@ c = OpenAI(base_url="http://127.0.0.1:1919/v1", api_key="none")
 print(c.chat.completions.create(
     model="local", messages=[{"role": "user", "content": "hi"}]
 ).choices[0].message.content)
+
+from anthropic import Anthropic
+a = Anthropic(base_url="http://127.0.0.1:1919", api_key="none")
+print(a.messages.create(
+    model="local", max_tokens=64, messages=[{"role": "user", "content": "hi"}]
+).content[0].text)
 ```
+
+| Endpoint | Protocol |
+|---|---|
+| `POST /v1/chat/completions` | OpenAI (streaming + tools) |
+| `POST /v1/messages` | Anthropic Messages (streaming + tools) |
+| `GET /v1/models`, `GET /health` | — |
+
+Both surfaces share one prompt format and one tool-call parser: the client's choice of
+API never reaches the model, which sees only the format its chat template was trained on.
 
 `--n-seq-max` is how many requests decode concurrently. With the default split KV
 buffer each sequence gets `ctx-size / n-seq-max` tokens of context, so raising
