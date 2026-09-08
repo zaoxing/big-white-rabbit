@@ -33,11 +33,25 @@ from .schemas import (
     Choice,
     ChunkChoice,
     Delta,
+    FunctionCall,
+    FunctionCallDelta,
     ModelCard,
     ModelList,
     ResponseMessage,
+    ToolCall,
+    ToolCallDelta,
     Usage,
     _rid,
+)
+from .tools import (
+    ParsedToolCall,
+    ToolCallStreamParser,
+    inject_tools,
+    parse_tool_calls,
+    render_assistant_turn,
+    render_tool_response,
+    resolve_tool_choice,
+    tool_names,
 )
 
 DEFAULT_MAX_TOKENS = 512
@@ -78,10 +92,50 @@ def _message_text(msg: ChatMessage) -> str:
     return "".join(out)
 
 
+def _message_pairs(req: ChatCompletionRequest) -> list[tuple[str, str]]:
+    """Flatten the conversation to `(role, text)` for the templater.
+
+    The tool-conversation rendering is gated on `req.tools`: without a declaration this
+    is not a tool exchange, so the messages are flattened exactly as Phase 2 did.
+    """
+    tool_turn = bool(req.tools)
+    messages = list(req.messages)
+    pairs: list[tuple[str, str]] = []
+    i = 0
+    while i < len(messages):
+        m = messages[i]
+        if tool_turn and m.role == "tool":
+            # llama.cpp's chatml renderer would emit `<|im_start|>tool`, a role the
+            # weights never saw; the template folds results into a user turn instead --
+            # and folds a *run* of consecutive results into a single one, opening
+            # `<|im_start|>user` only when the previous message was not a tool and
+            # closing it only when the next one is not. A parallel-tool-call turn
+            # therefore arrives as one user message holding several <tool_response>
+            # blocks; emitting one turn per result would show the model a conversation
+            # shape it was never trained on.
+            run: list[str] = []
+            while i < len(messages) and messages[i].role == "tool":
+                run.append(render_tool_response(_message_text(messages[i])))
+                i += 1
+            pairs.append(("user", "\n".join(run)))
+            continue
+        text = _message_text(m)
+        if tool_turn and m.role == "assistant" and m.tool_calls:
+            text = render_assistant_turn(text, m.tool_calls)
+        pairs.append((m.role, text))
+        i += 1
+    return pairs
+
+
 def _render_prompt(model: Model, req: ChatCompletionRequest) -> str:
     if not req.messages:
         raise HTTPException(status_code=400, detail="messages must not be empty")
-    pairs = [(m.role, _message_text(m)) for m in req.messages]
+    pairs = _message_pairs(req)
+    if req.tools:
+        # Tools cannot be handed to llama_chat_apply_template (no argument for them, and
+        # it pattern-matches templates instead of running jinja), so they go into the
+        # system message text before templating. See server/tools.py.
+        pairs = inject_tools(pairs, req.tools, req.tool_choice)
     try:
         return model.apply_chat_template(pairs, True)
     except (RuntimeError, ValueError) as exc:
@@ -101,6 +155,44 @@ def _request_params(req: ChatCompletionRequest) -> RequestParams:
     if req.seed is not None:
         params.seed = req.seed
     return params
+
+
+def _parsing_names(req: ChatCompletionRequest) -> set[str] | None:
+    """Tool names to accept in the output, or None meaning "do not parse at all".
+
+    Not parsing when no tools were offered is deliberate: a request without `tools` must
+    behave exactly as it did before tool calling existed, even if the model spontaneously
+    emits something that looks like a call. Same for `tool_choice="none"` -- the client
+    said it will not dispatch calls, so `<tool_call>` text is just text.
+    """
+    if not req.tools:
+        return None
+    mode, _ = resolve_tool_choice(req.tool_choice)
+    if mode == "none":
+        return None
+    return tool_names(req.tools)
+
+
+def _tool_call(call: ParsedToolCall) -> ToolCall:
+    return ToolCall(
+        id=call.id, function=FunctionCall(name=call.name, arguments=call.arguments)
+    )
+
+
+def _tool_call_delta(call: ParsedToolCall) -> ToolCallDelta:
+    """One delta carrying a whole call.
+
+    OpenAI may spread a call over several deltas (id/name first, then argument
+    fragments); sending it in one is a valid degenerate case of the same protocol -- a
+    client accumulating by `index` gets the identical result -- and it avoids emitting
+    argument fragments before the JSON is known to be well-formed, which is what would
+    force a client to handle a call we later decide was malformed.
+    """
+    return ToolCallDelta(
+        index=call.index,
+        id=call.id,
+        function=FunctionCallDelta(name=call.name, arguments=call.arguments),
+    )
 
 
 def build_app(
@@ -149,6 +241,7 @@ def build_app(
 
         prompt = _render_prompt(model, req)
         params = _request_params(req)
+        known_tools = _parsing_names(req)
         n_prompt = len(model.tokenize(prompt, add_special=True, parse_special=True))
 
         try:
@@ -161,7 +254,7 @@ def build_app(
 
         if req.stream:
             return StreamingResponse(
-                _sse(async_engine, request_id, model_name, http_request),
+                _sse(async_engine, request_id, model_name, http_request, known_tools),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
@@ -177,11 +270,29 @@ def build_app(
             async_engine.release(request_id)
 
         n_completion = len(pieces)
+        text = "".join(pieces)
+        content: str | None = text
+        tool_calls: list[ToolCall] | None = None
+        if known_tools is not None:
+            try:
+                parsed = parse_tool_calls(text, known_tools)
+            except Exception:
+                # Nothing in the parser is supposed to raise, but the whole server is one
+                # process: falling back to the raw text costs a tool call, whereas a 500
+                # here would also mean the engine slot was burned for nothing.
+                parsed = None
+            if parsed is not None:
+                content = parsed.content
+                if parsed.tool_calls:
+                    tool_calls = [_tool_call(c) for c in parsed.tool_calls]
+                    # The engine's reasons are eog/length/context/cancelled; "tool_calls"
+                    # exists only at the protocol boundary, so it is set here.
+                    finish_reason = "tool_calls"
         return ChatCompletion(
             model=model_name,
             choices=[
                 Choice(
-                    message=ResponseMessage(content="".join(pieces)),
+                    message=ResponseMessage(content=content, tool_calls=tool_calls),
                     finish_reason=finish_reason,
                 )
             ],
@@ -200,9 +311,13 @@ async def _sse(
     request_id: int,
     model_name: str,
     http_request: Request,
+    known_tools: set[str] | None = None,
 ) -> AsyncIterator[bytes]:
     """Emit OpenAI-shaped SSE frames, then `[DONE]`."""
     completion_id = _rid("chatcmpl")
+    # Same state machine the non-streaming path runs, so the assembled deltas cannot
+    # drift from the whole-response body. None = tool parsing is off for this request.
+    parser = ToolCallStreamParser(known_tools) if known_tools is not None else None
 
     def frame(choice: ChunkChoice) -> bytes:
         chunk = ChatCompletionChunk(id=completion_id, model=model_name, choices=[choice])
@@ -217,6 +332,32 @@ async def _sse(
             ch.setdefault("delta", {})
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
 
+    def tool_frames(piece: str, *, final: bool) -> list[bytes]:
+        """Run `piece` through the parser and turn its output into frames.
+
+        Text may lag the tokens here: a chunk that could still turn out to be the start
+        of `<tool_call>` is withheld until it is decided, which is the only way a call
+        split across token pieces can be recognised at all.
+        """
+        assert parser is not None
+        try:
+            text, calls = parser.push(piece)
+            if final:
+                tail, _ = parser.flush()
+                text += tail
+        except Exception:
+            # See the non-streaming path: degrade to raw text rather than tearing down
+            # the response (or the process) over a parse.
+            text, calls = piece, []
+        out: list[bytes] = []
+        if text:
+            out.append(frame(ChunkChoice(delta=Delta(content=text))))
+        for call in calls:
+            out.append(
+                frame(ChunkChoice(delta=Delta(tool_calls=[_tool_call_delta(call)])))
+            )
+        return out
+
     try:
         # First frame announces the role and carries no content, as OpenAI does.
         yield frame(ChunkChoice(delta=Delta(role="assistant")))
@@ -225,15 +366,17 @@ async def _sse(
             if await http_request.is_disconnected():
                 await engine.cancel(request_id)
                 return
-            if out.piece:
-                yield frame(ChunkChoice(delta=Delta(content=out.piece)))
+            if parser is None:
+                if out.piece:
+                    yield frame(ChunkChoice(delta=Delta(content=out.piece)))
+            elif out.piece or out.finished:
+                for f in tool_frames(out.piece, final=out.finished):
+                    yield f
             if out.finished:
-                yield frame(
-                    ChunkChoice(
-                        delta=Delta(),
-                        finish_reason=_openai_finish_reason(out.finish_reason),
-                    )
-                )
+                reason = _openai_finish_reason(out.finish_reason)
+                if parser is not None and parser.n_calls:
+                    reason = "tool_calls"
+                yield frame(ChunkChoice(delta=Delta(), finish_reason=reason))
         yield b"data: [DONE]\n\n"
     finally:
         engine.release(request_id)
