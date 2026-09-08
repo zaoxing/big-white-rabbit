@@ -73,6 +73,30 @@ same greedy token as a full prefill, while a no-copy control diverges.
   to `xcrun metal` at build time and fails on machines without that separately-downloaded
   component.
 
+## GPU resources must be released explicitly, not left to the collector
+
+ggml frees the Metal device from a **C++ static destructor** at process exit
+(`__cxa_finalize` → `ggml_metal_device_free`) and asserts its residency sets are empty
+(`ggml-metal-device.m:1021`). Anything still holding Metal buffers at that moment
+`abort()`s the process with SIGABRT — *after* a clean shutdown, so every request
+succeeds, the logs look healthy, and the exit code still says crash.
+
+Python's garbage collector is not a sufficient answer. A FastAPI app keeps the model and
+engine alive through cycles in its route closures, and those cycles can outlive the
+interpreter's last collection; `del app; gc.collect()` did **not** clear it. Two things
+therefore have explicit `close()` methods, and both must be called on shutdown:
+
+1. `Context.close()` — the KV cache and compute buffers. Called by
+   `AsyncEngine.stop()`, which the app's lifespan runs.
+2. `Model.close()` — the GPU-resident **weights**, which is what the residency sets
+   actually hold. Called by `serve()` after uvicorn returns.
+
+Order matters: close every context before its model, since contexts keep only a
+`shared_ptr` to the wrapper, not to the `llama_model` behind it. After `close()` every
+method on either handle raises rather than dereferencing a freed pointer.
+
+The symptom to recognise: a suite or server that passes everything and exits **134**.
+
 ## Open issue carried forward
 
 **`sample_last()` after a failed decode is safe only because of belt 1.** `decode_raw` now

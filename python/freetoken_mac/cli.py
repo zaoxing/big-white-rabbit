@@ -89,9 +89,53 @@ def _cmd_generate(argv: list[str]) -> int:
     return 0
 
 
+def _cmd_serve(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(
+        prog="ftm serve", description="Serve an OpenAI-compatible API over a GGUF model."
+    )
+    _add_model_args(ap)
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=1919)
+    ap.add_argument("--n-batch", type=int, default=512)
+    ap.add_argument("--n-seq-max", type=int, default=8,
+                    help="max concurrent requests (each gets ctx-size/n-seq-max tokens "
+                         "of KV unless --kv-unified)")
+    ap.add_argument("--kv-unified", action="store_true",
+                    help="share one KV buffer across sequences; required for partial "
+                         "prefix copies (see docs/llamacpp-notes.md)")
+    ap.add_argument("--served-model-name", default=None,
+                    help="name reported by /v1/models (defaults to the GGUF's own)")
+    ap.add_argument("--log-level", default="info")
+    args = ap.parse_args(argv)
+
+    try:
+        from .server.launch import serve
+    except ImportError as exc:  # fastapi/uvicorn are the [serve] extra, not a core dep
+        print(
+            f"ftm serve needs the server extras: pip install 'freetoken-mac[serve]' ({exc})",
+            file=sys.stderr,
+        )
+        return 1
+
+    serve(
+        args.model,
+        host=args.host,
+        port=args.port,
+        n_gpu_layers=args.n_gpu_layers,
+        n_ctx=args.ctx_size,
+        n_batch=args.n_batch,
+        n_seq_max=args.n_seq_max,
+        kv_unified=args.kv_unified,
+        served_model_name=args.served_model_name,
+        log_level=args.log_level,
+    )
+    return 0
+
+
 _COMMANDS = {
     "info": _cmd_info,
     "generate": _cmd_generate,
+    "serve": _cmd_serve,
 }
 
 

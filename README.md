@@ -5,7 +5,8 @@ An edge-native MoE serving engine for Apple Silicon — the ideas behind
 semantic-aware KV caching, an Anthropic/OpenAI-compatible API for coding agents) rebuilt on
 [llama.cpp](https://github.com/ggml-org/llama.cpp)'s Metal/ggml backend.
 
-> **Status: Phase 0 (bring-up).** Not usable yet.
+> **Status: Phase 2.** Serves an OpenAI-compatible API with continuous
+> batching. No MoE placement policy or semantic KV caching yet (Phases 3-4).
 
 ## Why this is a rewrite, not a port
 
@@ -62,8 +63,34 @@ metadata reading, and the radix prefix-cache bookkeeping behind semantic-anchor 
 ```bash
 git clone --recurse-submodules <this repo> && cd FreeToken-Mac
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
+pip install -e ".[serve]"
 ```
+
+## Run
+
+```bash
+# Serve an OpenAI-compatible API (default port 1919)
+ftm serve -m /path/to/model.gguf --ctx-size 8192 --n-seq-max 8
+
+# Or generate straight from the CLI
+ftm generate -m /path/to/model.gguf -p "Hello" -n 64
+ftm info     -m /path/to/model.gguf
+```
+
+Point any OpenAI client at it:
+
+```python
+from openai import OpenAI
+c = OpenAI(base_url="http://127.0.0.1:1919/v1", api_key="none")
+print(c.chat.completions.create(
+    model="local", messages=[{"role": "user", "content": "hi"}]
+).choices[0].message.content)
+```
+
+`--n-seq-max` is how many requests decode concurrently. With the default split KV
+buffer each sequence gets `ctx-size / n-seq-max` tokens of context, so raising
+concurrency shrinks per-request context; `/health` reports both `n_ctx` and the
+per-sequence `n_ctx_seq`. Pass `--kv-unified` to share one buffer instead.
 
 ## License
 

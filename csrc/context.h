@@ -118,6 +118,18 @@ public:
     // Evict every sequence except `seq_id` (llama_memory_seq_keep).
     void memory_seq_keep(llama_seq_id seq_id);
 
+    // Release the llama_context and its sampler chains NOW instead of waiting for the
+    // destructor. Servers need deterministic teardown: ggml frees the Metal device from
+    // a C++ static destructor at process exit and asserts its residency sets are empty
+    // (ggml-metal-device.m:1021), so a context still holding Metal buffers at that
+    // moment abort()s the process on the way out -- after a clean shutdown, which looks
+    // like a crash to whatever supervises the server. Relying on Python's collector is
+    // not enough: a FastAPI app keeps the engine in route closures, and the reference
+    // graph can outlive the interpreter's last collection. Idempotent; afterwards every
+    // operation throws rather than touching a freed handle.
+    void close();
+    bool closed() const { return ctx_ == nullptr; }
+
     // Effective geometry, post-clamping. llama.cpp rounds n_ctx UP (KV padding) and
     // clamps n_batch DOWN to the requested n_ctx, so neither necessarily matches what
     // was asked for -- callers must budget against these, not against their own request.
@@ -140,6 +152,9 @@ private:
     // The one place llama_decode() is called: validates the batch, counts the call, and
     // turns llama.cpp's return codes into exceptions.
     void decode_raw(const llama_batch & batch, int32_t n_tokens);
+    // Throws if close() has already run, so a use-after-close is an exception rather
+    // than a null-deref inside llama.cpp.
+    void ensure_open() const;
     void validate_seq_id(llama_seq_id seq_id) const;
     llama_sampler * seq_sampler(llama_seq_id seq_id) const;
     static llama_sampler * make_chain(const SamplerParams & sp);

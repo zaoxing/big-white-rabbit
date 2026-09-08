@@ -86,7 +86,7 @@ llama_sampler * Context::make_chain(const SamplerParams & sp) {
     return chain;
 }
 
-Context::~Context() {
+void Context::close() {
     for (auto & kv : seq_smpl_) {
         if (kv.second != nullptr) {
             llama_sampler_free(kv.second);
@@ -101,9 +101,22 @@ Context::~Context() {
         llama_free(ctx_);
         ctx_ = nullptr;
     }
+    last_logits_.clear();
+}
+
+Context::~Context() {
+    close();
+}
+
+void Context::ensure_open() const {
+    if (ctx_ == nullptr) {
+        throw std::runtime_error(
+            "this Context has been closed; create a new one to keep serving");
+    }
 }
 
 void Context::decode_seq0(const std::vector<llama_token> & tokens) {
+    ensure_open();
     if (tokens.empty()) {
         return;
     }
@@ -126,6 +139,7 @@ void Context::decode_seq0(const std::vector<llama_token> & tokens) {
 }
 
 void Context::decode(const Batch & batch) {
+    ensure_open();
     const int32_t n_tokens = batch.n_tokens();
     if (n_tokens == 0) {
         // llama_decode rejects an empty batch with -1; nothing to do is not an error.
@@ -201,6 +215,7 @@ void Context::decode_raw(const llama_batch & batch, int32_t n_tokens) {
 }
 
 llama_token Context::sample_last() {
+    ensure_open();
     // Same two-stage guard as sample_seq(), against the same abort. Index -1 means "the
     // last OUTPUT row", so it is only meaningful when the last decoded batch produced at
     // least one logits row. Phase 0's decode_seq0 goes through llama_batch_get_one, whose
@@ -228,10 +243,12 @@ llama_token Context::sample_last() {
 }
 
 void Context::accept(llama_token tok) {
+    ensure_open();
     llama_sampler_accept(smpl_, tok);
 }
 
 void Context::validate_seq_id(llama_seq_id seq_id) const {
+    ensure_open();
     const uint32_t ns = llama_n_seq_max(ctx_);
     if (seq_id < 0 || (uint32_t) seq_id >= ns) {
         throw std::invalid_argument("seq_id " + std::to_string(seq_id) +
@@ -240,6 +257,7 @@ void Context::validate_seq_id(llama_seq_id seq_id) const {
 }
 
 void Context::set_seq_sampler(llama_seq_id seq_id, const SamplerParams & sp) {
+    ensure_open();
     validate_seq_id(seq_id);
     llama_sampler * chain = make_chain(sp);  // may throw; nothing installed yet
     auto it = seq_smpl_.find(seq_id);
@@ -286,6 +304,7 @@ bool Context::any_row_has_logits() const {
 }
 
 llama_token Context::sample_seq(llama_seq_id seq_id, int32_t idx) {
+    ensure_open();
     validate_seq_id(seq_id);
     llama_sampler * chain = seq_sampler(seq_id);
 
@@ -303,11 +322,13 @@ llama_token Context::sample_seq(llama_seq_id seq_id, int32_t idx) {
 }
 
 void Context::accept_seq(llama_seq_id seq_id, llama_token tok) {
+    ensure_open();
     validate_seq_id(seq_id);
     llama_sampler_accept(seq_sampler(seq_id), tok);
 }
 
 void Context::memory_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    ensure_open();
     // llama.h documents `seq_id < 0` as "match any sequence", but the implementation
     // exempts exactly -1: llama_kv_cache::seq_rm asserts
     // `seq_id == -1 || (seq_id >= 0 && seq_id < seq_to_stream.size())`, and a failed
@@ -322,6 +343,7 @@ void Context::memory_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
 }
 
 void Context::memory_seq_cp(llama_seq_id src, llama_seq_id dst, llama_pos p0, llama_pos p1) {
+    ensure_open();
     validate_seq_id(src);
     validate_seq_id(dst);
 
@@ -349,14 +371,17 @@ void Context::memory_seq_cp(llama_seq_id src, llama_seq_id dst, llama_pos p0, ll
 }
 
 void Context::memory_seq_keep(llama_seq_id seq_id) {
+    ensure_open();
     validate_seq_id(seq_id);
     llama_memory_seq_keep(llama_get_memory(ctx_), seq_id);
 }
 
-uint32_t Context::n_ctx()     const { return llama_n_ctx(ctx_);     }
-uint32_t Context::n_batch()   const { return llama_n_batch(ctx_);   }
-uint32_t Context::n_ubatch()  const { return llama_n_ubatch(ctx_);  }
-uint32_t Context::n_seq_max() const { return llama_n_seq_max(ctx_); }
-uint32_t Context::n_ctx_seq() const { return llama_n_ctx_seq(ctx_); }
+// Geometry accessors read through ctx_, so they must refuse a closed context too --
+// a health endpoint reading n_ctx during shutdown would otherwise null-deref.
+uint32_t Context::n_ctx()     const { ensure_open(); return llama_n_ctx(ctx_);     }
+uint32_t Context::n_batch()   const { ensure_open(); return llama_n_batch(ctx_);   }
+uint32_t Context::n_ubatch()  const { ensure_open(); return llama_n_ubatch(ctx_);  }
+uint32_t Context::n_seq_max() const { ensure_open(); return llama_n_seq_max(ctx_); }
+uint32_t Context::n_ctx_seq() const { ensure_open(); return llama_n_ctx_seq(ctx_); }
 
 } // namespace ftm

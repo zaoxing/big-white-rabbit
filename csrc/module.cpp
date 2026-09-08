@@ -77,6 +77,10 @@ PYBIND11_MODULE(_freetoken_metal, m) {
              py::arg("tokens"), py::arg("unparse_special") = false)
         .def("is_eog", &ftm::Model::is_eog, py::arg("token"))
         .def("meta_val", &ftm::Model::meta_val, py::arg("key"))
+        .def("apply_chat_template", &ftm::Model::apply_chat_template,
+             py::arg("messages"), py::arg("add_assistant") = true,
+             "Render [(role, content), ...] into a prompt via the model's own template.")
+        .def_property_readonly("chat_template", &ftm::Model::chat_template)
         .def_property_readonly("path",        &ftm::Model::path)
         .def_property_readonly("n_ctx_train", &ftm::Model::n_ctx_train)
         .def_property_readonly("n_embd",      &ftm::Model::n_embd)
@@ -85,8 +89,13 @@ PYBIND11_MODULE(_freetoken_metal, m) {
         .def_property_readonly("size_bytes",  &ftm::Model::size_bytes)
         .def_property_readonly("n_params",    &ftm::Model::n_params)
         .def_property_readonly("desc",        &ftm::Model::desc)
+        .def("close", &ftm::Model::close,
+             "Free the weights now. Close every Context on this model FIRST; required "
+             "for deterministic shutdown (see Model::close in model.h).")
+        .def_property_readonly("closed", &ftm::Model::closed)
         .def("__repr__", [](const ftm::Model & self) {
-            return "<freetoken_mac.Model '" + self.desc() + "'>";
+            return self.closed() ? std::string("<freetoken_mac.Model closed>")
+                                 : "<freetoken_mac.Model '" + self.desc() + "'>";
         });
 
     py::class_<ftm::Batch>(m, "Batch")
@@ -145,5 +154,9 @@ PYBIND11_MODULE(_freetoken_metal, m) {
         .def_property_readonly("n_ubatch",  &ftm::Context::n_ubatch)
         .def_property_readonly("n_seq_max", &ftm::Context::n_seq_max)
         .def_property_readonly("n_ctx_seq", &ftm::Context::n_ctx_seq)
-        .def_property_readonly("kv_unified", &ftm::Context::kv_unified);
+        .def_property_readonly("kv_unified", &ftm::Context::kv_unified)
+        .def("close", &ftm::Context::close,
+             "Release the llama_context and its samplers now. Idempotent; required for "
+             "deterministic server shutdown (see Context::close in context.h).")
+        .def_property_readonly("closed", &ftm::Context::closed);
 }
