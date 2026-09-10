@@ -37,6 +37,7 @@ Context::Context(std::shared_ptr<Model> model, const ContextParams & cp, const S
     lp.n_ubatch        = cp.n_ubatch;
     lp.n_seq_max       = cp.n_seq_max;
     lp.kv_unified      = cp.kv_unified;
+    lp.n_rs_seq        = cp.n_rs_seq;
     lp.flash_attn_type = cp.flash_attn ? LLAMA_FLASH_ATTN_TYPE_AUTO
                                        : LLAMA_FLASH_ATTN_TYPE_DISABLED;
     if (cp.n_threads > 0) {
@@ -327,7 +328,7 @@ void Context::accept_seq(llama_seq_id seq_id, llama_token tok) {
     llama_sampler_accept(seq_sampler(seq_id), tok);
 }
 
-void Context::memory_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+bool Context::memory_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
     ensure_open();
     // llama.h documents `seq_id < 0` as "match any sequence", but the implementation
     // exempts exactly -1: llama_kv_cache::seq_rm asserts
@@ -338,8 +339,10 @@ void Context::memory_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
         validate_seq_id(seq_id);
     }
     // p0/p1 need no guard here: seq_rm clamps negatives to [0, inf) and simply matches
-    // no cells for a range past the end.
-    llama_memory_seq_rm(llama_get_memory(ctx_), seq_id, p0, p1);
+    // no cells for a range past the end. The bool is load-bearing (see the header):
+    // pass it through so a caller that packed past the rewind point can refuse to
+    // proceed on false instead of desyncing into the next decode.
+    return llama_memory_seq_rm(llama_get_memory(ctx_), seq_id, p0, p1);
 }
 
 void Context::memory_seq_cp(llama_seq_id src, llama_seq_id dst, llama_pos p0, llama_pos p1) {
@@ -383,5 +386,6 @@ uint32_t Context::n_batch()   const { ensure_open(); return llama_n_batch(ctx_);
 uint32_t Context::n_ubatch()  const { ensure_open(); return llama_n_ubatch(ctx_);  }
 uint32_t Context::n_seq_max() const { ensure_open(); return llama_n_seq_max(ctx_); }
 uint32_t Context::n_ctx_seq() const { ensure_open(); return llama_n_ctx_seq(ctx_); }
+uint32_t Context::n_rs_seq()  const { ensure_open(); return llama_n_rs_seq(ctx_);  }
 
 } // namespace ftm

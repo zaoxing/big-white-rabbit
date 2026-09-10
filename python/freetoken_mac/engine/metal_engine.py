@@ -17,6 +17,7 @@ from typing import Iterable, Sequence
 from .._freetoken_metal import Batch, Context, Model
 from .batching import AdmissionPolicy, FCFSPolicy, RequestState, StepBudget, StepPlan
 from .config import EngineConfig, RequestParams, StopSequenceFilter
+from .ngram import NgramTable
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,19 @@ class StepOutput:
     piece: str
     finished: bool
     finish_reason: str | None = None
+
+
+@dataclass
+class _VerifyEntry:
+    """One generating request's speculation work for this step: its base row,
+    its draft rows, the drafted tokens, and the KV position the base was
+    packed at (drafts sit at the successive positions)."""
+
+    req: RequestState
+    base_row: int
+    draft_rows: list[int]
+    drafts: list[int]
+    pos_base: int
 
 
 # Floor on how many finished requests stay readable through `state` / `tokens_of` /
@@ -47,6 +61,45 @@ class SeqIdExhausted(RuntimeError):
     """
 
 
+# Architectures whose memory is hybrid attention + recurrent state (mirrors
+# llama.cpp's llm_arch_supports_rs_rollback list). A speculation mismatch
+# rewinds a KV suffix, which on these models needs recurrent-state rollback
+# snapshots (llama n_rs_seq). This list DETECTS known hybrids; the n_rs_seq
+# readback CONFIRMS support (llama.cpp clamps unsupported archs to 0) -- so a
+# future hybrid with rollback support passes without a code change, and only a
+# hybrid with provably no rollback is refused.
+_HYBRID_RECURRENT_ARCHES = frozenset(
+    {
+        "qwen35",
+        "qwen35moe",
+        "qwen4exp",
+        "deepseek4",
+        "nemotron_h",
+        "nemotron_h_moe",
+        "lfm2",
+        "lfm2moe",
+        "bailingmoe3",
+    }
+)
+
+
+def check_speculative_arch(arch: str | None, n_rs_seq: int) -> None:
+    """Refuse speculation on hybrids WITHOUT rollback support (see above).
+
+    Unknown or missing arch strings pass, as do hybrids whose context reports
+    snapshots in effect: only a KNOWN hybrid with provably no rollback is
+    rejected, so neither future attention nor future rollback-capable hybrid
+    architectures are blocked by this list.
+    """
+    if arch in _HYBRID_RECURRENT_ARCHES and n_rs_seq <= 0:
+        raise ValueError(
+            f"speculative decoding is not supported on hybrid architecture "
+            f"{arch!r}: mismatch rewinds need recurrent-state rollback "
+            f"snapshots (llama n_rs_seq), and this context has none in effect "
+            f"(SPEC-speculative-ngram.md T5a)"
+        )
+
+
 class MetalEngine:
     """Continuous-batching engine over a single llama.cpp Metal context."""
 
@@ -60,9 +113,25 @@ class MetalEngine:
     ) -> None:
         self.model = model
         self.config = config or EngineConfig()
+        if self.config.spec_max_drafts < 0:
+            raise ValueError(
+                f"spec_max_drafts must be >= 0; got {self.config.spec_max_drafts}"
+            )
         self.policy: AdmissionPolicy = policy or FCFSPolicy()
         self.default_params = default_params or RequestParams()
-        self.ctx = Context(model, self.config.to_context_params())
+        context_params = self.config.to_context_params()
+        if self.config.speculative:
+            # Mismatch rewinds span at most spec_max_drafts suffix cells; the
+            # recurrent rollback needs at least that many snapshots (T5a).
+            context_params.n_rs_seq = self.config.spec_max_drafts + 1
+        self.ctx = Context(model, context_params)
+        if self.config.speculative:
+            # After allocating the context: fail loud on hybrids whose context
+            # reports no rollback snapshots (llama.cpp clamps unsupported
+            # archs to 0), not mid-generation on the first rewind.
+            check_speculative_arch(
+                model.meta_val("general.architecture"), self.ctx.n_rs_seq
+            )
 
         # Effective geometry only: n_ctx rounded up, n_batch clamped down, per-sequence
         # room = n_ctx_seq (see StepBudget) -- never the requested values.
@@ -92,6 +161,15 @@ class MetalEngine:
         # entry -- and `_advance` retires on ANY failure -- so `set(_stop_filters)` is
         # always a subset of `set(_states)`: a scanner cannot outlive its request.
         self._stop_filters: dict[int, StopSequenceFilter] = {}
+        # N-gram draft tables, one per request. Same ownership story as the
+        # stop filters: engine-owned, invisible to policies, dropped on retire
+        # (and therefore on ANY `_advance`/`_verify` failure). Only populated
+        # when speculation is enabled, so a default engine allocates nothing
+        # extra per request.
+        self._spec_tables: dict[int, NgramTable] = {}
+        # Lifetime counters behind `spec_acceptance_rate` (T4 tunes on these).
+        self.spec_drafted = 0
+        self.spec_accepted = 0
         self._next_request_id = 0
 
     # --- admission --------------------------------------------------------------
@@ -168,6 +246,14 @@ class MetalEngine:
         )
         if rp.stop:
             self._stop_filters[request_id] = StopSequenceFilter(rp.stop)
+        if self.config.speculative:
+            # Seed with the prompt so the first generation steps can already
+            # draft runs the prompt itself contains (repeated instructions,
+            # few-shot examples, boilerplate). Past the try/except above, so a
+            # table here cannot strand a seq_id: `_retire` drops it.
+            table = NgramTable()
+            table.update_stream(tokens)
+            self._spec_tables[request_id] = table
         return request_id
 
     def cancel(self, request_id: int) -> bool:
@@ -202,7 +288,12 @@ class MetalEngine:
                 f"policy planned {plan.n_tokens} tokens but n_batch is {budget.n_batch}"
             )
 
-        rows, commits = self._fill_batch(plan)
+        # Drafts ride spare batch rows only: the policy plans prompt chunks plus
+        # one continuation token per sequence exactly as before, and speculation
+        # fills whatever rows that leaves empty. A disabled engine (or a step
+        # with no spare rows) plans zero drafts, i.e. today's batch exactly.
+        drafts = self._plan_drafts(plan, budget.n_batch - plan.n_tokens)
+        entries, commits = self._fill_batch(plan, drafts)
         # THE decode. Position/prefill bookkeeping is committed only after it returns,
         # so a rejected batch leaves every request exactly where it was.
         self.ctx.decode(self._batch)
@@ -210,13 +301,23 @@ class MetalEngine:
             req.n_prefilled = n_prefilled
             req.n_pos = n_pos
 
-        return [self._advance(req, row) for req, row in rows]
+        outputs: list[StepOutput] = []
+        for entry in entries:
+            if isinstance(entry, _VerifyEntry):
+                outputs.extend(self._verify(entry))
+            else:
+                req, row = entry
+                outputs.append(self._advance(req, row))
+        return outputs
 
     def _fill_batch(
-        self, plan: StepPlan
-    ) -> tuple[list[tuple[RequestState, int]], list[tuple[RequestState, int, int]]]:
+        self, plan: StepPlan, drafts: dict[int, list[int]] | None = None
+    ) -> tuple[
+        list[tuple[RequestState, int] | _VerifyEntry],
+        list[tuple[RequestState, int, int]],
+    ]:
         self._batch.clear()
-        rows: list[tuple[RequestState, int]] = []
+        entries: list[tuple[RequestState, int] | _VerifyEntry] = []
         commits: list[tuple[RequestState, int, int]] = []
 
         for chunk in plan.prefill:
@@ -229,16 +330,34 @@ class MetalEngine:
                 want = is_last_chunk and j == chunk.n_tokens - 1
                 row = self._batch.add(tok, req.n_pos + j, req.seq_id, want)
                 if want:
-                    rows.append((req, row))
+                    entries.append((req, row))
             commits.append((req, end, req.n_pos + chunk.n_tokens))
 
         for request_id in plan.decode:
             req = self._states[request_id]
             assert req.next_token is not None
-            rows.append((req, self._batch.add(req.next_token, req.n_pos, req.seq_id, True)))
-            commits.append((req, req.n_prefilled, req.n_pos + 1))
+            draft_tokens = (drafts or {}).get(request_id, [])
+            if not draft_tokens:
+                entries.append(
+                    (req, self._batch.add(req.next_token, req.n_pos, req.seq_id, True))
+                )
+                commits.append((req, req.n_prefilled, req.n_pos + 1))
+                continue
+            # Base plus drafts at successive positions, logits on every row:
+            # row 0 continues the base token, row k > 0 continues draft k-1.
+            # The commit runs past every packed row; `_verify` rewinds it (and
+            # the KV) to the first mismatch.
+            base_row = self._batch.add(req.next_token, req.n_pos, req.seq_id, True)
+            draft_rows = [
+                self._batch.add(tok, req.n_pos + 1 + k, req.seq_id, True)
+                for k, tok in enumerate(draft_tokens)
+            ]
+            entries.append(
+                _VerifyEntry(req, base_row, draft_rows, draft_tokens, req.n_pos)
+            )
+            commits.append((req, req.n_prefilled, req.n_pos + 1 + len(draft_tokens)))
 
-        return rows, commits
+        return entries, commits
 
     def _advance(self, req: RequestState, row: int) -> StepOutput:
         """Sample one row and account for it, retiring the request if anything fails.
@@ -268,7 +387,18 @@ class MetalEngine:
 
     def _advance_row(self, req: RequestState, row: int) -> StepOutput:
         # Per-sequence chain: this request's params and accepted-token history only.
-        token = self.ctx.sample_seq(req.seq_id, row)
+        return self._advance_token(req, self.ctx.sample_seq(req.seq_id, row))
+
+    def _advance_token(self, req: RequestState, token: int) -> StepOutput:
+        """Account for one already-sampled (or verified) token.
+
+        Split from ``_advance_row`` for speculative decoding: the verify step
+        samples draft rows itself and feeds each accepted token here, so every
+        finish rule below (EOG, stop sequence, cap, context) applies to
+        speculated tokens exactly as it does to normally decoded ones. Callers
+        feeding a token from any source other than this request's own sampler
+        chain must have replayed the chain to match (see ``accept_seq``).
+        """
         if req.params.stop_at_eog and self.model.is_eog(token):
             return self._retire(req, "eog", token=token)
 
@@ -301,11 +431,140 @@ class MetalEngine:
             return self._retire(req, "context", token=token, piece=piece)
         return StepOutput(req.request_id, token, piece, False, None)
 
+    def _plan_drafts(self, plan: StepPlan, spare: int) -> dict[int, list[int]]:
+        """Draft continuations for greedy generating requests from spare rows.
+
+        Read-only with respect to the plan: the policy's tokens are untouched
+        and drafts only fill rows the plan left empty, so prefill keeps its
+        priority. A request drafts only while it is greedy (verification
+        without logits cannot do better than greedy matching), its table
+        predicts something, and its own sequence has room for the extra
+        positions.
+        """
+        drafts: dict[int, list[int]] = {}
+        if not self.config.speculative or spare <= 0:
+            return drafts
+        for request_id in plan.decode:
+            if spare <= 0:
+                break
+            req = self._states.get(request_id)
+            if req is None or req.finished or req.params.temp > 0:
+                continue
+            table = self._spec_tables.get(request_id)
+            if table is None:
+                continue
+            room = self.ctx.n_ctx_seq - req.n_pos - 1
+            allow = min(self.config.spec_max_drafts, spare, room)
+            if allow <= 0:
+                continue
+            history = req.prompt + req.output_tokens
+            context = history[-(table.order - 1) :] if table.order > 1 else []
+            predicted = table.predict(context, allow)
+            if predicted:
+                drafts[request_id] = predicted
+                spare -= len(predicted)
+        return drafts
+
+    def _verify(self, entry: _VerifyEntry) -> list[StepOutput]:
+        """Verify one request's drafts; same retire-on-failure contract as
+        ``_advance`` (a request that fails mid-verify cannot resume: its KV
+        positions are committed and its sampler chain may hold a sampled token
+        the caller never saw)."""
+        try:
+            return self._verify_rows(entry)
+        except BaseException:  # noqa: BLE001 - re-raised; must retire slot on any failure
+            try:
+                self._retire(entry.req, "error")
+            except BaseException:  # noqa: BLE001 - must never mask the real failure
+                pass
+            raise
+
+    def _verify_rows(self, entry: _VerifyEntry) -> list[StepOutput]:
+        req, drafts = entry.req, entry.drafts
+        n_drafts = len(drafts)
+        # Sample every row in order: row 0 continues the base token, row k > 0
+        # continues draft k-1. Sampling accepts into the chain, so a matched
+        # prefix leaves the chain exactly where the accepted output says it is
+        # -- no replay needed. Rows past the first mismatch are never sampled:
+        # they were conditioned on a rejected prefix, and sampling them would
+        # pollute the chain with tokens the request must not keep.
+        accepted: list[int] = []
+        matched = 0
+        for k in range(n_drafts + 1):
+            row = entry.base_row if k == 0 else entry.draft_rows[k - 1]
+            token = self.ctx.sample_seq(req.seq_id, row)
+            accepted.append(token)
+            if k < n_drafts:
+                if token != drafts[k]:
+                    break
+                matched += 1
+            # k == n_drafts is the bonus row past the last draft: conditioned
+            # on a fully matched prefix, so always valid output.
+        self.spec_drafted += n_drafts
+        self.spec_accepted += matched
+        # The commit ran n_pos past every packed row; the accepted tokens only
+        # fill positions pos_base+1 .. pos_base+len(accepted) (the base row
+        # sits at pos_base, already covered by the pre-step n_pos). Rewind the
+        # KV from the last accepted position on any mismatch: that cell holds
+        # the rejected draft, and the following step re-decodes the accepted
+        # token there (overwriting it). The stale cell must go regardless --
+        # llama requires each decode to start strictly consecutive with the KV
+        # (Y = X + 1), so it aborts the next decode otherwise. A full match
+        # needs no rewind: the KV holds exactly the accepted tokens.
+        final_n_pos = entry.pos_base + len(accepted)
+        if len(accepted) < n_drafts + 1:
+            if not self.ctx.memory_seq_rm(req.seq_id, final_n_pos, -1):
+                # The packed rows past final_n_pos are stale, and so is every
+                # position check from here on: retire LOUD via _verify's
+                # contract rather than desync into the next decode's abort.
+                raise RuntimeError(
+                    f"speculative rewind failed for request {req.request_id}: "
+                    f"partial KV removal of [{final_n_pos}, inf) unsupported "
+                    f"(hybrid without rollback snapshots?)"
+                )
+        # Every accepted token goes through the identical finish logic as a
+        # normally decoded one; n_pos advances per token so the context-full
+        # check sees the same values as the plain path. Stop feeding at the
+        # first token that ends the request (the slot is freed, so later
+        # tokens have nowhere to go).
+        self._feed_table(req, accepted)
+        req.n_pos = entry.pos_base + 1
+        outputs: list[StepOutput] = []
+        for token in accepted:
+            req.n_pos += 1
+            out = self._advance_token(req, token)
+            outputs.append(out)
+            if out.finished:
+                break
+        # The per-token increments above leave n_pos one past the last accepted
+        # position (each check reads position+1, as on the plain path); settle
+        # it on the next write position, which the following step decodes at.
+        req.n_pos = final_n_pos
+        return outputs
+
+    def _feed_table(self, req: RequestState, new_tokens: Sequence[int]) -> None:
+        """Record the pairs ending in freshly accepted tokens.
+
+        Only the window that can contain new pairs is fed -- the trailing
+        order-1 history plus the new tokens. Re-feeding older pairs would cost
+        O(history) per step, i.e. throughput decaying with context length.
+        """
+        table = self._spec_tables.get(req.request_id)
+        if table is None or not new_tokens:
+            return
+        prefix = (
+            (req.prompt + req.output_tokens)[-(table.order - 1) :]
+            if table.order > 1
+            else []
+        )
+        table.update_stream([*prefix, *new_tokens])
+
     def _retire(self, req: RequestState, reason: str, token: int = -1, piece: str = "") -> StepOutput:
         req.finished = True
         req.finish_reason = reason
         req.next_token = None
         self._stop_filters.pop(req.request_id, None)
+        self._spec_tables.pop(req.request_id, None)
         # Off the hot path and into the read window, before anything that can raise: a
         # failed KV or sampler reset must not leave a finished request being scanned by
         # every subsequent decode (or, worse, keeping `has_work` true forever).
@@ -388,6 +647,14 @@ class MetalEngine:
 
     def text_of(self, request_id: int) -> str:
         return self.model.detokenize(self._lookup(request_id).output_tokens)
+
+    @property
+    def spec_acceptance_rate(self) -> float | None:
+        """Fraction of drafted tokens the target confirmed, or None before any
+        draft has been verified."""
+        if self.spec_drafted == 0:
+            return None
+        return self.spec_accepted / self.spec_drafted
 
     def drain(self, max_steps: int = 100_000) -> Iterable[StepOutput]:
         """Step until nothing is in flight, yielding every token produced."""

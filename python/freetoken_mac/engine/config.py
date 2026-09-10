@@ -41,6 +41,12 @@ class EngineConfig:
     # One shared KV buffer instead of one stream per sequence. Off = llama.cpp's own
     # default; on is what a partial-range ctx.memory_seq_cp (prefix fork) needs.
     kv_unified: bool = False
+    # Greedy n-gram speculative decoding (SPEC-speculative-ngram.md). Off by
+    # default: drafts cost batch rows, which only pays when the acceptance
+    # rate is high. Greedy requests only; non-greedy always takes the plain
+    # path (verification without logits cannot beat greedy).
+    speculative: bool = False
+    spec_max_drafts: int = 4
 
     def to_context_params(self) -> ContextParams:
         cp = ContextParams()
