@@ -81,31 +81,26 @@ already issues per step.
       27B natural + spec ABORTED pre-fix (inclusive-rewind fix + all-wrong
       regression test in `d6e7061`); post-fix the blocker is structural (hybrid
       rewind needs n_rs_seq), so 27B+spec now raises ValueError at construction.
-- [ ] T5a (M, PROPOSED -- first C++ change, needs human approval): rewind
-      foundation. `ContextParams.n_rs_seq` (0 = today) -> `lp.n_rs_seq`;
-      `memory_seq_rm` surfaces failure (throw on false -- a silent desync is
-      abort-class); new `n_rs_seq()` readback getter. Engine: when
-      `speculative=True`, request `n_rs_seq = spec_max_drafts + 1`; replace the
-      arch denylist with a capability check (denylist detects known hybrids,
-      readback confirms support -- a future hybrid with rollback support just
-      works). Rebuild extension in worktree, suite green. Validate: 27B
-      natural + n-gram works (the T4 blocker), report rate + snapshot memory
-      cost on qwen35. Fresh 3-attempt budget.
-- [ ] T5b (L, PROPOSED -- needs human approval, after T5a): native MTP wiring.
-      `ModelParams.load_mtp` (loads `blk.64.nextn.*`; verified present in the
-      27B AND the 4B GGUFs); MTP draft context (`LLAMA_CONTEXT_TYPE_MTP`) with
-      nextn embedding set/get bindings; engine `MtpDrafter` (target decodes
-      base, hook harvests hidden states, draft context autoregresses D drafts,
-      target verifies the block reusing `_verify_rows` + rewind machinery);
-      config `mtp: bool = False, mtp_max_drafts: int = 4` (mutually exclusive
-      with `speculative` in Phase 1 -- combining is an upstream experiment,
-      not ours). Tests on the 4B (fast iteration, has MTP head): invariant
-      mtp on/off identical, calls reduction, acceptance counters; 27B
-      benchmark last. Watch items: our pin predates the Metal
-      duplicate-buffer fix (MTP head may reopen the full GGUF buffer -- verify
-      early, port fix or trimmed GGUF if hit); upstream reports MTP-on-Metal
-      anywhere from -24% to +2x, so the benchmark GATES adoption, code stays
-      default-off either way. Fresh 3-attempt budget.
+- [x] T5a (M): rewind foundation. DONE commit `6acbe9c`, verifier APPROVE.
+      `n_rs_seq` plumbed, `seq_rm` verdict surfaced (bool + raise at rewind
+      site), capability gate (detect hybrid via list, confirm via readback).
+      220 green. 27B validation: readback 5 as designed; repetitive 8.5->12.8
+      tok/s (64->14 calls, rate 1.0); natural now COMPLETES identical
+      (was: abort), 64 calls, drafted 3 / accepted 0. Deviation from proposal:
+      bool-return + raise-at-callsite instead of blanket C++ throw (safer for
+      the retire hot path).
+- [x] T5b (L): native MTP verdict -- MEASURED via upstream `llama-server`
+      (built from our pin in `build/upstream/`, no repo source changes), and
+      DECLINED for engine integration. 4B: natural 51.5->59.6 tok/s (1.16x),
+      repetitive 50.8->64.9 (1.28x, acceptance 1.0). 27B: repetitive
+      11.0->14.9 (1.35x, acceptance 1.0) but natural 11.1->9.2 (0.83x LOSS,
+      acceptance 0.47) -- reproduces upstream issue #23752 on this M1 Max.
+      Our n-gram matches MTP where MTP wins (27B rep ~13-15 tok/s both) and
+      never loses (natural parity). Conclusion: MTP wiring (load_mtp + MTP
+      draft ctx + embd batches + nextn hooks + continuous-batching adaptation
+      of upstream's contiguous-batch state machine) costs more than it can
+      return on this hardware. Keep n-gram; revisit if Metal MTP overhead
+      improves upstream. No OOM seen (duplicate-buffer watch item moot).
 - [ ] T5 (S): verifier pass + `STATE.md` evidence (per item above).
 
 L2 rules: worktree per attempt, <= 3 attempts per item, verifier sub-agent after
