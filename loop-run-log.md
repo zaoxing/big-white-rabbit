@@ -90,3 +90,17 @@ Append one entry per run. Prune entries older than 30 days.
   "outcome": "report-only"
 }
 ```
+- 2026-09-10T16:15:53Z — daily-triage — foundry/fleet/memory scaffold — 3 found (gate.yaml, foundry, memory/fleet), 3 staged via temp dir, 0 escalations, ~6k tokens, 120s
+
+```json
+{
+  "run_id": "2026-09-10T16:15:53Z",
+  "pattern": "daily-triage",
+  "duration_s": 120,
+  "items_found": 3,
+  "actions_taken": 3,
+  "escalations": 0,
+  "tokens_estimate": 6000,
+  "outcome": "fix-proposed"
+}
+```

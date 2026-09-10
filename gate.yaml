@@ -1,0 +1,29 @@
+# Machine-readable twin of docs/safety.md + loop-constraints.md.
+# Human approval required before push/merge; loop must escalate on denylist hit.
+version: 1
+
+denylist:
+  - "**/.env"
+  - "**/.env.*"
+  - "**/secrets/**"
+  - "**/credentials/**"
+  - "**/*_key*"
+  - "**/*_secret*"
+  - "**/.terraform/**"
+  - "**/k8s/production/**"
+  - "**/migrations/**"
+  - "**/auth/**"
+  - "**/payments/**"
+  - "**/billing/**"
+  - ".loop/**"
+  - "models/*.gguf"
+  - "build/**"
+  - ".venv/**"
+
+# Escalate instead of auto-merging when a change touches more than this many files.
+maxFiles: 10
+
+# --action auto-merge only proceeds if every changed path matches one of these.
+autoMergeAllowlist:
+  - "docs/**"
+  - "**/*.md"
