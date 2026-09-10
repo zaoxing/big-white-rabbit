@@ -56,7 +56,9 @@ PYBIND11_MODULE(_freetoken_metal, m) {
         .def_readwrite("n_threads_batch", &ftm::ContextParams::n_threads_batch)
         .def_readwrite("flash_attn",      &ftm::ContextParams::flash_attn)
         // Unified KV buffer: required for a partial-range memory_seq_cp (prefix fork).
-        .def_readwrite("kv_unified",      &ftm::ContextParams::kv_unified);
+        .def_readwrite("kv_unified",      &ftm::ContextParams::kv_unified)
+        // Recurrent-state rollback snapshots for partial memory_seq_rm on hybrids.
+        .def_readwrite("n_rs_seq",        &ftm::ContextParams::n_rs_seq);
 
     py::class_<ftm::SamplerParams>(m, "SamplerParams")
         .def(py::init<>())
@@ -144,7 +146,10 @@ PYBIND11_MODULE(_freetoken_metal, m) {
         // sample_last()'s precondition, exposed so a caller can ask instead of catching.
         .def_property_readonly("any_row_has_logits", &ftm::Context::any_row_has_logits)
         .def("memory_seq_rm", &ftm::Context::memory_seq_rm,
-             py::arg("seq_id"), py::arg("p0") = -1, py::arg("p1") = -1)
+             py::arg("seq_id"), py::arg("p0") = -1, py::arg("p1") = -1,
+             "Drop a KV range; returns llama.cpp's verdict. A partial rm can "
+             "report False (hybrid without rollback snapshots) -- callers that "
+             "packed past the rewind point must check.")
         .def("memory_seq_cp", &ftm::Context::memory_seq_cp,
              py::arg("src"), py::arg("dst"), py::arg("p0") = -1, py::arg("p1") = -1)
         .def("memory_seq_keep", &ftm::Context::memory_seq_keep, py::arg("seq_id"))
@@ -154,6 +159,7 @@ PYBIND11_MODULE(_freetoken_metal, m) {
         .def_property_readonly("n_ubatch",  &ftm::Context::n_ubatch)
         .def_property_readonly("n_seq_max", &ftm::Context::n_seq_max)
         .def_property_readonly("n_ctx_seq", &ftm::Context::n_ctx_seq)
+        .def_property_readonly("n_rs_seq", &ftm::Context::n_rs_seq)
         .def_property_readonly("kv_unified", &ftm::Context::kv_unified)
         .def("close", &ftm::Context::close,
              "Release the llama_context and its samplers now. Idempotent; required for "

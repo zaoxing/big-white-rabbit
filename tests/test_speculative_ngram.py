@@ -118,20 +118,31 @@ def test_constructor_guards() -> None:
         NgramTable(max_entries=0)
 
 
-def test_spec_arch_gate_rejects_known_hybrids() -> None:
-    """Hybrid/recurrent architectures must fail loud (their partial rewinds
-    cannot work without n_rs_seq plumbing): T4 blocker regression test."""
+def test_context_params_rs_default_zero() -> None:
+    """Rollback snapshots stay off unless the engine asks (T5a)."""
+    from freetoken_mac import ContextParams
+
+    params = ContextParams()
+    assert params.n_rs_seq == 0
+    params.n_rs_seq = 5
+    assert params.n_rs_seq == 5
+
+
+def test_spec_arch_gate_rejects_hybrids_without_rollback() -> None:
+    """Known hybrids with zero snapshots in effect must fail loud (their
+    partial rewinds cannot work): T4 blocker regression test."""
     from freetoken_mac.engine.metal_engine import check_speculative_arch
 
     for arch in ("qwen35", "qwen35moe", "lfm2", "deepseek4"):
         with pytest.raises(ValueError, match="hybrid"):
-            check_speculative_arch(arch)
+            check_speculative_arch(arch, 0)
 
 
-def test_spec_arch_gate_allows_attention_and_unknown() -> None:
-    """Only KNOWN hybrids are rejected: attention architectures and missing /
-    future arch strings must never be blocked by this list."""
+def test_spec_arch_gate_allows_supported_and_unknown() -> None:
+    """Hybrids WITH snapshots pass (capability, not denylist, gates), as do
+    attention architectures and missing / future arch strings."""
     from freetoken_mac.engine.metal_engine import check_speculative_arch
 
+    check_speculative_arch("qwen35", 5)
     for arch in ("qwen2", "qwen3", "llama", None, "", "something-new"):
-        check_speculative_arch(arch)
+        check_speculative_arch(arch, 0)

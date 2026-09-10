@@ -64,10 +64,10 @@ class SeqIdExhausted(RuntimeError):
 # Architectures whose memory is hybrid attention + recurrent state (mirrors
 # llama.cpp's llm_arch_supports_rs_rollback list). A speculation mismatch
 # rewinds a KV suffix, which on these models needs recurrent-state rollback
-# snapshots (llama n_rs_seq) -- and this binding neither sets n_rs_seq (so it
-# is 0) nor checks seq_rm's failure bool (so a failed rewind desyncs the KV
-# and aborts the NEXT decode). Until T5 plumbs n_rs_seq through, speculation
-# on these architectures fails loud here instead of deep in generation.
+# snapshots (llama n_rs_seq). This list DETECTS known hybrids; the n_rs_seq
+# readback CONFIRMS support (llama.cpp clamps unsupported archs to 0) -- so a
+# future hybrid with rollback support passes without a code change, and only a
+# hybrid with provably no rollback is refused.
 _HYBRID_RECURRENT_ARCHES = frozenset(
     {
         "qwen35",
@@ -83,18 +83,20 @@ _HYBRID_RECURRENT_ARCHES = frozenset(
 )
 
 
-def check_speculative_arch(arch: str | None) -> None:
-    """Refuse speculation on hybrid/recurrent architectures (see above).
+def check_speculative_arch(arch: str | None, n_rs_seq: int) -> None:
+    """Refuse speculation on hybrids WITHOUT rollback support (see above).
 
-    Unknown or missing arch strings pass: only KNOWN hybrids are rejected, so
-    a future attention architecture is never blocked by this list.
+    Unknown or missing arch strings pass, as do hybrids whose context reports
+    snapshots in effect: only a KNOWN hybrid with provably no rollback is
+    rejected, so neither future attention nor future rollback-capable hybrid
+    architectures are blocked by this list.
     """
-    if arch in _HYBRID_RECURRENT_ARCHES:
+    if arch in _HYBRID_RECURRENT_ARCHES and n_rs_seq <= 0:
         raise ValueError(
             f"speculative decoding is not supported on hybrid architecture "
             f"{arch!r}: mismatch rewinds need recurrent-state rollback "
-            f"(llama n_rs_seq), which this binding does not plumb through yet "
-            f"(SPEC-speculative-ngram.md T4 blocker, T5 proposal)"
+            f"snapshots (llama n_rs_seq), and this context has none in effect "
+            f"(SPEC-speculative-ngram.md T5a)"
         )
 
 
@@ -115,13 +117,21 @@ class MetalEngine:
             raise ValueError(
                 f"spec_max_drafts must be >= 0; got {self.config.spec_max_drafts}"
             )
-        if self.config.speculative:
-            # Before allocating a context: fail loud on hybrids (see
-            # _HYBRID_RECURRENT_ARCHES), not mid-generation.
-            check_speculative_arch(model.meta_val("general.architecture"))
         self.policy: AdmissionPolicy = policy or FCFSPolicy()
         self.default_params = default_params or RequestParams()
-        self.ctx = Context(model, self.config.to_context_params())
+        context_params = self.config.to_context_params()
+        if self.config.speculative:
+            # Mismatch rewinds span at most spec_max_drafts suffix cells; the
+            # recurrent rollback needs at least that many snapshots (T5a).
+            context_params.n_rs_seq = self.config.spec_max_drafts + 1
+        self.ctx = Context(model, context_params)
+        if self.config.speculative:
+            # After allocating the context: fail loud on hybrids whose context
+            # reports no rollback snapshots (llama.cpp clamps unsupported
+            # archs to 0), not mid-generation on the first rewind.
+            check_speculative_arch(
+                model.meta_val("general.architecture"), self.ctx.n_rs_seq
+            )
 
         # Effective geometry only: n_ctx rounded up, n_batch clamped down, per-sequence
         # room = n_ctx_seq (see StepBudget) -- never the requested values.
@@ -503,7 +513,15 @@ class MetalEngine:
         # needs no rewind: the KV holds exactly the accepted tokens.
         final_n_pos = entry.pos_base + len(accepted)
         if len(accepted) < n_drafts + 1:
-            self.ctx.memory_seq_rm(req.seq_id, final_n_pos, -1)
+            if not self.ctx.memory_seq_rm(req.seq_id, final_n_pos, -1):
+                # The packed rows past final_n_pos are stale, and so is every
+                # position check from here on: retire LOUD via _verify's
+                # contract rather than desync into the next decode's abort.
+                raise RuntimeError(
+                    f"speculative rewind failed for request {req.request_id}: "
+                    f"partial KV removal of [{final_n_pos}, inf) unsupported "
+                    f"(hybrid without rollback snapshots?)"
+                )
         # Every accepted token goes through the identical finish logic as a
         # normally decoded one; n_pos advances per token so the context-full
         # check sees the same values as the plain path. Stop feeding at the

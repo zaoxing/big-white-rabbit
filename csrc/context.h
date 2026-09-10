@@ -37,6 +37,13 @@ struct ContextParams {
     // implements that for the WHOLE buffer, so a partial-range copy is legal only when
     // this is true. See Context::memory_seq_cp.
     bool     kv_unified      = false;
+    // Recurrent-state snapshots per sequence for partial rollback
+    // (llama_context_params.n_rs_seq, EXPERIMENTAL). 0 = no rollback: partial
+    // memory_seq_rm on hybrid attention+recurrent models then FAILS (it returns
+    // false). Needed by speculative decoding's mismatch rewind whenever the
+    // target is a hybrid (e.g. qwen35); pure-attention models rewind fine at 0.
+    // Costs memory: recurrent tensors widen to (1 + n_rs_seq) snapshot groups.
+    uint32_t n_rs_seq        = 0;
 };
 
 struct SamplerParams {
@@ -109,7 +116,13 @@ public:
     // cache is built on (llama_memory_seq_rm, formerly llama_kv_cache_seq_rm).
     // `seq_id == -1` is llama.h's documented "all sequences" wildcard; any other
     // out-of-range id throws (it would otherwise trip a GGML_ASSERT and abort).
-    void memory_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1);
+    // Returns llama.cpp's verdict. A PARTIAL-range rm can return FALSE -- notably
+    // on hybrid models whose recurrent state has no rollback snapshots (see
+    // ContextParams::n_rs_seq) -- in which case NOTHING was removed (the hybrid
+    // path tries the recurrent cache first and bails before touching attention).
+    // Callers that packed positions past the rewind point MUST check: proceeding
+    // on false desyncs every later position check and aborts the next decode.
+    bool memory_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1);
     // Copy [p0, p1) of `src` into `dst` -- the fork primitive behind prefix reuse and
     // n>1 completions off one prefill (llama_memory_seq_cp). A PARTIAL range between
     // two different sequences requires kv_unified (see ContextParams::kv_unified) and
@@ -144,6 +157,10 @@ public:
     // sequence by a factor of n_seq_max. Budgeting against n_ctx() admits prompts that
     // only fail later, mid-decode, with a KV-slot error.
     uint32_t n_ctx_seq() const;
+    // Recurrent-state snapshots actually in effect (llama_n_rs_seq). llama.cpp
+    // clamps a nonzero request to 0 on architectures without rollback support,
+    // so this readback -- not the request -- is what a caller gates on.
+    uint32_t n_rs_seq() const;
     // Whether this context was built with a unified KV buffer; memory_seq_cp's
     // range guard consults it, and callers can too.
     bool kv_unified() const { return kv_unified_; }

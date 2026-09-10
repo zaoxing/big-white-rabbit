@@ -163,3 +163,17 @@ def test_all_wrong_drafts_still_identical(
     assert engine.spec_accepted < engine.spec_drafted
     assert engine.spec_acceptance_rate is not None
     assert engine.ctx.decode_calls <= plain.ctx.decode_calls
+
+
+def test_speculative_engine_on_attention_needs_no_snapshots(
+    model: ftm.Model,
+) -> None:
+    """The attention test model passes the capability gate either way, and its
+    readback is 0: llama.cpp clamps n_rs_seq on architectures without
+    recurrent state (snapshots only exist for recurrent memory), while partial
+    removes on attention KV always succeed. Hybrid readback is covered by the
+    27B validation runs (SPEC T5a evidence), not the fast suite."""
+    spec = MetalEngine(model, EngineConfig(n_ctx=512, n_seq_max=1, speculative=True))
+    assert spec.ctx.n_rs_seq == 0
+    plain = MetalEngine(model, EngineConfig(n_ctx=512, n_seq_max=1))
+    assert plain.ctx.n_rs_seq == 0
