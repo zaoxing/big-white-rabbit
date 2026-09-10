@@ -25,8 +25,9 @@ from fastapi.responses import StreamingResponse
 
 from .._freetoken_metal import Model
 from ..engine.async_engine import AsyncEngine
-from ..engine.config import RequestParams
+from ..engine.config import RequestParams, StopSequenceFilter, normalize_stops
 from . import anthropic_schemas as A
+from .schemas import max_tokens_error
 from .tools import (
     ParsedToolCall,
     ToolCallStreamParser,
@@ -38,16 +39,9 @@ from .tools import (
     tool_names,
 )
 
-# The engine's own retirement reasons -> Anthropic's stop_reason vocabulary. Anthropic
-# admits end_turn / max_tokens / stop_sequence / tool_use; anything else would be
-# rejected by a validating SDK. "tool_use" is decided by the parse, not the engine, so
-# it is applied after this mapping.
-_STOP_REASONS = {
-    "eog": "end_turn",
-    "length": "max_tokens",
-    "context": "max_tokens",
-    "cancelled": "end_turn",
-}
+# Single source — see server/reasons.py. Re-exported so
+# `from server.anthropic_api import _STOP_REASONS` keeps working.
+from .reasons import STOP_REASONS as _STOP_REASONS  # noqa: F401
 
 
 def _system_text(system: str | list[dict[str, Any]] | None) -> str:
@@ -203,14 +197,15 @@ def _parsing_names(
 
 
 def _request_params(req: A.MessagesRequest) -> RequestParams:
-    params = RequestParams(max_tokens=req.max_tokens)
-    if req.temperature is not None:
-        params.temp = req.temperature
-    if req.top_p is not None:
-        params.top_p = req.top_p
-    if req.top_k is not None:
-        params.top_k = req.top_k
-    return params
+    from .params import build_params
+
+    return build_params(
+        max_tokens=req.max_tokens,
+        stop=normalize_stops(req.stop_sequences),
+        temperature=req.temperature,
+        top_p=req.top_p,
+        top_k=req.top_k,
+    )
 
 
 def _input_object(call: ParsedToolCall) -> dict[str, Any]:
@@ -242,8 +237,13 @@ def register_anthropic_routes(
     async def create_message(req: A.MessagesRequest, http_request: Request):
         if not req.messages:
             raise HTTPException(status_code=400, detail="messages must not be empty")
-        if req.max_tokens <= 0:
-            raise HTTPException(status_code=400, detail="max_tokens must be positive")
+        # The same rule the OpenAI surface applies, from the same implementation: two
+        # copies of "the cap must be positive" would be free to drift, which is exactly
+        # how the two surfaces came to disagree about it (this route 400'd; the other
+        # served a one-token 200). The status stays 400, as it has always been here.
+        cap_error = max_tokens_error(("max_tokens", req.max_tokens))
+        if cap_error is not None:
+            raise HTTPException(status_code=400, detail=cap_error)
 
         pairs = _message_pairs(req)
         if not pairs:
@@ -259,32 +259,58 @@ def register_anthropic_routes(
         prompt = render_prompt(pairs)
         n_prompt = len(model.tokenize(prompt, add_special=True, parse_special=True))
 
+        params = _request_params(req)
         try:
-            request_id = await async_engine.submit(prompt, _request_params(req))
+            request_id = await async_engine.submit(prompt, params)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+        # Read back off the params the ENGINE was given, so the sequences the engine
+        # stops on and the ones the wire truncates on cannot be two different lists.
+        stops = params.stop
         if req.stream:
             return StreamingResponse(
-                _stream(async_engine, request_id, model_name, known, n_prompt, http_request),
+                _stream(
+                    async_engine,
+                    request_id,
+                    model_name,
+                    known,
+                    n_prompt,
+                    http_request,
+                    stops,
+                ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
 
+        # Same filter, same pieces, same order as the streaming path below: that is what
+        # makes the assembled body equal the streamed text rather than resemble it.
+        stopper = StopSequenceFilter(stops)
         try:
-            pieces: list[str] = []
+            parts: list[str] = []
+            n_completion = 0
             reason = "eog"
             async for out in async_engine.stream(request_id):
-                pieces.append(out.piece)
+                if await http_request.is_disconnected():
+                    await async_engine.cancel(request_id)
+                    break
+                if not (out.finished and out.piece == "" and out.finish_reason == "eog"):
+                    n_completion += 1
+                emittable, hit = stopper.push(out.piece)
+                parts.append(emittable)
+                if hit:
+                    reason = "stop_sequence"
+                    break  # `release` cancels anything still in flight
                 if out.finished:
                     reason = out.finish_reason or "eog"
+            else:
+                parts.append(stopper.flush())
         finally:
             async_engine.release(request_id)
 
-        n_completion = len(pieces)
-        raw = "".join(pieces)
+        raw = "".join(parts)
         try:
             parsed = parse_tool_calls(raw, known, id_factory=A.new_tool_use_id)
         except Exception:  # noqa: BLE001 - a parse failure must degrade, not 500
@@ -310,6 +336,10 @@ def register_anthropic_routes(
             content=blocks,
             model=model_name,
             stop_reason=stop_reason,
+            # Which sequence matched, the field Anthropic clients read to learn which
+            # delimiter ended the turn. Only ever set together with the matching
+            # stop_reason: a turn that ended as tool_use did not end at a delimiter.
+            stop_sequence=stopper.matched if stop_reason == "stop_sequence" else None,
             usage=A.Usage(input_tokens=n_prompt, output_tokens=n_completion),
         )
 
@@ -321,6 +351,7 @@ async def _stream(
     known: set[str] | None,
     n_prompt: int,
     http_request: Request,
+    stops: tuple[str, ...] = (),
 ) -> AsyncIterator[bytes]:
     """Emit the Anthropic event sequence.
 
@@ -334,12 +365,16 @@ async def _stream(
     """
     message_id = A.new_message_id()
     parser = ToolCallStreamParser(known, id_factory=A.new_tool_use_id)
+    # Upstream of the tool parser, for the reason spelled out in app._sse: a stop
+    # sequence is defined over the model's raw output (which is what the engine scans),
+    # and filtering before parsing means the parser never holds a byte the client must
+    # not receive.
+    stopper = StopSequenceFilter(stops)
 
     index = 0
     text_open = False
     n_completion = 0
     stop_reason = "end_turn"
-    saw_tool_use = False
 
     try:
         yield A.sse(
@@ -394,11 +429,13 @@ async def _stream(
                 await engine.cancel(request_id)
                 return
 
-            n_completion += 1
+            if not (out.finished and out.piece == "" and out.finish_reason == "eog"):
+                n_completion += 1
+            piece, hit = stopper.push(out.piece)
             try:
-                text, calls = parser.push(out.piece)
+                text, calls = parser.push(piece)
             except Exception:  # noqa: BLE001 - degrade to raw text
-                text, calls = out.piece, []
+                text, calls = piece, []
 
             if text:
                 if not text_open:
@@ -422,16 +459,29 @@ async def _stream(
                 for frame in emit_call(call, index):
                     yield frame
                 index += 1
-                saw_tool_use = True
 
+            if hit:
+                # Through the table, as the engine's own reason is: one name for one
+                # condition, whichever layer noticed it.
+                stop_reason = _STOP_REASONS["stop_sequence"]
+                break  # `release` in the finally cancels anything still in flight
             if out.finished:
                 stop_reason = _STOP_REASONS.get(out.finish_reason or "eog", "end_turn")
 
-        # Flush whatever the parser was holding back (a partial tag that never completed).
+        # Release the tail: first whatever the stop filter withheld for a match that
+        # never completed, then whatever the tool parser is still holding (a partial tag
+        # that never completed). Filter before parser here too, so the last bytes go
+        # through the same two stages in the same order as every byte before them.
         try:
-            tail, calls = parser.flush()
+            held = stopper.flush()
+        except Exception:  # noqa: BLE001 - a held tail must not tear down the response
+            held = ""
+        try:
+            tail, calls = parser.push(held)
+            flushed, more = parser.flush()
+            tail, calls = tail + flushed, calls + more
         except Exception:  # noqa: BLE001
-            tail, calls = "", []
+            tail, calls = held, []
         if tail:
             if not text_open:
                 yield open_text()
@@ -452,22 +502,28 @@ async def _stream(
             for frame in emit_call(call, index):
                 yield frame
             index += 1
-            saw_tool_use = True
 
         # No block at all (empty generation): Anthropic still sends one text block.
-        if index == 0 and not saw_tool_use:
+        if index == 0 and parser.n_calls == 0:
             yield open_text()
             yield A.sse(
                 "content_block_stop", A.ContentBlockStopEvent(index=0).model_dump()
             )
 
-        if saw_tool_use:
+        if parser.n_calls:
             stop_reason = "tool_use"
 
         yield A.sse(
             "message_delta",
             A.MessageDeltaEvent(
-                delta=A.MessageDeltaBody(stop_reason=stop_reason),
+                delta=A.MessageDeltaBody(
+                    stop_reason=stop_reason,
+                    # As in the non-streaming body: named only when the delimiter is
+                    # what ended the turn.
+                    stop_sequence=(
+                        stopper.matched if stop_reason == "stop_sequence" else None
+                    ),
+                ),
                 usage={"output_tokens": n_completion},
             ).model_dump(),
         )

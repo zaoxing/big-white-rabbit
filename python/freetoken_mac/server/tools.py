@@ -35,6 +35,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from ..engine.config import partial_stop_len
+
 # --- the format, verbatim from Qwen2.5's chat_template ------------------------------
 
 TOOLS_PREFIX = (
@@ -282,11 +284,13 @@ def _partial_prefix_len(buf: str, token: str) -> int:
     Tokenisers split `<tool_call>` across pieces (`<tool`, `_call`, `>`), so a streaming
     parser that decided on each piece in isolation would leak the opening tag into
     `content` and then fail to recognise the call.
+
+    The arithmetic is `engine.config.partial_stop_len`, which stop-sequence detection
+    needs for exactly the same reason against a different set of strings. One
+    implementation, so the two hold-back decisions cannot drift; the name stays because
+    what it means *here* is a partial tag, not a partial delimiter.
     """
-    for k in range(min(len(buf), len(token) - 1), 0, -1):
-        if buf.endswith(token[:k]):
-            return k
-    return 0
+    return partial_stop_len(buf, (token,))
 
 
 def _load_call_object(body: str) -> dict[str, Any] | None:

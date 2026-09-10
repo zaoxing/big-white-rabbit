@@ -349,16 +349,17 @@ def test_prompt_injection_groups_consecutive_tool_results(model: ftm.Model) -> N
         "<tool_response>\n13:05\n</tool_response>",
     ]
 
-    # Without `tools` this is not a tool exchange at all: Phase 2 flattening, untouched.
+    # Without `tools` but WITH tool history, the history is still a tool
+    # exchange — a follow-up turn may omit the declaration but the prior
+    # assistant/tool turns must still be rendered as <tool_response> so the
+    # model sees the same shape it was trained on. This fixes the
+    # OpenAI/Anthropic divergence (see backlog).
     plain = ChatCompletionRequest(
         model="local", messages=[m.model_dump() for m in req.messages]
     )
-    assert [r for r, _ in _message_pairs(plain)] == [
-        "user",
-        "assistant",
-        "tool",
-        "tool",
-    ]
+    plain_pairs = _message_pairs(plain)
+    assert [r for r, _ in plain_pairs] == ["user", "assistant", "user"]
+    assert plain_pairs[2][1] == pairs[2][1]  # same grouping as with tools
 
 
 # ===================================================================================

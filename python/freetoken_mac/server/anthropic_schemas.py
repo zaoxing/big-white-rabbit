@@ -222,7 +222,7 @@ class MessageStopEvent(BaseModel):
 def sse(event_name: str, payload: dict[str, Any]) -> bytes:
     """One Anthropic SSE frame: a named event plus its JSON data.
 
-    The `event:` line is load-bearing here, unlike the OpenAI stream — the SDK dispatches
+    The `event:` line is load-bearing here, unlike the OpenAI stream -- the SDK dispatches
     on the event name, so omitting it yields a stream that parses as JSON but decodes to
     nothing.
     """

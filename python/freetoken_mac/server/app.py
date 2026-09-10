@@ -18,12 +18,19 @@ import json
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
+
+from .anthropic_api import register_anthropic_routes
 
 from .._freetoken_metal import Model
 from ..engine.async_engine import AsyncEngine
-from ..engine.config import EngineConfig, RequestParams
+from ..engine.config import (
+    EngineConfig,
+    RequestParams,
+    StopSequenceFilter,
+    normalize_stops,
+)
 from ..engine.metal_engine import MetalEngine
 from .schemas import (
     ChatCompletion,
@@ -56,16 +63,10 @@ from .tools import (
 
 DEFAULT_MAX_TOKENS = 512
 
-# The engine reports why a request retired in its own vocabulary; the OpenAI schema
-# admits only stop / length / tool_calls / content_filter, and an SDK client validating
-# the field will reject anything else. Map at the protocol boundary rather than
-# renaming the engine's reasons, which are more precise and worth keeping internally.
-_FINISH_REASONS = {
-    "eog": "stop",        # model emitted end-of-generation
-    "length": "length",   # hit max_tokens
-    "context": "length",  # ran out of per-sequence KV room
-    "cancelled": "stop",  # client hung up or explicit cancel
-}
+# Single source for engine->protocol reason mapping (see server/reasons.py).
+# Re-exported here so `from server.app import _FINISH_REASONS` keeps working
+# for tests and so the two surfaces cannot drift.
+from .reasons import FINISH_REASONS as _FINISH_REASONS  # noqa: F401
 
 
 def _openai_finish_reason(reason: str | None) -> str:
@@ -98,7 +99,11 @@ def _message_pairs(req: ChatCompletionRequest) -> list[tuple[str, str]]:
     The tool-conversation rendering is gated on `req.tools`: without a declaration this
     is not a tool exchange, so the messages are flattened exactly as Phase 2 did.
     """
-    tool_turn = bool(req.tools)
+    has_tool_history = any(
+        mm.role == "tool" or (mm.role == "assistant" and mm.tool_calls)
+        for mm in req.messages
+    )
+    tool_turn = bool(req.tools) or has_tool_history
     messages = list(req.messages)
     pairs: list[tuple[str, str]] = []
     i = 0
@@ -142,6 +147,7 @@ def render_pairs(model: Model, pairs: list[tuple[str, str]]) -> str:
 
 
 def _render_prompt(model: Model, req: ChatCompletionRequest) -> str:
+    """Render a ChatCompletionRequest to the raw prompt string for the engine."""
     if not req.messages:
         raise HTTPException(status_code=400, detail="messages must not be empty")
     pairs = _message_pairs(req)
@@ -153,17 +159,27 @@ def _render_prompt(model: Model, req: ChatCompletionRequest) -> str:
     return render_pairs(model, pairs)
 
 
+# Public alias — backlog asks to settle on one name; keep both so callers
+# and tests can use either spelling without churn.
+render_prompt = _render_prompt
+
+
 def _request_params(req: ChatCompletionRequest) -> RequestParams:
-    params = RequestParams(max_tokens=req.resolved_max_tokens(DEFAULT_MAX_TOKENS))
-    if req.temperature is not None:
-        params.temp = req.temperature
-    if req.top_p is not None:
-        params.top_p = req.top_p
-    if req.top_k is not None:
-        params.top_k = req.top_k
-    if req.seed is not None:
-        params.seed = req.seed
-    return params
+    # Shared builder so a new sampling field cannot be added to one surface and
+    # forgotten on the other (see server/params.py).
+    from .params import build_params
+
+    return build_params(
+        max_tokens=req.resolved_max_tokens(DEFAULT_MAX_TOKENS),
+        # `stop` may be a bare string or a list of them; the engine takes the normalised
+        # tuple so it can stop decoding past the delimiter instead of merely having its
+        # output truncated here.
+        stop=normalize_stops(req.stop),
+        temperature=req.temperature,
+        top_p=req.top_p,
+        top_k=req.top_k,
+        seed=req.seed,
+    )
 
 
 def _parsing_names(req: ChatCompletionRequest) -> set[str] | None:
@@ -251,6 +267,14 @@ def build_app(
     async def chat_completions(req: ChatCompletionRequest, http_request: Request):
         if req.n is not None and req.n != 1:
             raise HTTPException(status_code=400, detail="only n=1 is supported")
+        # Before anything is rendered or admitted: a non-positive cap is unsatisfiable,
+        # and the engine's `n_generated >= max_tokens` would read it as "retire after
+        # one token" and answer with a plausible-looking 200. Same check, same 400, as
+        # /v1/messages -- see schemas.max_tokens_error for why it is here and not on the
+        # model.
+        cap_error = req.cap_error()
+        if cap_error is not None:
+            raise HTTPException(status_code=400, detail=cap_error)
 
         prompt = _render_prompt(model, req)
         params = _request_params(req)
@@ -267,23 +291,55 @@ def build_app(
 
         if req.stream:
             return StreamingResponse(
-                _sse(async_engine, request_id, model_name, http_request, known_tools),
+                _sse(
+                    async_engine,
+                    request_id,
+                    model_name,
+                    http_request,
+                    known_tools,
+                    params.stop,
+                ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
 
+        # The same filter object the SSE path runs, fed the same pieces in the same
+        # order, so the assembled body cannot drift from the streamed text -- the reason
+        # `parse_tool_calls` is the streaming parser fed one chunk, applied to the other
+        # thing that now withholds text. With no `stop` it is a pass-through, so this
+        # path is byte-identical to what it produced before.
+        stopper = StopSequenceFilter(params.stop)
         try:
-            pieces: list[str] = []
+            parts: list[str] = []
+            n_completion = 0
             finish_reason = "stop"
             async for out in async_engine.stream(request_id):
-                pieces.append(out.piece)
+                if await http_request.is_disconnected():
+                    await async_engine.cancel(request_id)
+                    break
+                # The engine's natural-end retirement (eog) yields an empty
+                # piece and does not append to output_tokens / n_generated,
+                # so counting it would make `completion_tokens` off by one
+                # (10 vs 9). Only count tokens that carried text.
+                if not (out.finished and out.piece == "" and out.finish_reason == "eog"):
+                    n_completion += 1
+                emittable, hit = stopper.push(out.piece)
+                parts.append(emittable)
+                if hit:
+                    # Stop consuming: the engine retires on this same token, and on a
+                    # stream that does not (a replayed one) `release` cancels it. The
+                    # reason goes through the same table as the engine's own, so the
+                    # two cannot name this condition differently.
+                    finish_reason = _openai_finish_reason("stop_sequence")
+                    break
                 if out.finished:
                     finish_reason = _openai_finish_reason(out.finish_reason)
+            else:
+                parts.append(stopper.flush())
         finally:
             async_engine.release(request_id)
 
-        n_completion = len(pieces)
-        text = "".join(pieces)
+        text = "".join(parts)
         content: str | None = text
         tool_calls: list[ToolCall] | None = None
         try:
@@ -291,7 +347,7 @@ def build_app(
             # pass-through (content == text, no calls) -- so the pre-tools response shape
             # is preserved without a second guard restating what "off" means here.
             parsed = parse_tool_calls(text, known_tools)
-        except Exception:
+        except Exception:  # noqa: BLE001 - a parse failure must degrade, not 500
             # Nothing in the parser is supposed to raise, but the whole server is one
             # process: falling back to the raw text costs a tool call, whereas a 500
             # here would also mean the engine slot was burned for nothing.
@@ -322,10 +378,6 @@ def build_app(
     # Mounted on the same app so one server serves both protocols against one loaded
     # model. `render_pairs` is passed in rather than reimplemented: prompt construction
     # is the one thing the two surfaces must never disagree about.
-    from fastapi import APIRouter
-
-    from .anthropic_api import register_anthropic_routes
-
     anthropic_router = APIRouter()
     register_anthropic_routes(
         anthropic_router,
@@ -345,9 +397,19 @@ async def _sse(
     model_name: str,
     http_request: Request,
     known_tools: set[str] | None = None,
+    stops: tuple[str, ...] = (),
 ) -> AsyncIterator[bytes]:
     """Emit OpenAI-shaped SSE frames, then `[DONE]`."""
     completion_id = _rid("chatcmpl")
+    # Two things now withhold text on this one stream, and the order is load-bearing:
+    # the stop filter runs FIRST, upstream of the tool parser. A stop sequence is
+    # defined over the model's raw output -- that is what the engine scans to stop
+    # decoding -- so scanning anything else here could disagree with the engine about
+    # where the turn ended. Feeding the parser only post-filter text also means it never
+    # sees a byte the client must not receive, so nothing ever has to be un-sent; each
+    # stage withholds only its own trailing partial, and the composition is a plain
+    # pipeline of prefix-preserving filters.
+    stopper = StopSequenceFilter(stops)
     # Same state machine the non-streaming path runs, so the assembled deltas cannot
     # drift from the whole-response body. `known_tools is None` means tool parsing is off
     # for this request, and the parser answers that by passing every chunk through
@@ -380,7 +442,7 @@ async def _sse(
             if final:
                 tail, _ = parser.flush()
                 text += tail
-        except Exception:
+        except Exception:  # noqa: BLE001 - degrade to raw text rather than tearing down
             # See the non-streaming path: degrade to raw text rather than tearing down
             # the response (or the process) over a parse.
             text, calls = piece, []
@@ -401,14 +463,24 @@ async def _sse(
             if await http_request.is_disconnected():
                 await engine.cancel(request_id)
                 return
-            if out.piece or out.finished:
-                for f in tool_frames(out.piece, final=out.finished):
+            text, hit = stopper.push(out.piece)
+            final = hit or out.finished
+            if final and not hit:
+                # Generation ended without the delimiter: release whatever the filter
+                # was holding back for a match that never completed.
+                text += stopper.flush()
+            if text or final:
+                for f in tool_frames(text, final=final):
                     yield f
-            if out.finished:
-                reason = _openai_finish_reason(out.finish_reason)
+            if final:
+                reason = _openai_finish_reason(
+                    "stop_sequence" if hit else out.finish_reason
+                )
                 if parser.n_calls:
                     reason = "tool_calls"
                 yield frame(ChunkChoice(delta=Delta(), finish_reason=reason))
+            if hit:
+                break  # `release` in the finally cancels whatever is still in flight
         yield b"data: [DONE]\n\n"
     finally:
         engine.release(request_id)

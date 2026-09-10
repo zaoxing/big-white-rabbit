@@ -1,4 +1,4 @@
-"""HTTP control plane: a single-process, OpenAI-compatible server over one AsyncEngine."""
+"""HTTP control plane: a single-process, dual-protocol server (OpenAI and Anthropic) over one AsyncEngine."""
 
 from __future__ import annotations
 
