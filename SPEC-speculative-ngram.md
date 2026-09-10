@@ -72,8 +72,19 @@ already issues per step.
       Measured on 0.5B periodic prompt: 16 -> 4 decode calls, 12/12 accepted
       (rate 1.0), byte-identical. One fix during T3: n_pos off-by-one
       (pos_base+len, not +1+len) caught by llama position check.
-- [ ] Checkpoint: acceptance-rate numbers on small model before big models.
-- [ ] T4 (S): 8B/27B benchmark + report.
+- [x] Checkpoint: acceptance-rate numbers on small model before big models.
+      0.5B periodic: 16 -> 4 calls, rate 1.0. 8B repetitive: 64 -> 14 calls,
+      31.2 -> 48.6 tok/s, rate 1.0. 8B natural: 62 vs 64 calls, 39.1 -> 38.1
+      tok/s (noise), rate 0.286, identical.
+- [x] T4 (S): 8B/27B benchmark. DONE with BLOCKER (see below). 27B repetitive:
+      64 -> 14 calls, 8.5 -> 14.1 tok/s (1.66x), rate 1.0, identical.
+      27B natural + spec ABORTED pre-fix (inclusive-rewind fix + all-wrong
+      regression test in `d6e7061`); post-fix the blocker is structural (hybrid
+      rewind needs n_rs_seq), so 27B+spec now raises ValueError at construction.
+- [ ] T5 (PROPOSED, needs human approval -- breaks "no C++ changes" assumption):
+      plumb `n_rs_seq` through `ContextParams`, surface `seq_rm`'s bool
+      (return/throw), gate speculation on real rewind support, measure
+      recurrent-snapshot memory cost on qwen35. Unlocks 27B natural.
 - [ ] T5 (S): verifier pass + `STATE.md` evidence.
 
 L2 rules: worktree per attempt, <= 3 attempts per item, verifier sub-agent after
