@@ -76,3 +76,17 @@ Append one entry per run. Prune entries older than 30 days.
   "outcome": "fix-proposed"
 }
 ```
+- 2026-09-10T05:35:00Z — daily-triage — human APPROVED e6bdba4 — 0 found, 0 taken, 0 escalations, ~1k tokens, 10s
+
+```json
+{
+  "run_id": "2026-09-10T05:35:00Z",
+  "pattern": "daily-triage",
+  "duration_s": 10,
+  "items_found": 0,
+  "actions_taken": 0,
+  "escalations": 0,
+  "tokens_estimate": 1000,
+  "outcome": "report-only"
+}
+```

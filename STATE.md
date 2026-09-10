@@ -1,14 +1,13 @@
 # Loop State — FreeToken-Mac
 
-Last run: 2026-09-10T05:30:00Z (L2 fleet 8 agents, daily-triage, opencode) — hardening, 200 passed, 100/100 L3
+Last run: 2026-09-10T05:35:00Z (human APPROVED e6bdba4, daily-triage, opencode) — 200 passed, 100/100 L3
 
 ## High Priority (loop is acting or waiting on human)
 
-1. **Fleet hardening complete — 200 passed, 8 parallel agents (5+3), ready for human review**
-   - Why: `096d555` 196 passed + fleet wave-1 (reviewer/security/test/explore/perf) found ascii_only RED (4 em-dashes), render/parse asymmetry docs, vacuous `==4 or >=1`, BLE001 alias gap, common helpers unpinned, delimiter breakout MEDIUM. Fixed: ASCII `--` (`app.py:158`, `reasons.py:6,28`, `anthropic_api.py:42`), follow-up contract docs (`app.py:93`, `184`, `anthropic_api.py:167`), `==4` exact (`test_remaining_gaps.py:98`), BLE001 as/tuple regex (`test_noqa_markers_extended.py:13`), `tests/test_common_helpers.py:1` 4 tests, `tools.py:244` `json.dumps(name)` + `:259` `</tool_response` escape, top-level `build_params`/`json` hoists. `FTM_TEST_MODEL=... pytest tests/ -q` → `200 passed in 17.71s` (196+4). Wave-2 re-review: 3x APPROVE.
-   - Next: Commit hardening batch (see `git status`). Do NOT push (no remote, `loop-constraints.md:8`).
-   - Effort: S — 7 modified + 1 new test file, all `200 passed`.
-   - Evidence: `200 passed`, `4 passed` in `test_common_helpers.py`, ASCII `[]`, `100/100 L3`.
+1. **APPROVED by human 2026-09-10 — e6bdba4 fleet hardening, 200 passed**
+   - Why: `096d555` 196 passed + fleet wave-1/wave-2 (8 agents) → `e6bdba4` committed. Human said "approve".
+   - Evidence: `200 passed in 17.71s`, `4 passed` in `test_common_helpers.py`, ASCII `[]`, `100/100 L3 healthy`, `git status` clean.
+   - Next: No further action unless human opts into `gate.yaml` / workflows / `--with-foundry/memory/fleet` (score ≥80 already, stop condition requires explicit opt-in).
 
 ## Watch List — remaining after whole-system (2 items, low risk)
 
