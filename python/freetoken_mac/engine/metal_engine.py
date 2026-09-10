@@ -61,6 +61,43 @@ class SeqIdExhausted(RuntimeError):
     """
 
 
+# Architectures whose memory is hybrid attention + recurrent state (mirrors
+# llama.cpp's llm_arch_supports_rs_rollback list). A speculation mismatch
+# rewinds a KV suffix, which on these models needs recurrent-state rollback
+# snapshots (llama n_rs_seq) -- and this binding neither sets n_rs_seq (so it
+# is 0) nor checks seq_rm's failure bool (so a failed rewind desyncs the KV
+# and aborts the NEXT decode). Until T5 plumbs n_rs_seq through, speculation
+# on these architectures fails loud here instead of deep in generation.
+_HYBRID_RECURRENT_ARCHES = frozenset(
+    {
+        "qwen35",
+        "qwen35moe",
+        "qwen4exp",
+        "deepseek4",
+        "nemotron_h",
+        "nemotron_h_moe",
+        "lfm2",
+        "lfm2moe",
+        "bailingmoe3",
+    }
+)
+
+
+def check_speculative_arch(arch: str | None) -> None:
+    """Refuse speculation on hybrid/recurrent architectures (see above).
+
+    Unknown or missing arch strings pass: only KNOWN hybrids are rejected, so
+    a future attention architecture is never blocked by this list.
+    """
+    if arch in _HYBRID_RECURRENT_ARCHES:
+        raise ValueError(
+            f"speculative decoding is not supported on hybrid architecture "
+            f"{arch!r}: mismatch rewinds need recurrent-state rollback "
+            f"(llama n_rs_seq), which this binding does not plumb through yet "
+            f"(SPEC-speculative-ngram.md T4 blocker, T5 proposal)"
+        )
+
+
 class MetalEngine:
     """Continuous-batching engine over a single llama.cpp Metal context."""
 
@@ -78,6 +115,10 @@ class MetalEngine:
             raise ValueError(
                 f"spec_max_drafts must be >= 0; got {self.config.spec_max_drafts}"
             )
+        if self.config.speculative:
+            # Before allocating a context: fail loud on hybrids (see
+            # _HYBRID_RECURRENT_ARCHES), not mid-generation.
+            check_speculative_arch(model.meta_val("general.architecture"))
         self.policy: AdmissionPolicy = policy or FCFSPolicy()
         self.default_params = default_params or RequestParams()
         self.ctx = Context(model, self.config.to_context_params())
@@ -454,11 +495,15 @@ class MetalEngine:
         # The commit ran n_pos past every packed row; the accepted tokens only
         # fill positions pos_base+1 .. pos_base+len(accepted) (the base row
         # sits at pos_base, already covered by the pre-step n_pos). Rewind the
-        # KV past the last accepted position on any mismatch; a full match
-        # needs no rewind -- the KV holds exactly the accepted tokens.
+        # KV from the last accepted position on any mismatch: that cell holds
+        # the rejected draft, and the following step re-decodes the accepted
+        # token there (overwriting it). The stale cell must go regardless --
+        # llama requires each decode to start strictly consecutive with the KV
+        # (Y = X + 1), so it aborts the next decode otherwise. A full match
+        # needs no rewind: the KV holds exactly the accepted tokens.
         final_n_pos = entry.pos_base + len(accepted)
         if len(accepted) < n_drafts + 1:
-            self.ctx.memory_seq_rm(req.seq_id, final_n_pos + 1, -1)
+            self.ctx.memory_seq_rm(req.seq_id, final_n_pos, -1)
         # Every accepted token goes through the identical finish logic as a
         # normally decoded one; n_pos advances per token so the context-full
         # check sees the same values as the plain path. Stop feeding at the

@@ -116,3 +116,22 @@ def test_constructor_guards() -> None:
         NgramTable(order=0)
     with pytest.raises(ValueError):
         NgramTable(max_entries=0)
+
+
+def test_spec_arch_gate_rejects_known_hybrids() -> None:
+    """Hybrid/recurrent architectures must fail loud (their partial rewinds
+    cannot work without n_rs_seq plumbing): T4 blocker regression test."""
+    from freetoken_mac.engine.metal_engine import check_speculative_arch
+
+    for arch in ("qwen35", "qwen35moe", "lfm2", "deepseek4"):
+        with pytest.raises(ValueError, match="hybrid"):
+            check_speculative_arch(arch)
+
+
+def test_spec_arch_gate_allows_attention_and_unknown() -> None:
+    """Only KNOWN hybrids are rejected: attention architectures and missing /
+    future arch strings must never be blocked by this list."""
+    from freetoken_mac.engine.metal_engine import check_speculative_arch
+
+    for arch in ("qwen2", "qwen3", "llama", None, "", "something-new"):
+        check_speculative_arch(arch)

@@ -101,3 +101,65 @@ def test_negative_spec_max_drafts_rejected(model: ftm.Model) -> None:
     """Fail fast at construction, before allocating a context."""
     with pytest.raises(ValueError, match="spec_max_drafts"):
         MetalEngine(model, EngineConfig(spec_max_drafts=-1))
+
+
+class _WrongTable:
+    """A draft table whose every prediction is wrong on purpose.
+
+    Built from a plain run's true trajectory: each observed context maps to
+    (true_next + 1) % vocab, so no draft can ever match. Every verify step
+    then takes the mismatch path -- rewind plus continue -- which is exactly
+    the path a 100%-acceptance prompt never exercises (and where the
+    inclusive-rewind bug hid).
+    """
+
+    order = 3
+
+    def __init__(self, wrong: dict[tuple[int, ...], int]) -> None:
+        self._wrong = wrong
+
+    def update_stream(self, tokens) -> None:
+        pass
+
+    def predict(self, context, max_tokens: int) -> list[int]:
+        token = self._wrong.get(tuple(context[-(self.order - 1) :]))
+        return [token] * max_tokens if token is not None else []
+
+
+def test_all_wrong_drafts_still_identical(
+    model: ftm.Model, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Maximum adversity: drafts packed every step, zero accepted. Output must
+    still equal the plain run, decode-for-decode (each step accepts exactly the
+    one mismatched sample, i.e. the plain path's token)."""
+    plain = run(model, False)
+    plain_id = plain._next_request_id - 1
+    expected = plain.tokens_of(plain_id)
+    prompt_tokens = list(
+        model.tokenize(PROMPT, add_special=True, parse_special=True)
+    )
+    hist = prompt_tokens + expected
+    vocab = model.n_vocab
+    wrong = {
+        tuple(hist[max(0, i - 2) : i]): (tok + 1) % vocab
+        for i, tok in enumerate(hist)
+    }
+
+    from freetoken_mac.engine import metal_engine as engine_module
+
+    monkeypatch.setattr(
+        engine_module, "NgramTable", lambda *args, **kwargs: _WrongTable(wrong)
+    )
+    config = EngineConfig(n_ctx=512, n_seq_max=1, speculative=True)
+    engine = MetalEngine(model, config)
+    rid = engine.add_request(PROMPT, greedy())
+    list(engine.drain())
+
+    assert engine.tokens_of(rid) == expected
+    assert engine.state(rid).finish_reason == plain.state(plain_id).finish_reason
+    assert engine.spec_drafted > 0, "scripted drafts did not pack"
+    # Every step took the mismatch path (or near enough that at least one
+    # rewind ran): fewer acceptances than drafts, and never more decodes.
+    assert engine.spec_accepted < engine.spec_drafted
+    assert engine.spec_acceptance_rate is not None
+    assert engine.ctx.decode_calls <= plain.ctx.decode_calls
