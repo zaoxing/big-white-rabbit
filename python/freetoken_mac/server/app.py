@@ -19,9 +19,9 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
 
 from .anthropic_api import register_anthropic_routes
+from .common import count_tokens, sse_response, submit_request, text_from_blocks
 
 from .._freetoken_metal import Model
 from ..engine.async_engine import AsyncEngine
@@ -84,13 +84,9 @@ def _message_text(msg: ChatMessage) -> str:
         return ""
     if isinstance(msg.content, str):
         return msg.content
-    out: list[str] = []
-    for part in msg.content:
-        if isinstance(part, dict) and part.get("type") in (None, "text"):
-            text = part.get("text")
-            if isinstance(text, str):
-                out.append(text)
-    return "".join(out)
+    # Delegates to the shared helper so the ``type in (None, "text")``
+    # predicate cannot drift between surfaces (see server/common.py).
+    return text_from_blocks(msg.content)  # type: ignore[arg-type]
 
 
 def _message_pairs(req: ChatCompletionRequest) -> list[tuple[str, str]]:
@@ -279,18 +275,11 @@ def build_app(
         prompt = _render_prompt(model, req)
         params = _request_params(req)
         known_tools = _parsing_names(req)
-        n_prompt = len(model.tokenize(prompt, add_special=True, parse_special=True))
-
-        try:
-            request_id = await async_engine.submit(prompt, params)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            # seq_id exhaustion: the server is at capacity, which is a 503, not a bug.
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        n_prompt = count_tokens(model, prompt)
+        request_id = await submit_request(async_engine, prompt, params)
 
         if req.stream:
-            return StreamingResponse(
+            return sse_response(
                 _sse(
                     async_engine,
                     request_id,
@@ -299,8 +288,6 @@ def build_app(
                     known_tools,
                     params.stop,
                 ),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
 
         # The same filter object the SSE path runs, fed the same pieces in the same

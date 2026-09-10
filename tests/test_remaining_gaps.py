@@ -197,3 +197,104 @@ def test_tool_history_without_tools_declaration(client) -> None:
     )
     assert r.status_code == 200, r.text
     assert r.json()["choices"][0]["message"]["content"] is not None
+
+
+def test_openai_content_parts_image_dropped(client) -> None:
+    """image_url parts must be dropped, not stringified into the prompt."""
+    from freetoken_mac.server.common import text_from_blocks
+
+    # Unit level: the shared helper is the single source for dropping.
+    assert text_from_blocks([{"type": "text", "text": "Count "}, {"type": "text", "text": "to 3"}]) == "Count to 3"
+    assert (
+        text_from_blocks(
+            [
+                {"type": "text", "text": "Count "},
+                {"type": "image_url", "image_url": {"url": "http://example.com/x.png"}},
+                {"type": "text", "text": "to 3"},
+            ]
+        )
+        == "Count to 3"
+    )
+    assert text_from_blocks([{"type": "image_url", "image_url": {"url": "x"}}, {"type": "text", "text": "hi"}]) == "hi"
+    # Absent type is legacy text spelling (common.text_from_blocks predicate).
+    assert text_from_blocks([{"text": "hi"}]) == "hi"
+    # Non-text image type is dropped, not emitted as JSON noise.
+    assert text_from_blocks([{"type": "image", "text": "should be dropped"}]) == ""
+
+    # Through HTTP: same greedy output with and without image when seed is fixed.
+    # Greedy (temperature 0) makes the comparison deterministic.
+    base = {
+        "model": "local",
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "Count "}, {"type": "text", "text": "to 3"}]}],
+        "temperature": 0,
+        "seed": 0,
+        "max_tokens": 8,
+    }
+    with_image = {
+        "model": "local",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Count "},
+                    {"type": "image_url", "image_url": {"url": "http://example.com/x.png"}},
+                    {"type": "text", "text": "to 3"},
+                ],
+            }
+        ],
+        "temperature": 0,
+        "seed": 0,
+        "max_tokens": 8,
+    }
+    r1 = client.post("/v1/chat/completions", json=base)
+    r2 = client.post("/v1/chat/completions", json=with_image)
+    assert r1.status_code == 200, r1.text
+    assert r2.status_code == 200, r2.text
+    assert r1.json()["choices"][0]["message"]["content"] == r2.json()["choices"][0]["message"]["content"]
+    # Content parts equivalent to bare string
+    r3 = client.post("/v1/chat/completions", json={"model": "local", "messages": [{"role": "user", "content": "Count to 3"}], "temperature": 0, "seed": 0, "max_tokens": 8})
+    assert r3.status_code == 200, r3.text
+    assert r1.json()["choices"][0]["message"]["content"] == r3.json()["choices"][0]["message"]["content"]
+
+
+def test_sampling_seed_determinism(client) -> None:
+    """Same seed gives same output; different seed (or temperature) gives different output.
+
+    Proves sampling params are not just accepted (200) but actually wired to the sampler.
+    Uses fixed seed=0 and temperature 1.0 for high entropy; greedy vs sampling must also diverge.
+    """
+
+    def _content(seed: int, temp: float = 1.0) -> str:
+        r = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "local",
+                "messages": [{"role": "user", "content": "Write a story: "}],
+                "temperature": temp,
+                "seed": seed,
+                "max_tokens": 8,
+            },
+        )
+        assert r.status_code == 200, r.text
+        return r.json()["choices"][0]["message"]["content"] or ""
+
+    # Same seed must be deterministic across repeats.
+    a = _content(0, 1.0)
+    b = _content(0, 1.0)
+    c = _content(0, 1.0)
+    assert a == b == c, f"same seed must be deterministic: {a!r} vs {b!r} vs {c!r}"
+
+    # Different seeds must diverge - try several to avoid flake from coincidental collision.
+    # With temp 1.0 and this prompt the first token differs across seeds (observed
+    # "I'm" vs "Mary" vs "It was just..."), so 16-token collision probability is negligible.
+    found_diff = False
+    for other_seed in [1, 42, 123, 999, 2026]:
+        d = _content(other_seed, 1.0)
+        if d != a:
+            found_diff = True
+            break
+    assert found_diff, f"different seeds all gave same output {a!r}; sampling param not wired?"
+
+    # Greedy (temp 0) must differ from sampling (temp 1.0) with same seed.
+    greedy = _content(0, 0)
+    assert greedy != a, f"greedy vs sampling should differ: greedy={greedy!r} sampled={a!r}"

@@ -21,12 +21,12 @@ import json
 from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
 
 from .._freetoken_metal import Model
 from ..engine.async_engine import AsyncEngine
 from ..engine.config import RequestParams, StopSequenceFilter, normalize_stops
 from . import anthropic_schemas as A
+from .common import block_text, count_tokens, sse_response, submit_request, text_from_blocks
 from .schemas import max_tokens_error
 from .tools import (
     ParsedToolCall,
@@ -50,13 +50,8 @@ def _system_text(system: str | list[dict[str, Any]] | None) -> str:
         return ""
     if isinstance(system, str):
         return system
-    out: list[str] = []
-    for block in system:
-        if isinstance(block, dict) and block.get("type") in (None, "text"):
-            text = block.get("text")
-            if isinstance(text, str):
-                out.append(text)
-    return "".join(out)
+    # Delegates to the shared helper so the predicate cannot drift (see server/common.py).
+    return text_from_blocks(system)
 
 
 def _tool_result_text(block: dict[str, Any]) -> str:
@@ -65,13 +60,7 @@ def _tool_result_text(block: dict[str, Any]) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts: list[str] = []
-        for inner in content:
-            if isinstance(inner, dict) and inner.get("type") in (None, "text"):
-                text = inner.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-        return "".join(parts)
+        return text_from_blocks(content)
     if content is None:
         return ""
     # A client may put a bare object there; serialise rather than drop the result.
@@ -101,14 +90,16 @@ def _message_pairs(req: A.MessagesRequest) -> list[tuple[str, str]]:
         tool_calls: list[dict[str, Any]] = []
         tool_results: list[str] = []
         for block in msg.content:
+            # Text blocks delegate to the shared predicate so the
+            # ``type in (None, "text")`` check lives in one place.
+            t = block_text(block) if isinstance(block, dict) else None
+            if t is not None:
+                texts.append(t)
+                continue
             if not isinstance(block, dict):
                 continue
             btype = block.get("type")
-            if btype in (None, "text"):
-                text = block.get("text")
-                if isinstance(text, str):
-                    texts.append(text)
-            elif btype == "tool_use":
+            if btype == "tool_use":
                 name = block.get("name")
                 if isinstance(name, str) and name:
                     # Hand the shared renderer the OpenAI shape it expects; it accepts an
@@ -257,21 +248,15 @@ def register_anthropic_routes(
         known = _parsing_names(oai_tools, oai_choice)
 
         prompt = render_prompt(pairs)
-        n_prompt = len(model.tokenize(prompt, add_special=True, parse_special=True))
-
         params = _request_params(req)
-        try:
-            request_id = await async_engine.submit(prompt, params)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        n_prompt = count_tokens(model, prompt)
+        request_id = await submit_request(async_engine, prompt, params)
 
         # Read back off the params the ENGINE was given, so the sequences the engine
         # stops on and the ones the wire truncates on cannot be two different lists.
         stops = params.stop
         if req.stream:
-            return StreamingResponse(
+            return sse_response(
                 _stream(
                     async_engine,
                     request_id,
@@ -281,8 +266,6 @@ def register_anthropic_routes(
                     http_request,
                     stops,
                 ),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
 
         # Same filter, same pieces, same order as the streaming path below: that is what

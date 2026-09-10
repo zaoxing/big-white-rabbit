@@ -1,0 +1,8 @@
+# patterns/registry.yaml — machine-readable index for loop tools (see loop docs)
+patterns:
+  - id: daily-triage
+    cadence: 1d
+    tool: opencode
+    level: L3
+    state: STATE.md
+    budget: loop-budget.md

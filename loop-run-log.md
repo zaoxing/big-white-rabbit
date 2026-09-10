@@ -48,3 +48,17 @@ Append one entry per run. Prune entries older than 30 days.
   "outcome": "fix-proposed"
 }
 ```
+- 2026-09-10T05:06:00Z — daily-triage — whole-system parallel — 3 found (route preamble, text_from_blocks, safety scaffolding), 3 fixed via agents, 0 escalations, ~7k tokens, 120s
+
+```json
+{
+  "run_id": "2026-09-10T05:06:00Z",
+  "pattern": "daily-triage",
+  "duration_s": 120,
+  "items_found": 3,
+  "actions_taken": 3,
+  "escalations": 0,
+  "tokens_estimate": 7000,
+  "outcome": "fix-proposed"
+}
+```
