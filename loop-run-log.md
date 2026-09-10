@@ -104,3 +104,17 @@ Append one entry per run. Prune entries older than 30 days.
   "outcome": "fix-proposed"
 }
 ```
+- 2026-09-10T16:25:00Z — daily-triage — final verification — 0 found, 0 taken, 200 passed re-verified, PROJECT FINISHED, ~3k tokens, 60s
+
+```json
+{
+  "run_id": "2026-09-10T16:25:00Z",
+  "pattern": "daily-triage",
+  "duration_s": 60,
+  "items_found": 0,
+  "actions_taken": 0,
+  "escalations": 0,
+  "tokens_estimate": 3000,
+  "outcome": "report-only"
+}
+```

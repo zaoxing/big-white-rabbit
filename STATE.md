@@ -1,14 +1,13 @@
 # Loop State — FreeToken-Mac
 
-Last run: 2026-09-10T16:15:53Z (foundry/fleet/memory scaffold, daily-triage, opencode) — 200 passed, 100/100 L3, gate=true
+Last run: 2026-09-10T16:25:00Z (final verification, daily-triage, opencode) — PROJECT FINISHED, 200 passed, 100/100 L3, gate=true
 
 ## High Priority (loop is acting or waiting on human)
 
-1. **Foundry/fleet/memory scaffolded per human opt-in — ready for human review**
-   - Why: Human chose "Expand foundry/fleet" (score 100 ≥80, stop condition satisfied). Staged upstream scaffold in temp dir and copied only additive tiers so approved `STATE.md`/`LOOP.md`/`AGENTS.md` were never clobbered. `npx @cobusgreyling/harness-foundry validate` → `Stack is valid`. Doctor `100/100 L3 healthy`, `gate=true` (was false).
-   - Added: `.foundry/stack.yaml` (renamed `freetoken-mac`), `.foundry/hooks/outerloop.yaml`, `.foundry/README.md`, `memory-tiers.md`, `memory-budget.md`, `fleet-registry.md` (triage/implementer/verifier least-privilege), `fleet-inbox.md`, `gate.yaml` (denylist mirrors `docs/safety.md` + `.loop/`/`*.gguf`/`build/`/`.venv/`).
-   - Next: Human `git add` review + commit (see `git status`). Do NOT push (no remote, `loop-constraints.md:8`). `harness run` intentionally not executed (report-only week-one).
-   - Evidence: `5 passed` unit (`test_common_helpers` + `noqa`), `gate.yaml` parses (`version: 1`), doctor `exit 0`.
+1. **PROJECT FINISHED — all loopable items done, verified 2026-09-10**
+   - Why: `e4f2075` foundry/fleet/memory + `gate.yaml` already committed (STATE's prior "review + commit" note was stale — `git log` shows `e4f2075`, `git status` clean). Final `FTM_TEST_MODEL=... pytest tests/ -q` → `200 passed in 18.29s`. Doctor `100/100 L3 healthy`, `gate=true`. Original polish loop 4/4 ALL GREEN (`.loop/state.md:47`), L2 TDD 7 cycles, whole-system parallel, fleet 8 agents — all committed (`de30ebf`, `096d555`, `e6bdba4`, `e8f9e62`, `e4f2075`).
+   - Next: Nothing required. Optional only on explicit opt-in: `.github/workflows`, `harness run --goal "Verify harness wiring"`. Do NOT push (no remote, `loop-constraints.md:8`).
+   - Evidence: `200 passed`, doctor `exit 0`, `harness-foundry validate` → `Stack is valid`.
 
 ## Watch List — remaining after whole-system (2 items, low risk)
 
