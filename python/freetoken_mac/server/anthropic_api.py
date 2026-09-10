@@ -27,6 +27,7 @@ from ..engine.async_engine import AsyncEngine
 from ..engine.config import RequestParams, StopSequenceFilter, normalize_stops
 from . import anthropic_schemas as A
 from .common import block_text, count_tokens, sse_response, submit_request, text_from_blocks
+from .params import build_params
 from .schemas import max_tokens_error
 from .tools import (
     ParsedToolCall,
@@ -39,7 +40,7 @@ from .tools import (
     tool_names,
 )
 
-# Single source — see server/reasons.py. Re-exported so
+# Single source -- see server/reasons.py. Re-exported so
 # `from server.anthropic_api import _STOP_REASONS` keeps working.
 from .reasons import STOP_REASONS as _STOP_REASONS  # noqa: F401
 
@@ -175,6 +176,10 @@ def _parsing_names(
     anyway (replaying a prior tool exchange primes it to) is just text, and turning it
     into a `tool_use` block would hand the client a call it never offered to make.
 
+    Follow-up contract: history (`tool_use` / `tool_result` blocks) still renders into
+    the prompt even when `tools` is omitted, so the model sees context; new output is
+    NOT parsed unless tools are declared this turn.
+
     `None` is safe to pass straight to the parser: it is the parser's own spelling of
     "off". It used to also be its spelling of "accept ANY name", which is how this route
     ended up emitting tool_use blocks for a request with no tools at all.
@@ -188,8 +193,6 @@ def _parsing_names(
 
 
 def _request_params(req: A.MessagesRequest) -> RequestParams:
-    from .params import build_params
-
     return build_params(
         max_tokens=req.max_tokens,
         stop=normalize_stops(req.stop_sequences),

@@ -1,14 +1,14 @@
 # Loop State — FreeToken-Mac
 
-Last run: 2026-09-10T05:06:00Z (L2 TDD, daily-triage, opencode) — whole-system, 196 passed, 100/100 L3
+Last run: 2026-09-10T05:30:00Z (L2 fleet 8 agents, daily-triage, opencode) — hardening, 200 passed, 100/100 L3
 
 ## High Priority (loop is acting or waiting on human)
 
-1. **Whole-system L2 TDD complete — 196 passed, parallel agents, ready for human review**
-   - Why: Prior `de30ebf` 194 passed (7 TDD cycles). Agent A added `server/common.py:1` DRY (route preamble + `text_from_blocks` 4x) + deep gap tests (`test_remaining_gaps.py:202` `test_openai_content_parts_image_dropped`, `test_sampling_seed_determinism` determinism across seeds) → `196 passed` (`FTM_TEST_MODEL=... pytest tests/ -q` `196 passed in 16.50s`). Doctor `100/100 L3 healthy` (`npx @cobusgreyling/loop doctor .:1`). Remaining `p50` docs now `docs/safety.md:1`, `.github/PULL_REQUEST_TEMPLATE.md:1`, `patterns/registry.yaml:1` scaffolded.
-   - Next: Commit this whole-system batch (see `git status --porcelain:1` — `common.py` + `docs/safety.md` + `.github/` + `patterns/` + `test_remaining_gaps.py` deep tests + `app.py`/`anthropic_api.py` DRY). Do NOT push (no remote, `loop-constraints.md:8`).
-   - Effort: S — 3 modified + 4 new files, all `196 passed`.
-   - Evidence: `196 passed`, `7 passed` in `test_remaining_gaps.py`, `5 passed` in `test_token_count_overcount.py`, `4 passed` in `test_error_reason_mapping.py`, `1 passed` in `test_noqa_markers_extended.py`.
+1. **Fleet hardening complete — 200 passed, 8 parallel agents (5+3), ready for human review**
+   - Why: `096d555` 196 passed + fleet wave-1 (reviewer/security/test/explore/perf) found ascii_only RED (4 em-dashes), render/parse asymmetry docs, vacuous `==4 or >=1`, BLE001 alias gap, common helpers unpinned, delimiter breakout MEDIUM. Fixed: ASCII `--` (`app.py:158`, `reasons.py:6,28`, `anthropic_api.py:42`), follow-up contract docs (`app.py:93`, `184`, `anthropic_api.py:167`), `==4` exact (`test_remaining_gaps.py:98`), BLE001 as/tuple regex (`test_noqa_markers_extended.py:13`), `tests/test_common_helpers.py:1` 4 tests, `tools.py:244` `json.dumps(name)` + `:259` `</tool_response` escape, top-level `build_params`/`json` hoists. `FTM_TEST_MODEL=... pytest tests/ -q` → `200 passed in 17.71s` (196+4). Wave-2 re-review: 3x APPROVE.
+   - Next: Commit hardening batch (see `git status`). Do NOT push (no remote, `loop-constraints.md:8`).
+   - Effort: S — 7 modified + 1 new test file, all `200 passed`.
+   - Evidence: `200 passed`, `4 passed` in `test_common_helpers.py`, ASCII `[]`, `100/100 L3`.
 
 ## Watch List — remaining after whole-system (2 items, low risk)
 
@@ -31,12 +31,13 @@ Last run: 2026-09-10T05:06:00Z (L2 TDD, daily-triage, opencode) — whole-system
 ---
 Run log: `loop-run-log.md:21`. Constraints: `loop-constraints.md:1` 7 rules. Budget: `loop-budget.md:1` L1 0 / L2 2. Next: commit whole-system batch → `npx @cobusgreyling/loop badge .`.
 
-### TDD Evidence (prove-it, parallel agents)
+### TDD Evidence (prove-it, fleet 8 agents)
 
 - `tests/test_token_count_overcount.py:1` — 3 FAILED→5 PASSED, fix `app.py:308`/`anthropic_api.py:305`.
 - `tests/test_error_reason_mapping.py:1` — 2 FAILED→4 PASSED, fix `server/reasons.py:1`.
-- `tests/test_noqa_markers_extended.py:1` — 1 FAILED→1 PASSED, `metal_engine.py:260`.
-- `server/params.py:1` + `server/reasons.py:1` DRY — 189→189 passed (guard).
-- `server/common.py:1` DRY (Agent A, parallel) — `194→196 passed` (text_from_blocks + route preamble `count_tokens`/`submit_request`/`sse_response`), `7 passed` in `test_remaining_gaps.py`.
-- `tests/test_remaining_gaps.py:1` — 7 tests, deep sampling determinism (`seed` 0 deterministic, different seeds diverge, greedy vs sampling) + image dropped (`text_from_blocks` predicate) — `7 passed`.
-- `tests/test_phase3_tools.py:352` — strengthened, tool-history now groups even without `tools` (divergence fix).
+- `tests/test_noqa_markers_extended.py:1` — 1 FAILED→1 PASSED, extended as/tuple regex.
+- `server/params.py:1` + `server/reasons.py:1` + `server/common.py:1` DRY — 189→200 passed (guard).
+- `tests/test_common_helpers.py:1` — 4 new, all PASSED first run (block parity, SSE headers, flags, 400/503).
+- `tests/test_remaining_gaps.py:98` — vacuous `==4 or >=1` → exact `==4`, still PASSED (cap binds).
+- `tools.py:244,259` — delimiter breakout MITIGATED (reviewer + security APPROVE), normal bytes identical.
+- Fleet: wave-1 code-reviewer/security/test/explore/perf (5 parallel) → wave-2 re-review 3x APPROVE.

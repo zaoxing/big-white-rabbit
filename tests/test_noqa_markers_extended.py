@@ -12,9 +12,15 @@ import re
 
 def test_no_bare_broad_except_without_noqa() -> None:
     root = pathlib.Path("python/freetoken_mac")
-    # Matches `except Exception:` or `except BaseException:` at end of line,
-    # without trailing `# noqa: BLE001`
-    pattern = re.compile(r"except (?:Exception|BaseException):\s*$")
+    # Matches `except Exception:` / `except BaseException:` plus alias form
+    # (`except Exception as e:`) and tuple form (`except (Exception, ValueError):`),
+    # without trailing `# noqa: BLE001`. The old criterion missed all three.
+    pattern = re.compile(
+        r"except\s+(?:"
+        r"(?:Exception|BaseException)(?:\s+as\s+\w+)?"
+        r"|\([^)]*(?:Exception|BaseException)[^)]*\)(?:\s+as\s+\w+)?"
+        r")\s*:\s*(?:#.*)?$"
+    )
     noqa = re.compile(r"#\s*noqa:\s*BLE001")
 
     violations: list[str] = []

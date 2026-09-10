@@ -22,6 +22,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request
 
 from .anthropic_api import register_anthropic_routes
 from .common import count_tokens, sse_response, submit_request, text_from_blocks
+from .params import build_params
 
 from .._freetoken_metal import Model
 from ..engine.async_engine import AsyncEngine
@@ -92,8 +93,11 @@ def _message_text(msg: ChatMessage) -> str:
 def _message_pairs(req: ChatCompletionRequest) -> list[tuple[str, str]]:
     """Flatten the conversation to `(role, text)` for the templater.
 
-    The tool-conversation rendering is gated on `req.tools`: without a declaration this
-    is not a tool exchange, so the messages are flattened exactly as Phase 2 did.
+    Tool rendering is gated on `req.tools` OR replayed tool history: a follow-up
+    turn may omit `tools` yet still carry `tool` roles / `tool_calls`, and those
+    must still render as `<tool_response>` / `<tool_call>` so the model sees the
+    trained shape. A pure chat (no `tools`, no `tool` roles, no `tool_calls`)
+    still flattens exactly as Phase 2 did.
     """
     has_tool_history = any(
         mm.role == "tool" or (mm.role == "assistant" and mm.tool_calls)
@@ -155,7 +159,7 @@ def _render_prompt(model: Model, req: ChatCompletionRequest) -> str:
     return render_pairs(model, pairs)
 
 
-# Public alias — backlog asks to settle on one name; keep both so callers
+# Public alias -- backlog asks to settle on one name; keep both so callers
 # and tests can use either spelling without churn.
 render_prompt = _render_prompt
 
@@ -163,8 +167,6 @@ render_prompt = _render_prompt
 def _request_params(req: ChatCompletionRequest) -> RequestParams:
     # Shared builder so a new sampling field cannot be added to one surface and
     # forgotten on the other (see server/params.py).
-    from .params import build_params
-
     return build_params(
         max_tokens=req.resolved_max_tokens(DEFAULT_MAX_TOKENS),
         # `stop` may be a bare string or a list of them; the engine takes the normalised
@@ -185,6 +187,12 @@ def _parsing_names(req: ChatCompletionRequest) -> set[str] | None:
     behave exactly as it did before tool calling existed, even if the model spontaneously
     emits something that looks like a call. Same for `tool_choice="none"` -- the client
     said it will not dispatch calls, so `<tool_call>` text is just text.
+
+    Follow-up contract (intentional asymmetry with `_message_pairs`): history still
+    renders as `<tool_call>` / `<tool_response>` when `tools` is omitted but prior
+    turns carry `tool_calls` / `tool` roles, so the model sees the trained shape;
+    however new output is NOT parsed into calls unless `tools` is declared this turn.
+    Parsing a call the client never offered would hand it a dispatch it cannot honor.
 
     `None` is the parser's own spelling of "off" (see tools.ToolCallStreamParser), so it
     is handed over as-is rather than branched on here; the Anthropic surface derives the

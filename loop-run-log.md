@@ -62,3 +62,17 @@ Append one entry per run. Prune entries older than 30 days.
   "outcome": "fix-proposed"
 }
 ```
+- 2026-09-10T05:30:00Z — daily-triage — fleet 8 agents hardening — 6 found (ascii, asymmetry, vacuous, BLE001 alias, unpinned helpers, delimiter), 6 fixed, 0 escalations, ~18k tokens, 300s
+
+```json
+{
+  "run_id": "2026-09-10T05:30:00Z",
+  "pattern": "daily-triage",
+  "duration_s": 300,
+  "items_found": 6,
+  "actions_taken": 6,
+  "escalations": 0,
+  "tokens_estimate": 18000,
+  "outcome": "fix-proposed"
+}
+```

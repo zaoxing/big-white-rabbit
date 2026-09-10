@@ -95,7 +95,12 @@ def test_sampling_params_are_accepted(client) -> None:
             },
         )
         assert r.status_code == 200, f"{payload}: {r.text}"
-        assert r.json()["usage"]["completion_tokens"] == 4 or r.json()["usage"]["completion_tokens"] >= 1
+        # Greedy-capable params must bind exactly: max_tokens 4 with a prompt that
+        # cannot finish early yields exactly 4 (cap path, not natural end).
+        # Seed -1 is random but still capped, so the same bound holds.
+        assert r.json()["usage"]["completion_tokens"] == 4, (
+            f"{payload}: {r.json()['usage']}"
+        )
 
 
 def test_anthropic_streaming_tool_use_path(served, monkeypatch) -> None:

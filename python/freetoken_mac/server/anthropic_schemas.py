@@ -16,6 +16,7 @@ with no engine coupling; trimmed to the surface this server actually serves.
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from typing import Any, Literal
@@ -226,8 +227,6 @@ def sse(event_name: str, payload: dict[str, Any]) -> bytes:
     on the event name, so omitting it yields a stream that parses as JSON but decodes to
     nothing.
     """
-    import json
-
     return (
         f"event: {event_name}\n"
         f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"

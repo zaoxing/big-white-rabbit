@@ -240,8 +240,10 @@ def render_assistant_turn(text: str, tool_calls: Sequence[Any] | None) -> str:
                 args_json = json.dumps(args, ensure_ascii=False)
             except (TypeError, ValueError):
                 args_json = "{}"
+        # json.dumps neutralizes `"` / `\` in replayed names so a crafted
+        # history entry cannot break the call object (normal names unchanged).
         blocks.append(
-            f'{TOOL_CALL_OPEN}\n{{"name": "{name}", "arguments": {args_json}}}'
+            f"{TOOL_CALL_OPEN}\n{{\"name\": {json.dumps(name)}, \"arguments\": {args_json}}}"
             f"\n{TOOL_CALL_CLOSE}"
         )
     if not blocks:
@@ -255,8 +257,14 @@ def render_assistant_turn(text: str, tool_calls: Sequence[Any] | None) -> str:
 
 
 def render_tool_response(text: str) -> str:
-    """Wrap a `role: "tool"` result the way the template does, as a user turn."""
-    return f"{TOOL_RESPONSE_OPEN}\n{text}\n{TOOL_RESPONSE_CLOSE}"
+    """Wrap a `role: "tool"` result the way the template does, as a user turn.
+
+    Neutralizes `</tool_response` in the result so a tool output cannot close
+    the block early and inject fake turns. Normal results (no delimiter) are
+    byte-identical.
+    """
+    safe = text.replace("</tool_response", "<\\/tool_response")
+    return f"{TOOL_RESPONSE_OPEN}\n{safe}\n{TOOL_RESPONSE_CLOSE}"
 
 
 # --- response-side parsing ----------------------------------------------------------

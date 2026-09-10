@@ -3,7 +3,7 @@
 The engine retires for one of six reasons (see `engine/metal_engine.py:_retire`
 call sites): ``eog``, ``length``, ``context``, ``cancelled``,
 ``stop_sequence``, ``error``. Both protocol surfaces must map every one,
-and the two tables must agree on which causes exist — a new engine reason
+and the two tables must agree on which causes exist -- a new engine reason
 added to one table and not the other is a response whose text and reason
 disagree.
 
@@ -25,7 +25,7 @@ _REASONS: dict[str, tuple[str, str]] = {
     "error": ("stop", "end_turn"),
 }
 
-# Derived views for the two surfaces — kept as plain dicts so existing
+# Derived views for the two surfaces -- kept as plain dicts so existing
 # imports (`from reason import _FINISH_REASONS`) keep working, and so the
 # dict-identity tests in `test_error_reason_mapping` remain valid.
 FINISH_REASONS: dict[str, str] = {k: v[0] for k, v in _REASONS.items()}
