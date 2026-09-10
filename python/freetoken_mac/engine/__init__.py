@@ -7,12 +7,14 @@ from .batching import (
 )
 from .config import EngineConfig, RequestParams
 from .metal_engine import MetalEngine, SeqIdExhausted, StepOutput
+from .ngram import NgramTable
 
 __all__ = [
     "AdmissionPolicy",
     "EngineConfig",
     "FCFSPolicy",
     "MetalEngine",
+    "NgramTable",
     "PrefillChunk",
     "RequestParams",
     "RequestState",
