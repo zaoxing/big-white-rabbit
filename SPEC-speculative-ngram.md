@@ -67,8 +67,11 @@ already issues per step.
 - [ ] T1 (S): `NgramTable` in `engine/` + unit tests. Verify: new test file green.
 - [ ] T2 (M): refactor `_advance_row` into sample + `advance_token(req, token)`.
       Acceptance: suite green, zero behavior change.
-- [ ] T3 (M): draft + verify + rewind in `MetalEngine.step` (greedy-gated,
-      budget-aware, counters). Acceptance: invariant + reduced `decode_calls`.
+- [x] T3 (M): draft + verify + rewind in `MetalEngine.step` (greedy-gated,
+      budget-aware, counters). DONE commit `1aca139`, verifier APPROVE.
+      Measured on 0.5B periodic prompt: 16 -> 4 decode calls, 12/12 accepted
+      (rate 1.0), byte-identical. One fix during T3: n_pos off-by-one
+      (pos_base+len, not +1+len) caught by llama position check.
 - [ ] Checkpoint: acceptance-rate numbers on small model before big models.
 - [ ] T4 (S): 8B/27B benchmark + report.
 - [ ] T5 (S): verifier pass + `STATE.md` evidence.
