@@ -81,11 +81,32 @@ already issues per step.
       27B natural + spec ABORTED pre-fix (inclusive-rewind fix + all-wrong
       regression test in `d6e7061`); post-fix the blocker is structural (hybrid
       rewind needs n_rs_seq), so 27B+spec now raises ValueError at construction.
-- [ ] T5 (PROPOSED, needs human approval -- breaks "no C++ changes" assumption):
-      plumb `n_rs_seq` through `ContextParams`, surface `seq_rm`'s bool
-      (return/throw), gate speculation on real rewind support, measure
-      recurrent-snapshot memory cost on qwen35. Unlocks 27B natural.
-- [ ] T5 (S): verifier pass + `STATE.md` evidence.
+- [ ] T5a (M, PROPOSED -- first C++ change, needs human approval): rewind
+      foundation. `ContextParams.n_rs_seq` (0 = today) -> `lp.n_rs_seq`;
+      `memory_seq_rm` surfaces failure (throw on false -- a silent desync is
+      abort-class); new `n_rs_seq()` readback getter. Engine: when
+      `speculative=True`, request `n_rs_seq = spec_max_drafts + 1`; replace the
+      arch denylist with a capability check (denylist detects known hybrids,
+      readback confirms support -- a future hybrid with rollback support just
+      works). Rebuild extension in worktree, suite green. Validate: 27B
+      natural + n-gram works (the T4 blocker), report rate + snapshot memory
+      cost on qwen35. Fresh 3-attempt budget.
+- [ ] T5b (L, PROPOSED -- needs human approval, after T5a): native MTP wiring.
+      `ModelParams.load_mtp` (loads `blk.64.nextn.*`; verified present in the
+      27B AND the 4B GGUFs); MTP draft context (`LLAMA_CONTEXT_TYPE_MTP`) with
+      nextn embedding set/get bindings; engine `MtpDrafter` (target decodes
+      base, hook harvests hidden states, draft context autoregresses D drafts,
+      target verifies the block reusing `_verify_rows` + rewind machinery);
+      config `mtp: bool = False, mtp_max_drafts: int = 4` (mutually exclusive
+      with `speculative` in Phase 1 -- combining is an upstream experiment,
+      not ours). Tests on the 4B (fast iteration, has MTP head): invariant
+      mtp on/off identical, calls reduction, acceptance counters; 27B
+      benchmark last. Watch items: our pin predates the Metal
+      duplicate-buffer fix (MTP head may reopen the full GGUF buffer -- verify
+      early, port fix or trimmed GGUF if hit); upstream reports MTP-on-Metal
+      anywhere from -24% to +2x, so the benchmark GATES adoption, code stays
+      default-off either way. Fresh 3-attempt budget.
+- [ ] T5 (S): verifier pass + `STATE.md` evidence (per item above).
 
 L2 rules: worktree per attempt, <= 3 attempts per item, verifier sub-agent after
 implementation, no push without human approval.
