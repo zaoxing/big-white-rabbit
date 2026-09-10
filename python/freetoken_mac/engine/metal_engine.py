@@ -268,7 +268,18 @@ class MetalEngine:
 
     def _advance_row(self, req: RequestState, row: int) -> StepOutput:
         # Per-sequence chain: this request's params and accepted-token history only.
-        token = self.ctx.sample_seq(req.seq_id, row)
+        return self._advance_token(req, self.ctx.sample_seq(req.seq_id, row))
+
+    def _advance_token(self, req: RequestState, token: int) -> StepOutput:
+        """Account for one already-sampled (or verified) token.
+
+        Split from ``_advance_row`` for speculative decoding: the verify step
+        samples draft rows itself and feeds each accepted token here, so every
+        finish rule below (EOG, stop sequence, cap, context) applies to
+        speculated tokens exactly as it does to normally decoded ones. Callers
+        feeding a token from any source other than this request's own sampler
+        chain must have replayed the chain to match (see ``accept_seq``).
+        """
         if req.params.stop_at_eog and self.model.is_eog(token):
             return self._retire(req, "eog", token=token)
 
