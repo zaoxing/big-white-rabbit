@@ -13,7 +13,7 @@ import time
 
 
 def _add_model_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--model", "-m", required=True, help="path to a .gguf model file")
+    p.add_argument("--model", "-m", required=True, help="model weights: a .gguf file for --engine metal, a directory for --engine mlx")
     p.add_argument("--n-gpu-layers", type=int, default=-1,
                    help="layers on the Metal backend (-1 = all, the unified-memory default)")
     p.add_argument("--ctx-size", "-c", type=int, default=4096, help="context length")
@@ -111,10 +111,8 @@ def _cmd_serve(argv: list[str]) -> int:
     ap.add_argument("--prefix-cache", action="store_true",
                     help="auto-pin repeated prompt prefixes to skip re-prefill "
                          "across requests (SPEC-prefix-cache.md)")
-    ap.add_argument("--engine", default="metal", choices=("metal", "mlx"),
-                    help="inference backend: 'metal' serves a GGUF via llama.cpp, "
-                         "'mlx' serves an MLX weights directory via mlx-lm "
-                         "(needs the mlx extra; --model names the directory)")
+    ap.add_argument("--engine", default="mlx", choices=("metal", "mlx"),
+                    help="inference backend (default mlx; 'metal' serves a GGUF via llama.cpp)")
     ap.add_argument("--log-level", default="info")
     args = ap.parse_args(argv)
 

@@ -333,7 +333,7 @@ def served(model: ftm.Model):
     from freetoken_mac.server.app import build_app
 
     app = build_app(
-        model, ftm.EngineConfig(n_ctx=2048, n_batch=256, n_ubatch=256, n_seq_max=4)
+        model, ftm.EngineConfig(n_ctx=2048, n_batch=256, n_ubatch=256, n_seq_max=4, engine="metal")
     )
     with tc.TestClient(app) as c:
         yield app, c

@@ -91,6 +91,7 @@ def test_speculation_defaults_off(model: ftm.Model) -> None:
     """A default engine never drafts and reports no acceptance rate."""
     assert EngineConfig().speculative is False
     assert EngineConfig().spec_max_drafts == 4
+    assert EngineConfig().engine == "mlx"
     engine = run(model, False)
     assert engine.spec_drafted == 0
     assert engine.spec_accepted == 0

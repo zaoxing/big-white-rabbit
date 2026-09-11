@@ -30,7 +30,7 @@ needs_weights = pytest.mark.skipif(
     importlib.util.find_spec("mlx_lm") is None
     or not MODEL_PATH
     or not os.path.isdir(MODEL_PATH or ""),
-    reason="need the mlx extra and FTM_MLX_MODEL to run MLX backend tests",
+    reason="need mlx installed and FTM_MLX_MODEL to run MLX backend tests",
 )
 
 N_TOKENS = 8

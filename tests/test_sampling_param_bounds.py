@@ -54,7 +54,7 @@ def client(model: ftm.Model):
 
     app = build_app(
         model,
-        ftm.EngineConfig(n_ctx=1024, n_batch=256, n_ubatch=256, n_seq_max=N_SEQ_MAX),
+        ftm.EngineConfig(n_ctx=1024, n_batch=256, n_ubatch=256, n_seq_max=N_SEQ_MAX, engine="metal"),
     )
     with tc.TestClient(app) as c:
         yield c

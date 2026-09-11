@@ -6,10 +6,10 @@ token per step), no speculation, no prefix cache. The point is interface
 parity -- AsyncEngine, the routes, and the tests below treat this exactly
 like MetalEngine -- so the serving surface survives a backend swap.
 
-mlx-lm is an OPTIONAL dependency (``pip install freetoken-mac[mlx]``). Nothing
-in this module imports it at top level: the import happens in ``__init__``
-and raises a clear error naming the extra. ``import freetoken_mac`` without
-mlx installed keeps working (the everyday suite proves it).
+mlx-lm is a core dependency (it ships with freetoken-mac). Nothing in this
+module imports it at top level anyway: the import happens in ``__init__``
+so a broken install fails with a clear error naming the backend instead of
+at ``import freetoken_mac`` time.
 """
 
 from __future__ import annotations
@@ -22,15 +22,15 @@ from .metal_engine import MIN_RETAINED_FINISHED, StepOutput
 
 
 def _require_mlx():
-    """Import mlx-lm lazily, with an actionable error when absent."""
+    """Import mlx-lm lazily, with a clear error naming the backend."""
     try:
         import mlx.core as mx  # noqa: F401
         from mlx_lm import load
         from mlx_lm.sample_utils import make_sampler
     except ImportError as exc:
         raise ImportError(
-            "the mlx backend needs the mlx extra: "
-            "pip install 'freetoken-mac[mlx]'"
+            "the mlx backend needs mlx/mlx-lm installed "
+            "(pip install freetoken-mac)"
         ) from exc
     return load, make_sampler
 

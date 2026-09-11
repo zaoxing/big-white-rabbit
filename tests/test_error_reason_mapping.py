@@ -93,7 +93,7 @@ def test_wire_reports_error_as_generic_via_canned_engine() -> None:
 
     m = ftm.Model(path, ftm.ModelParams())
     try:
-        app = build_app(m, ftm.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=2))
+        app = build_app(m, ftm.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=2, engine="metal"))
         with tc.TestClient(app) as client:
             # monkeypatch stream to canned error
             old = app.state.engine.stream

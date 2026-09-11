@@ -138,7 +138,7 @@ def served(model: ftm.Model):
     from freetoken_mac.server.app import build_app
 
     app = build_app(
-        model, ftm.EngineConfig(n_ctx=2048, n_batch=256, n_ubatch=256, n_seq_max=4)
+        model, ftm.EngineConfig(n_ctx=2048, n_batch=256, n_ubatch=256, n_seq_max=4, engine="metal")
     )
     # raise_server_exceptions=False: the engine failure must surface the way a real
     # client sees it (a 500), instead of being re-raised into the test body.

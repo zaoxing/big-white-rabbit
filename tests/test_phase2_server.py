@@ -176,7 +176,7 @@ def client(model: ftm.Model):
     fastapi_testclient = pytest.importorskip("fastapi.testclient")
     from freetoken_mac.server.app import build_app
 
-    app = build_app(model, ftm.EngineConfig(n_ctx=1024, n_batch=256, n_ubatch=256, n_seq_max=4))
+    app = build_app(model, ftm.EngineConfig(n_ctx=1024, n_batch=256, n_ubatch=256, n_seq_max=4, engine="metal"))
     with fastapi_testclient.TestClient(app) as c:
         yield c
     # Leaving the context block ran the lifespan's shutdown, which closes the context.
@@ -291,7 +291,7 @@ def test_server_process_exits_cleanly() -> None:
         from fastapi.testclient import TestClient
 
         model = ftm.Model({MODEL_PATH!r}, ftm.ModelParams())
-        app = build_app(model)
+        app = build_app(model, ftm.EngineConfig(engine="metal"))
         with TestClient(app) as c:
             r = c.post("/v1/chat/completions", json={{
                 "model": "m",
