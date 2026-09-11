@@ -59,9 +59,17 @@ D+2 tokens.
 
 ## Task breakdown
 
-- [ ] T7a: `engine/draft.py` + mechanics tests.
-- [ ] T7b: MetalEngine integration + serve/launch/CLI + integration tests.
-- [ ] T7c: 27B<-4B bench, verifier, STATE.md.
+- [x] T7a: `engine/draft.py` + mechanics tests. DONE, 6/6 first-try green.
+- [x] T7b: MetalEngine integration + serve/launch/CLI + integration tests.
+      DONE commit `f1ca0f2`, verifier APPROVE. 0.5B self-draft: invariant
+      holds, calls<=, mutual exclusion enforced. 1 fix used (target snapshots
+      in draft mode) + 1 lint (noqa marker).
+- [x] T7c: 27B<-4B bench + gate. DONE with BLOCKER: repetitive 8.7->9.7 tok/s
+      (rate 0.93, identical); natural DIVERGES deterministically (bisected to
+      foreign-decodes + multi-row-target cross-context interference, upstream
+      #20075 class, pin predates fix; 4B/8B unaffected). Gate added:
+      `check_draft_target` refuses hybrid targets (27B refusal verified live);
+      attention path stays enabled. Attempts on T7 correctness: 2 used.
 
 L2 rules: worktree, <= 3 attempts per item, verifier after implementation,
 no push without human approval.
