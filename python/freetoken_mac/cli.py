@@ -105,6 +105,9 @@ def _cmd_serve(argv: list[str]) -> int:
                          "prefix copies (see docs/llamacpp-notes.md)")
     ap.add_argument("--served-model-name", default=None,
                     help="name reported by /v1/models (defaults to the GGUF's own)")
+    ap.add_argument("--draft-model", default=None, metavar="GGUF",
+                    help="draft model for draft-model speculation (SPEC-draft-model.md); "
+                         "its weights stay resident alongside the target's")
     ap.add_argument("--log-level", default="info")
     args = ap.parse_args(argv)
 
@@ -128,6 +131,7 @@ def _cmd_serve(argv: list[str]) -> int:
         kv_unified=args.kv_unified,
         served_model_name=args.served_model_name,
         log_level=args.log_level,
+        draft_model_path=args.draft_model,
     )
     return 0
 

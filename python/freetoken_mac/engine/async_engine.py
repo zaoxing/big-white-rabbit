@@ -97,6 +97,9 @@ class AsyncEngine:
             # is still alive then abort()s the process AFTER a clean shutdown. The worker
             # is joined, so this is the only thread touching the engine now.
             self.engine.ctx.close()
+            # Same abort class for the draft context, when speculation uses one.
+            if self.engine.draft is not None:
+                self.engine.draft.close()
 
     # --- submission --------------------------------------------------------------
 

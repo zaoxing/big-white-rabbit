@@ -17,6 +17,7 @@ from typing import Iterable, Sequence
 from .._freetoken_metal import Batch, Context, Model
 from .batching import AdmissionPolicy, FCFSPolicy, RequestState, StepBudget, StepPlan
 from .config import EngineConfig, RequestParams, StopSequenceFilter
+from .draft import DraftEngine
 from .ngram import NgramTable
 
 
@@ -100,6 +101,32 @@ def check_speculative_arch(arch: str | None, n_rs_seq: int) -> None:
         )
 
 
+def check_draft_target(arch: str | None) -> None:
+    """Refuse draft-MODEL speculation on hybrid targets (see above).
+
+    Measured 2026-09-10: a 27B qwen35 target diverges DETERMINISTICALLY once
+    foreign-context decodes interleave with multi-row target decodes
+    (bisected: prepare-only identical, decoy-drafts identical, packed drafts
+    without draft decodes identical, all-wrong n-gram identical incl. 64
+    rewinds; only foreign decodes + multi-row target diverges -- and only on
+    the 27B target, never on 0.5B/4B/8B). Upstream PR #20075 documents this
+    class (hybrid SSM speculative state corruption; soft rollbacks that rewind
+    position metadata without restoring tensor state); our pin predates the
+    fix. Attention targets stay enabled: their rewinds drop cells exactly, so
+    there is no state to corrupt. Unknown archs pass (fail-open for future
+    attention designs); a hybrid that provably decodes clean can be allow-
+    listed with evidence, not assumptions.
+    """
+    if arch in _HYBRID_RECURRENT_ARCHES:
+        raise ValueError(
+            f"draft-model speculation is disabled on hybrid architecture "
+            f"{arch!r}: interleaved draft decodes corrupt multi-row target "
+            f"decodes on this backend (measured silent divergence on 27B; "
+            f"upstream llama.cpp #20075 class, fix not in our pin). Use "
+            f"n-gram speculation instead, or re-verify after a pin bump."
+        )
+
+
 class MetalEngine:
     """Continuous-batching engine over a single llama.cpp Metal context."""
 
@@ -110,12 +137,22 @@ class MetalEngine:
         policy: AdmissionPolicy | None = None,
         *,
         default_params: RequestParams | None = None,
+        draft_model: Model | None = None,
     ) -> None:
         self.model = model
         self.config = config or EngineConfig()
         if self.config.spec_max_drafts < 0:
             raise ValueError(
                 f"spec_max_drafts must be >= 0; got {self.config.spec_max_drafts}"
+            )
+        if self.config.draft_max_drafts < 0:
+            raise ValueError(
+                f"draft_max_drafts must be >= 0; got {self.config.draft_max_drafts}"
+            )
+        if draft_model is not None and self.config.speculative:
+            raise ValueError(
+                "n-gram speculation (speculative=True) and a draft model are "
+                "mutually exclusive; pick one draft source"
             )
         self.policy: AdmissionPolicy = policy or FCFSPolicy()
         self.default_params = default_params or RequestParams()
@@ -124,13 +161,38 @@ class MetalEngine:
             # Mismatch rewinds span at most spec_max_drafts suffix cells; the
             # recurrent rollback needs at least that many snapshots (T5a).
             context_params.n_rs_seq = self.config.spec_max_drafts + 1
+        elif draft_model is not None:
+            # Same rewinds via the draft-sourced path: the TARGET verifies and
+            # rewinds identically no matter where drafts came from.
+            context_params.n_rs_seq = self.config.draft_max_drafts + 1
         self.ctx = Context(model, context_params)
-        if self.config.speculative:
+        if self.config.speculative or draft_model is not None:
             # After allocating the context: fail loud on hybrids whose context
             # reports no rollback snapshots (llama.cpp clamps unsupported
             # archs to 0), not mid-generation on the first rewind.
             check_speculative_arch(
                 model.meta_val("general.architecture"), self.ctx.n_rs_seq
+            )
+        # Draft-model speculation (SPEC-draft-model.md): a second context on
+        # the small model, sized to mirror the target streams (per-stream room
+        # must cover the target per-seq span, hence the TOTAL n_ctx). Same
+        # capability gate: the draft context partially rewinds on every
+        # mismatch, so it needs snapshots on hybrids too.
+        self.draft: DraftEngine | None = None
+        if draft_model is not None:
+            # Gate first: hybrid targets corrupt silently (see
+            # check_draft_target), before allocating a second context.
+            check_draft_target(model.meta_val("general.architecture"))
+            self.draft = DraftEngine(
+                draft_model,
+                n_ctx=self.ctx.n_ctx,
+                n_seq_max=self.ctx.n_seq_max,
+                n_batch=self.ctx.n_batch,
+                n_snapshots=self.config.draft_max_drafts + 1,
+            )
+            check_speculative_arch(
+                draft_model.meta_val("general.architecture"),
+                self.draft.ctx.n_rs_seq,
             )
 
         # Effective geometry only: n_ctx rounded up, n_batch clamped down, per-sequence
@@ -254,6 +316,16 @@ class MetalEngine:
             table = NgramTable()
             table.update_stream(tokens)
             self._spec_tables[request_id] = table
+        if self.draft is not None:
+            # Prefill the prompt into the draft context now, so the first
+            # step can propose immediately. Past target registration: on
+            # failure cancel the request (frees the slot via `_retire`,
+            # which also releases the half-prepared draft state) and reraise.
+            try:
+                self.draft.prepare(request_id, seq_id, tokens)
+            except BaseException:  # noqa: BLE001 - re-raised; cancel frees the slot
+                self.cancel(request_id)
+                raise
         return request_id
 
     def cancel(self, request_id: int) -> bool:
@@ -304,7 +376,18 @@ class MetalEngine:
         outputs: list[StepOutput] = []
         for entry in entries:
             if isinstance(entry, _VerifyEntry):
-                outputs.extend(self._verify(entry))
+                verify_outputs, accepted, matched = self._verify(entry)
+                outputs.extend(verify_outputs)
+                # Feed the newly confirmed tail back into the draft stream so
+                # the next propose continues from verified tokens. Live
+                # requests only: a request that just retired already released
+                # its draft state in `_retire`.
+                if self.draft is not None and not entry.req.finished:
+                    self.draft.sync(
+                        entry.req.request_id,
+                        entry.pos_base + 1 + matched,
+                        accepted[matched:],
+                    )
             else:
                 req, row = entry
                 outputs.append(self._advance(req, row))
@@ -442,6 +525,8 @@ class MetalEngine:
         positions.
         """
         drafts: dict[int, list[int]] = {}
+        if self.draft is not None:
+            return self._plan_model_drafts(plan, spare)
         if not self.config.speculative or spare <= 0:
             return drafts
         for request_id in plan.decode:
@@ -465,11 +550,45 @@ class MetalEngine:
                 spare -= len(predicted)
         return drafts
 
-    def _verify(self, entry: _VerifyEntry) -> list[StepOutput]:
+    def _plan_model_drafts(self, plan: StepPlan, spare: int) -> dict[int, list[int]]:
+        """Propose continuations from the draft model (SPEC-draft-model.md).
+
+        Same eligibility, budget, and room rules as the n-gram path; only the
+        source differs. Proposing runs draft decodes NOW (worker thread owns
+        both contexts), so a returned draft list has already been paid for --
+        callers must pack it.
+        """
+        drafts: dict[int, list[int]] = {}
+        if spare <= 0:
+            return drafts
+        for request_id in plan.decode:
+            if spare <= 0:
+                break
+            req = self._states.get(request_id)
+            if req is None or req.finished or req.params.temp > 0:
+                continue
+            assert self.draft is not None
+            room = self.ctx.n_ctx_seq - req.n_pos - 1
+            allow = min(self.config.draft_max_drafts, spare, room)
+            if allow <= 0:
+                continue
+            proposed = self.draft.propose(request_id, allow)
+            if proposed:
+                drafts[request_id] = proposed
+                spare -= len(proposed)
+        return drafts
+
+    def _verify(
+        self, entry: _VerifyEntry
+    ) -> tuple[list[StepOutput], list[int], int]:
         """Verify one request's drafts; same retire-on-failure contract as
         ``_advance`` (a request that fails mid-verify cannot resume: its KV
         positions are committed and its sampler chain may hold a sampled token
-        the caller never saw)."""
+        the caller never saw).
+
+        Returns the outputs plus the accepted tokens and how many of them
+        matched drafts (a draft-model caller needs both to re-sync).
+        """
         try:
             return self._verify_rows(entry)
         except BaseException:  # noqa: BLE001 - re-raised; must retire slot on any failure
@@ -479,7 +598,9 @@ class MetalEngine:
                 pass
             raise
 
-    def _verify_rows(self, entry: _VerifyEntry) -> list[StepOutput]:
+    def _verify_rows(
+        self, entry: _VerifyEntry
+    ) -> tuple[list[StepOutput], list[int], int]:
         req, drafts = entry.req, entry.drafts
         n_drafts = len(drafts)
         # Sample every row in order: row 0 continues the base token, row k > 0
@@ -540,7 +661,7 @@ class MetalEngine:
         # position (each check reads position+1, as on the plain path); settle
         # it on the next write position, which the following step decodes at.
         req.n_pos = final_n_pos
-        return outputs
+        return outputs, accepted, matched
 
     def _feed_table(self, req: RequestState, new_tokens: Sequence[int]) -> None:
         """Record the pairs ending in freshly accepted tokens.
@@ -565,6 +686,8 @@ class MetalEngine:
         req.next_token = None
         self._stop_filters.pop(req.request_id, None)
         self._spec_tables.pop(req.request_id, None)
+        if self.draft is not None:
+            self.draft.release(req.request_id)
         # Off the hot path and into the read window, before anything that can raise: a
         # failed KV or sampler reset must not leave a finished request being scanned by
         # every subsequent decode (or, worse, keeping `has_work` true forever).

@@ -233,8 +233,9 @@ def build_app(
     config: EngineConfig | None = None,
     *,
     served_model_name: str | None = None,
+    draft_model: Model | None = None,
 ) -> FastAPI:
-    engine = MetalEngine(model, config or EngineConfig())
+    engine = MetalEngine(model, config or EngineConfig(), draft_model=draft_model)
     async_engine = AsyncEngine(engine)
     model_name = served_model_name or model.meta_val("general.name") or "local"
 
