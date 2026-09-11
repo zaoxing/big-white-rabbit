@@ -199,3 +199,105 @@ def test_health_geometry() -> None:
         assert body["status"] == "ok"
         assert body["n_ctx"] == 4096
         assert body["free_seq_slots"] == 8
+
+
+REPETITIVE = "Count: " + " ".join(str(i % 10) for i in range(48))
+REP_TOKENS = 16
+
+
+def _rep_params(max_tokens: int = REP_TOKENS) -> RequestParams:
+    return RequestParams(temp=0.0, max_tokens=max_tokens, stop_at_eog=False)
+
+
+@pytest.fixture(scope="module")
+def plain_engine() -> MLXEngine:
+    return MLXEngine(MODEL_PATH, EngineConfig(n_ctx=4096))
+
+
+@pytest.fixture(scope="module")
+def spec_engine() -> MLXEngine:
+    return MLXEngine(
+        MODEL_PATH, EngineConfig(n_ctx=4096, speculative=True)
+    )
+
+
+def _run(engine: MLXEngine, prompt: str = REPETITIVE) -> int:
+    rid = engine.add_request(prompt, _rep_params())
+    list(engine.drain())
+    return rid
+
+
+@needs_weights
+def test_spec_on_off_byte_identical(
+    plain_engine: MLXEngine, spec_engine: MLXEngine
+) -> None:
+    """The invariant, MLX-flavored: speculation must be byte-identical."""
+    plain_id = _run(plain_engine)
+    spec_id = _run(spec_engine)
+    assert spec_engine.tokens_of(spec_id) == plain_engine.tokens_of(plain_id)
+    assert (
+        spec_engine.state(spec_id).finish_reason
+        == plain_engine.state(plain_id).finish_reason
+    )
+
+
+@needs_weights
+def test_speculative_engages(spec_engine: MLXEngine) -> None:
+    """Drafts packed and accepted on repetitive text; rate in bounds."""
+    before_drafted = spec_engine.spec_drafted
+    rid = _run(spec_engine)
+    assert spec_engine.spec_drafted > before_drafted
+    assert spec_engine.tokens_of(rid) is not None
+    rate = spec_engine.spec_acceptance_rate
+    assert rate is not None and 0.0 <= rate <= 1.0
+
+
+@needs_weights
+def test_spec_fallback_all_wrong(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every draft wrong: output still identical, recomputes ran, and the
+    request fell back to plain single-token evals."""
+    from freetoken_mac.engine import mlx_engine as engine_module
+
+    probe = MLXEngine(MODEL_PATH, EngineConfig(n_ctx=4096))
+    probe_id = _run(probe)
+    expected = probe.tokens_of(probe_id)
+    prompt_ids = probe.state(probe_id).prompt
+    vocab = probe._tokenizer.vocab_size
+    hist = prompt_ids + expected
+    wrong = {
+        tuple(hist[max(0, i - 2) : i]): (tok + 1) % vocab
+        for i, tok in enumerate(hist)
+    }
+
+    real_table = engine_module.NgramTable
+
+    class WrongTable(real_table):  # type: ignore[valid-type, misc]
+        def predict(self, context, max_tokens: int) -> list[int]:  # type: ignore[override]
+            token = wrong.get(tuple(context[-(self.order - 1) :]))
+            return [token] * max_tokens if token is not None else []
+
+    monkeypatch.setattr(engine_module, "NgramTable", WrongTable)
+    engine = MLXEngine(MODEL_PATH, EngineConfig(n_ctx=4096, speculative=True))
+    rid = _run(engine)
+    assert engine.tokens_of(rid) == expected
+    assert engine.spec_recomputes > 0, "no recompute ran on all-mismatch"
+    assert engine.spec_fallbacks == 1, "fallback never engaged"
+
+
+@needs_weights
+def test_speculation_defaults_off(plain_engine: MLXEngine) -> None:
+    assert plain_engine._spec_tables == {}
+    assert plain_engine.spec_drafted == 0
+    assert plain_engine.spec_acceptance_rate is None
+
+
+@needs_weights
+def test_nongreedy_ignores_spec() -> None:
+    engine = MLXEngine(MODEL_PATH, EngineConfig(n_ctx=4096, speculative=True))
+    rid = engine.add_request(
+        REPETITIVE, RequestParams(temp=1.0, max_tokens=8, stop_at_eog=False)
+    )
+    list(engine.drain())
+    assert engine.spec_drafted == 0
+    assert len(engine.tokens_of(rid)) == 8
+    assert engine.state(rid).finish_reason == "length"
