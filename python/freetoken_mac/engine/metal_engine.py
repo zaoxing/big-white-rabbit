@@ -100,6 +100,27 @@ def check_speculative_arch(arch: str | None, n_rs_seq: int) -> None:
         )
 
 
+def check_prefix_cache_arch(arch: str | None) -> None:
+    """Refuse the prefix cache on hybrid/recurrent architectures (see above).
+
+    Measured 2026-09-10: forked generations diverge NONDETERMINISTICALLY on
+    4B and 27B qwen35 (fork1 != fork2 != control on identical inputs), while
+    attention forks are exactly deterministic (triple-fork proof in tests).
+    Forking copies hybrid memory cells and truncates the suffix -- one of
+    those two ops is unfaithful on this backend (upstream #20075 class; our
+    pin predates the fix). Unknown archs pass (fail-open for future attention
+    designs); a hybrid with a proven-clean fork can be allow-listed with
+    evidence, not assumptions.
+    """
+    if arch in _HYBRID_RECURRENT_ARCHES:
+        raise ValueError(
+            f"prefix caching is disabled on hybrid architecture {arch!r}: "
+            f"fork copies diverge nondeterministically on this backend "
+            f"(SPEC-prefix-cache.md T8b evidence; upstream llama.cpp #20075 "
+            f"class). Re-verify after a pin bump."
+        )
+
+
 class MetalEngine:
     """Continuous-batching engine over a single llama.cpp Metal context."""
 
@@ -117,6 +138,15 @@ class MetalEngine:
             raise ValueError(
                 f"spec_max_drafts must be >= 0; got {self.config.spec_max_drafts}"
             )
+        if self.config.prefix_cache_pins < 0:
+            raise ValueError(
+                f"prefix_cache_pins must be >= 0; got {self.config.prefix_cache_pins}"
+            )
+        if self.config.prefix_cache_min_tokens < 1:
+            raise ValueError(
+                f"prefix_cache_min_tokens must be >= 1; got "
+                f"{self.config.prefix_cache_min_tokens}"
+            )
         self.policy: AdmissionPolicy = policy or FCFSPolicy()
         self.default_params = default_params or RequestParams()
         context_params = self.config.to_context_params()
@@ -125,13 +155,24 @@ class MetalEngine:
             # recurrent rollback needs at least that many snapshots (T5a).
             context_params.n_rs_seq = self.config.spec_max_drafts + 1
         self.ctx = Context(model, context_params)
+        arch = model.meta_val("general.architecture")
         if self.config.speculative:
             # After allocating the context: fail loud on hybrids whose context
             # reports no rollback snapshots (llama.cpp clamps unsupported
             # archs to 0), not mid-generation on the first rewind.
-            check_speculative_arch(
-                model.meta_val("general.architecture"), self.ctx.n_rs_seq
-            )
+            check_speculative_arch(arch, self.ctx.n_rs_seq)
+        if self.config.prefix_cache:
+            # Fail loud on hybrids: fork copies + truncates hybrid memory,
+            # which diverges nondeterministically on this backend (measured
+            # on 4B/27B qwen35; upstream #20075 class). Attention KV forks
+            # exactly (proven by triple-fork determinism tests).
+            check_prefix_cache_arch(arch)
+        # Pinning also stays off unless pins are configured: with zero pins
+        # the store could never hold anything and lookups would only waste
+        # scans. Attention always qualifies; hybrids never reach here.
+        self._prefix_cache_active = bool(
+            self.config.prefix_cache and self.config.prefix_cache_pins > 0
+        )
 
         # Effective geometry only: n_ctx rounded up, n_batch clamped down, per-sequence
         # room = n_ctx_seq (see StepBudget) -- never the requested values.
@@ -170,6 +211,14 @@ class MetalEngine:
         # Lifetime counters behind `spec_acceptance_rate` (T4 tunes on these).
         self.spec_drafted = 0
         self.spec_accepted = 0
+        # Pinned prefix slots (SPEC-prefix-cache.md): token-tuple -> seq_id in
+        # insertion (LRU) order. Pins hold seq_ids OUTSIDE the free pool, so
+        # every admission and retire accounts for both pools together; the
+        # invariant is len(pins) + len(free) + in-flight == n_seq_max. Only
+        # populated when prefix_cache is on.
+        self._pins: dict[tuple[int, ...], int] = {}
+        self.prefix_cache_hits = 0
+        self.prefix_cache_tokens_saved = 0
         self._next_request_id = 0
 
     # --- admission --------------------------------------------------------------
@@ -211,11 +260,22 @@ class MetalEngine:
                 f"{self.ctx.n_ctx_seq} (n_ctx {self.ctx.n_ctx} / n_seq_max "
                 f"{self.ctx.n_seq_max})"
             )
+        # Longest qualifying pin BEFORE touching slots: eviction below must
+        # spare the fork source (or drop the fork if its slot is needed).
+        match = self._find_pin(tokens)
         if not self._free_seq_ids:
-            raise SeqIdExhausted(
-                f"all {self.ctx.n_seq_max} sequence slots are in use "
-                "(raise EngineConfig.n_seq_max or wait for a request to finish)"
-            )
+            self._evict_pin(exclude=match[0] if match is not None else None)
+        if not self._free_seq_ids:
+            if match is not None:
+                # The only pin is the match itself: free its slot and fall
+                # back to a plain prefill rather than strand the request.
+                self._evict_pin(exclude=None)
+                match = None
+            if not self._free_seq_ids:
+                raise SeqIdExhausted(
+                    f"all {self.ctx.n_seq_max} sequence slots are in use "
+                    "(raise EngineConfig.n_seq_max or wait for a request to finish)"
+                )
 
         seq_id = self._free_seq_ids.pop(0)
         request_id = self._next_request_id
@@ -244,6 +304,15 @@ class MetalEngine:
         self._states[request_id] = RequestState(
             request_id=request_id, seq_id=seq_id, prompt=tokens, params=rp
         )
+        if match is not None and match[0] in self._pins:
+            # Fork the pinned prefix (best-effort: falls back to plain
+            # prefill, which is exactly the no-cache path, so correctness
+            # never depends on the fork succeeding).
+            try:
+                self._attempt_fork(request_id, seq_id, match)
+            except BaseException:  # noqa: BLE001 - re-raised; slot returns via cancel
+                self.cancel(request_id)
+                raise
         if rp.stop:
             self._stop_filters[request_id] = StopSequenceFilter(rp.stop)
         if self.config.speculative:
@@ -570,12 +639,108 @@ class MetalEngine:
         # every subsequent decode (or, worse, keeping `has_work` true forever).
         self._states.pop(req.request_id, None)
         self._archive(req)
+        # A fully-prefilled long prompt converts its slot into a pin instead
+        # of freeing it (SPEC-prefix-cache.md); anything else frees as before.
         # Free the slot before the sampler, so an exception cannot leak the seq_id.
-        self.ctx.memory_seq_rm(req.seq_id, -1, -1)
-        if req.seq_id not in self._free_seq_ids:
-            self._free_seq_ids.append(req.seq_id)
+        if not self._maybe_pin(req):
+            self.ctx.memory_seq_rm(req.seq_id, -1, -1)
+            if req.seq_id not in self._free_seq_ids:
+                self._free_seq_ids.append(req.seq_id)
         self.ctx.reset_seq_sampler(req.seq_id)
         return StepOutput(req.request_id, token, piece, True, reason)
+
+    def _attempt_fork(
+        self,
+        request_id: int,
+        seq_id: int,
+        match: tuple[tuple[int, ...], int, int],
+    ) -> bool:
+        """Copy a pin then truncate one short of the shared run (True).
+
+        Full-copy is always legal, even on split KV; the truncate re-decodes
+        its last covered token through the normal chunked-prefill path so a
+        logits row exists for sampling the continuation (re-decoding a
+        resident cell would abort, hence the backoff of exactly one token).
+        Best-effort: a failed truncate (hybrid suffix past the snapshot
+        range) falls back to a full clear + plain prefill -- the no-cache
+        path -- so False preserves correctness and only costs the copy.
+        """
+        key, pin_seq, shared = match
+        try:
+            self.ctx.memory_seq_cp(pin_seq, seq_id, 0, -1)
+            rewound = self.ctx.memory_seq_rm(seq_id, shared - 1, -1)
+        except Exception:  # noqa: BLE001 - best-effort fork; plain fallback below
+            rewound = False
+        if not rewound:
+            self.ctx.memory_seq_rm(seq_id, -1, -1)
+            return False
+        req_state = self._states[request_id]
+        req_state.n_prefilled = shared - 1
+        req_state.n_pos = shared - 1
+        self._pins[key] = self._pins.pop(key)  # refresh recency
+        self.prefix_cache_hits += 1
+        self.prefix_cache_tokens_saved += shared - 1
+        return True
+
+    def _find_pin(
+        self, tokens: Sequence[int]
+    ) -> tuple[tuple[int, ...], int, int] | None:
+        """Longest pinned prefix shared with ``tokens``: (key, seq_id, K).
+
+        Forks only when the backoff-adjusted savings (K - 1) clear
+        min_tokens; otherwise the copy+truncate costs more machinery than the
+        sub-chunk prefill it would save. Pure lookup -- recency refresh and
+        counters happen at the fork site, not here. Inactive (disabled or no
+        usable rewind) means no pins exist, so always None then.
+        """
+        if not self._prefix_cache_active or not self._pins:
+            return None
+        best: tuple[tuple[int, ...], int, int] | None = None
+        for key, seq_id in self._pins.items():
+            shared = 0
+            for a, b in zip(key, tokens):
+                if a != b:
+                    break
+                shared += 1
+            if shared - 1 >= self.config.prefix_cache_min_tokens and (
+                best is None or shared > best[2]
+            ):
+                best = (key, seq_id, shared)
+        return best
+
+    def _evict_pin(self, exclude: tuple[int, ...] | None) -> None:
+        """Free the least-recently-used pin that is not ``exclude``."""
+        for key in list(self._pins):
+            if key != exclude:
+                seq_id = self._pins.pop(key)
+                self.ctx.memory_seq_rm(seq_id, -1, -1)
+                if seq_id not in self._free_seq_ids:
+                    self._free_seq_ids.append(seq_id)
+                return
+
+    def _maybe_pin(self, req: RequestState) -> bool:
+        """Convert a retired slot into a pin when worthwhile (see SPEC).
+
+        Only fully-prefilled prompts qualify: a mid-prefill cancel leaves
+        fewer cells than the prompt claims, and forking from those would
+        desync every later position. Exact-match dedupe refreshes recency
+        without duplicating the slot; over capacity evicts the oldest.
+        Inactive means pins could never fork -- don't waste slots on them.
+        """
+        if not self._prefix_cache_active:
+            return False
+        if req.n_prefilled < len(req.prompt):
+            return False
+        if len(req.prompt) - 1 < self.config.prefix_cache_min_tokens:
+            return False
+        key = tuple(req.prompt)
+        if key in self._pins:
+            self._pins[key] = self._pins.pop(key)
+            return False
+        self._pins[key] = req.seq_id
+        while len(self._pins) > self.config.prefix_cache_pins:
+            self._evict_pin(exclude=key)
+        return True
 
     def _archive(self, req: RequestState) -> None:
         """Put a finished request in the read window, evicting the oldest if it is full.

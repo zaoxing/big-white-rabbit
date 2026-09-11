@@ -105,6 +105,9 @@ def _cmd_serve(argv: list[str]) -> int:
                          "prefix copies (see docs/llamacpp-notes.md)")
     ap.add_argument("--served-model-name", default=None,
                     help="name reported by /v1/models (defaults to the GGUF's own)")
+    ap.add_argument("--prefix-cache", action="store_true",
+                    help="auto-pin repeated prompt prefixes to skip re-prefill "
+                         "across requests (SPEC-prefix-cache.md)")
     ap.add_argument("--log-level", default="info")
     args = ap.parse_args(argv)
 
@@ -128,6 +131,7 @@ def _cmd_serve(argv: list[str]) -> int:
         kv_unified=args.kv_unified,
         served_model_name=args.served_model_name,
         log_level=args.log_level,
+        prefix_cache=args.prefix_cache,
     )
     return 0
 
