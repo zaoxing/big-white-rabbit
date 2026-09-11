@@ -71,6 +71,48 @@ no push without human approval.
 2. Keep the 17GB spike artifacts as the dev weights, or re-fetch on demand?
    (Propose: keep until Phase 1 green, then decide canonical.)
 
+## M12: n-gram speculation on MLX (approved)
+
+N-gram drafts transfer verbatim (`NgramTable` is backend-free); only the
+verify loop is new, because mlx-lm 0.31.3 has NO hybrid rewind: `ArraysCache`
+defines no trim/snapshot/restore (`_BaseCache.is_trimmable()` is False), so
+`trim_prompt_cache` returns 0 on our hybrid. Design from that fact:
+
+- Full match: cache advanced exactly the accepted stream -- nothing to do
+  (upstream's own "full-acceptance zero overhead" observation).
+- Any mismatch: RECOMPUTE -- fresh cache, re-feed prompt + accepted
+  (exact by construction, never lossy). Cost is O(prefix) per mismatch.
+- Auto-fallback: per-request rolling acceptance disables drafting below
+  0.5 after >= 8 drafted OR >= 3 recomputes (the second clause catches
+  sparse-draft prose that never packs enough to trip the first). Bounds
+  hostile-text cost to a few prefills; repetitive text never trips it.
+  Fallback disables DRAFTING only -- the manual loop is sticky, because a
+  stream generator would restart from the prompt (measured duplicate-prefix
+  bug). Temp>0 or flag-off requests never enter the manual loop at all.
+- Greedy only (temp <= 0 like Metal); stream path untouched when the flag
+  is off or the request isn't greedy. Drafts capped by remaining budget.
+- Manual loop owns its cache per spec request (`model.make_cache()`,
+  chunked prefill at 512 mirroring mlx-lm, `mx.eval` discipline per the
+  pinned source); EOG/stop/cap reuse `_feed`; counters
+  `spec_drafted/spec_accepted/spec_recomputes` mirror the Metal names.
+- Correctness invariant (same as T3): recompute is exact, so output is
+  byte-identical at ANY acceptance rate -- including the all-wrong case.
+
+## M12 verdict (measured 2026-09-10, 27B MLX, in-harness, cooled box)
+
+- Repetitive: off 10.3 -> on 11.8 tok/s (**1.15x**), rate 1.0, 0 recomputes,
+  identical. (Smaller win than Metal's 1.5-1.66x: the base is already fast
+  and verify-width overhead eats proportionally more.)
+- Prose: off 12.8 -> on 9.6 tok/s (**0.75x**), rate 0.0, 2 recomputes,
+  identical. Recompute tax is real; default-off contains it, fallback
+  bounds it. Sparse-prose shape (7 drafted, below both trigger counts)
+  noted as a tuning follow-up, NOT implemented (attempt budget exhausted
+  at 3: piece-sig, base-emit, sticky-loop).
+- Bugs caught by tests along the way, all fixed: _feed piece arg, base
+  token dropped at index 0 (now emitted at prefill like Metal), fallback
+  restarting via stream path (manual loop now sticky).
+- Net: ship default-off for repetitive/agent text; prose users leave it off.
+
 ## M11: MLX as default (approved: code + docs)
 
 `EngineConfig.engine` and `ftm serve --engine` default to `mlx`; `mlx`/`mlx-lm`

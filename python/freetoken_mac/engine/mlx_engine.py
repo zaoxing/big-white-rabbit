@@ -1,10 +1,12 @@
 """MLXEngine: mlx-lm behind the MetalEngine interface (SPEC-mlx-engine.md).
 
-Phase 1 is single-stream plain decode only: no batching across requests (each
-request owns an independent mlx generator; the worker thread drives them one
-token per step), no speculation, no prefix cache. The point is interface
-parity -- AsyncEngine, the routes, and the tests below treat this exactly
-like MetalEngine -- so the serving surface survives a backend swap.
+Each request owns an independent mlx generator (stream path) or an owned
+cache (speculative path); the worker thread drives them one step at a time.
+N-gram speculation (SPEC-mlx-engine.md M12) reuses ``NgramTable`` verbatim --
+only the verify loop is backend-specific, because mlx-lm 0.31.3 has no hybrid
+rewind: on any mismatch the cache is rebuilt exactly by re-feeding (never
+lossy), and a per-request rolling acceptance disables drafting below 0.5
+after 8 drafted. Greedy only, like Metal.
 
 mlx-lm is a core dependency (it ships with freetoken-mac). Nothing in this
 module imports it at top level anyway: the import happens in ``__init__``
@@ -19,6 +21,7 @@ from typing import Iterable, Iterator, Sequence
 from .batching import RequestState
 from .config import EngineConfig, RequestParams, StopSequenceFilter
 from .metal_engine import MIN_RETAINED_FINISHED, StepOutput
+from .ngram import NgramTable
 
 
 def _require_mlx():
@@ -33,6 +36,31 @@ def _require_mlx():
             "(pip install freetoken-mac)"
         ) from exc
     return load, make_sampler
+
+
+def _mx():
+    """mlx.core, lazily (same no-top-level-import rule as above)."""
+    try:
+        import mlx.core as mx
+    except ImportError as exc:
+        raise ImportError(
+            "the mlx backend needs mlx/mlx-lm installed "
+            "(pip install freetoken-mac)"
+        ) from exc
+    return mx
+
+
+# Prefill chunking mirrors mlx-lm's own default: bound transient activation
+# memory no matter how long the prompt is.
+_PREFILL_CHUNK = 512
+# Auto-fallback: stop drafting for a request past this many drafted tokens
+# or this many recomputes when its rolling acceptance is below the rate.
+# Bounds hostile-text cost to a few full re-prefills; repetitive text never
+# trips it. The recompute clause catches sparse-draft prose that never packs
+# enough drafts to reach the count clause.
+_SPEC_FALLBACK_MIN_DRAFTS = 8
+_SPEC_FALLBACK_MIN_RECOMPUTES = 3
+_SPEC_FALLBACK_MIN_RATE = 0.5
 
 
 class _MLXContext:
@@ -62,6 +90,10 @@ class _MLXContext:
         eng._states.clear()
         eng._retired.clear()
         eng._streams.clear()
+        eng._caches.clear()
+        eng._spec_tables.clear()
+        eng._spec_ok.clear()
+        eng._spec_stats.clear()
         eng._model = None
         eng._tokenizer = None
         try:
@@ -117,6 +149,18 @@ class MLXEngine:
         self._retired: dict[int, RequestState] = {}
         self._retired_limit = max(8, MIN_RETAINED_FINISHED)
         self._decode_calls = 0
+        # Speculative state, populated only when config.speculative is on (so
+        # a default engine allocates nothing extra per request): per-request
+        # draft tables, owned caches, fallback flags, and
+        # [drafted, accepted, recomputes] per request.
+        self._spec_tables: dict[int, NgramTable] = {}
+        self._caches: dict[int, list] = {}
+        self._spec_ok: dict[int, bool] = {}
+        self._spec_stats: dict[int, list[int]] = {}
+        self.spec_drafted = 0
+        self.spec_accepted = 0
+        self.spec_recomputes = 0
+        self.spec_fallbacks = 0
         self._next_request_id = 0
 
     # --- helpers ------------------------------------------------------------
@@ -148,6 +192,10 @@ class MLXEngine:
         req.next_token = None
         self._stop_filters.pop(req.request_id, None)
         self._streams.pop(req.request_id, None)
+        self._spec_tables.pop(req.request_id, None)
+        self._caches.pop(req.request_id, None)
+        self._spec_ok.pop(req.request_id, None)
+        self._spec_stats.pop(req.request_id, None)
         self._states.pop(req.request_id, None)
         self._retired[req.request_id] = req
         while len(self._retired) > self._retired_limit:
@@ -234,6 +282,14 @@ class MLXEngine:
         )
         if rp.stop:
             self._stop_filters[request_id] = StopSequenceFilter(rp.stop)
+        if self.config.speculative:
+            # Seed with the prompt (same rule as MetalEngine); the cache
+            # itself is built lazily on the first spec step.
+            table = NgramTable()
+            table.update_stream(tokens)
+            self._spec_tables[request_id] = table
+            self._spec_ok[request_id] = True
+            self._spec_stats[request_id] = [0, 0, 0]
         return request_id
 
     def cancel(self, request_id: int) -> bool:
@@ -265,34 +321,194 @@ class MLXEngine:
         )
 
     def step(self) -> list[StepOutput]:
-        """Advance every in-flight request by one token."""
+        """Advance every in-flight request by one step (one token, or one
+        verify round for speculating requests)."""
         self._ensure_open()
         outputs: list[StepOutput] = []
         for req in list(self._states.values()):
             if req.finished:
                 continue
-            stream = self._streams.get(req.request_id)
-            if stream is None:
-                self._start(req)
-                stream = self._streams[req.request_id]
+            if self._use_manual(req):
+                if req.request_id not in self._caches:
+                    outputs.extend(self._start_spec(req))
+                    if req.finished:
+                        continue
+                outputs.extend(self._verify(req))
+            else:
+                outputs.extend(self._step_stream(req))
+        return outputs
+
+    def _use_manual(self, req: RequestState) -> bool:
+        """Manual-loop ownership is sticky: once a request owns a cache it
+        stays manual. Falling back to the stream path would restart
+        generation from the prompt (a fresh generator knows nothing of
+        emitted tokens), so fallback only ever disables DRAFTING, never the
+        loop. Entry requires the flag plus greedy sampling."""
+        if req.request_id in self._caches:
+            return True
+        return bool(self.config.speculative and req.params.temp <= 0)
+
+    def _start_spec(self, req: RequestState) -> list[StepOutput]:
+        """Prefill the prompt into an owned cache and emit the continuation.
+
+        Mirrors MetalEngine's prefill-completing row: the sampled base token
+        is OUTPUT now (via _feed, so EOG/stop/cap apply) and stored as
+        next_token for the following verify step to pack. Dropping it here
+        would shift every later verify by one (the index-0 divergence).
+        """
+        try:
+            mx = _mx()
+            cache = self._model.make_cache()
+            tokens = req.prompt
+            logits = None
+            for i in range(0, len(tokens), _PREFILL_CHUNK):
+                chunk = tokens[i : i + _PREFILL_CHUNK]
+                logits = self._model(mx.array(chunk)[None], cache=cache)
+            mx.eval(logits)
+            self._caches[req.request_id] = cache
+            base = int(mx.argmax(logits[0, -1]).item())
+            req.next_token = base
+            return [self._feed(req, base, self._tokenizer.decode([base]))]
+        except BaseException:  # noqa: BLE001 - re-raised; must retire slot on any failure
             try:
-                chunk = next(stream)
-            except StopIteration:
-                # Generator spent without our rules firing: the request made
-                # its cap exactly (mlx stops after max_tokens) or something
-                # odd happened. Length iff we produced the full cap.
-                if req.n_generated >= req.params.max_tokens:
-                    outputs.append(self._retire(req, "length"))
-                else:
-                    outputs.append(self._retire(req, "error"))
-                continue
-            outputs.append(self._feed(req, chunk.token, chunk.text))
-            if chunk.finish_reason in ("length", "stop") and not req.finished:
-                # Belt-and-braces: our rules below retire first in every
-                # reachable case (max_tokens == mlx's cap, EOS in our EOG
-                # set); this only fires if mlx stops early for another
-                # reason, and hanging would be worse than a wrong reason.
-                outputs.append(self._retire(req, "length"))
+                self._retire(req, "error")
+            except BaseException:  # noqa: BLE001 - must never mask the real failure
+                pass
+            raise
+
+    def _refill(self, req: RequestState) -> None:
+        """Rebuild the cache exactly: re-feed prompt + accepted tokens.
+
+        The mismatch path: the evaluated batch advanced the cache past the
+        accepted prefix and ArraysCache cannot rewind, so replay from scratch.
+        Exact by construction -- same tokens, same order, same positions.
+        """
+        mx = _mx()
+        cache = self._model.make_cache()
+        tokens = req.prompt + req.output_tokens
+        logits = None
+        for i in range(0, len(tokens), _PREFILL_CHUNK):
+            chunk = tokens[i : i + _PREFILL_CHUNK]
+            logits = self._model(mx.array(chunk)[None], cache=cache)
+        mx.eval(logits)
+        self._caches[req.request_id] = cache
+        req.next_token = int(mx.argmax(logits[0, -1]).item())
+
+    def _verify(self, req: RequestState) -> list[StepOutput]:
+        """Verify one request's drafts; same retire-on-failure contract as
+        ``_advance`` on MetalEngine. Returns every accepted token's output."""
+        try:
+            return self._verify_rows(req)
+        except BaseException:  # noqa: BLE001 - re-raised; must retire slot on any failure
+            try:
+                self._retire(req, "error")
+            except BaseException:  # noqa: BLE001 - must never mask the real failure
+                pass
+            raise
+
+    def _verify_rows(self, req: RequestState) -> list[StepOutput]:
+        mx = _mx()
+        table = self._spec_tables[req.request_id]
+        remaining = req.params.max_tokens - req.n_generated
+        max_drafts = (
+            self.config.spec_max_drafts
+            if self._spec_ok.get(req.request_id, True)
+            else 0
+        )
+        allow = max(0, min(max_drafts, remaining - 1))
+        history = req.prompt + req.output_tokens
+        context = history[-(table.order - 1) :] if table.order > 1 else []
+        drafts = table.predict(context, allow)
+        base = req.next_token
+        assert base is not None
+        rows = [base, *drafts]
+        logits = self._model(
+            mx.array(rows)[None], cache=self._caches[req.request_id]
+        )
+        mx.eval(logits)
+        self.spec_drafted += len(drafts)
+        stats = self._spec_stats[req.request_id]
+        stats[0] += len(drafts)
+        accepted: list[int] = []
+        matched = 0
+        for k in range(len(rows)):
+            token = int(mx.argmax(logits[0, k]).item())
+            accepted.append(token)
+            if k < len(drafts):
+                if token != drafts[k]:
+                    break
+                matched += 1
+            # k == len(drafts) is the bonus row past the last draft:
+            # conditioned on a fully matched prefix, so always valid output.
+        self.spec_accepted += matched
+        stats[1] += matched
+        if len(accepted) < len(rows):
+            # Mismatch: the cache advanced past the accepted prefix and
+            # cannot rewind -- rebuild it exactly. Full matches skip this:
+            # the cache already holds exactly the accepted stream.
+            self.spec_recomputes += 1
+            stats[2] += 1
+            self._refill(req)
+        self._feed_table(req, accepted)
+        drafted, accepted_n, recomputed = stats
+        if (
+            drafted > 0
+            and (
+                drafted >= _SPEC_FALLBACK_MIN_DRAFTS
+                or recomputed >= _SPEC_FALLBACK_MIN_RECOMPUTES
+            )
+            and accepted_n / drafted < _SPEC_FALLBACK_MIN_RATE
+        ):
+            if self._spec_ok.get(req.request_id, True):
+                self._spec_ok[req.request_id] = False
+                self.spec_fallbacks += 1
+        outputs: list[StepOutput] = []
+        for token in accepted:
+            if len(req.prompt) + req.n_generated >= self.config.n_ctx:
+                piece = self._tokenizer.decode([token])
+                outputs.append(self._retire(req, "context", token, piece))
+                break
+            outputs.append(self._feed(req, token, self._tokenizer.decode([token])))
+            if outputs[-1].finished:
+                break
+        return outputs
+
+    def _feed_table(self, req: RequestState, new_tokens: Sequence[int]) -> None:
+        """Record the pairs ending in freshly accepted tokens (same bounded-
+        window rule as MetalEngine: only the trailing order-1 history plus
+        the new tokens, never O(history) per step)."""
+        table = self._spec_tables.get(req.request_id)
+        if table is None or not new_tokens:
+            return
+        prefix = (
+            (req.prompt + req.output_tokens)[-(table.order - 1) :]
+            if table.order > 1
+            else []
+        )
+        table.update_stream([*prefix, *new_tokens])
+
+    def _step_stream(self, req: RequestState) -> list[StepOutput]:
+        """Advance one request down the plain generator path."""
+        stream = self._streams.get(req.request_id)
+        if stream is None:
+            self._start(req)
+            stream = self._streams[req.request_id]
+        try:
+            chunk = next(stream)
+        except StopIteration:
+            # Generator spent without our rules firing: the request made
+            # its cap exactly (mlx stops after max_tokens) or something
+            # odd happened. Length iff we produced the full cap.
+            if req.n_generated >= req.params.max_tokens:
+                return [self._retire(req, "length")]
+            return [self._retire(req, "error")]
+        outputs = [self._feed(req, chunk.token, chunk.text)]
+        if chunk.finish_reason in ("length", "stop") and not req.finished:
+            # Belt-and-braces: our rules below retire first in every
+            # reachable case (max_tokens == mlx's cap, EOS in our EOG
+            # set); this only fires if mlx stops early for another
+            # reason, and hanging would be worse than a wrong reason.
+            outputs.append(self._retire(req, "length"))
         return outputs
 
     def _feed(self, req: RequestState, token: int, piece: str) -> StepOutput:
@@ -325,6 +541,13 @@ class MLXEngine:
     @property
     def n_free_seq_slots(self) -> int:
         return max(0, self.config.n_seq_max - len(self._states))
+
+    @property
+    def spec_acceptance_rate(self) -> float | None:
+        """Fraction of drafted tokens the target confirmed, or None before any."""
+        if self.spec_drafted == 0:
+            return None
+        return self.spec_accepted / self.spec_drafted
 
     def state(self, request_id: int) -> RequestState:
         return self._lookup(request_id)
