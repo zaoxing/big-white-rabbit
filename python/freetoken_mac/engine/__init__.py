@@ -8,6 +8,7 @@ from .batching import (
 from .config import EngineConfig, RequestParams
 from .draft import DraftEngine
 from .metal_engine import MetalEngine, SeqIdExhausted, StepOutput
+from .mlx_engine import MLXEngine
 from .ngram import NgramTable
 
 __all__ = [
@@ -16,6 +17,7 @@ __all__ = [
     "EngineConfig",
     "FCFSPolicy",
     "MetalEngine",
+    "MLXEngine",
     "NgramTable",
     "PrefillChunk",
     "RequestParams",
