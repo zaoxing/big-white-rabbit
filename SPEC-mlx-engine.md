@@ -98,6 +98,21 @@ defines no trim/snapshot/restore (`_BaseCache.is_trimmable()` is False), so
 - Correctness invariant (same as T3): recompute is exact, so output is
   byte-identical at ANY acceptance rate -- including the all-wrong case.
 
+## M12 verdict (measured 2026-09-10, 27B MLX, in-harness, cooled box)
+
+- Repetitive: off 10.3 -> on 11.8 tok/s (**1.15x**), rate 1.0, 0 recomputes,
+  identical. (Smaller win than Metal's 1.5-1.66x: the base is already fast
+  and verify-width overhead eats proportionally more.)
+- Prose: off 12.8 -> on 9.6 tok/s (**0.75x**), rate 0.0, 2 recomputes,
+  identical. Recompute tax is real; default-off contains it, fallback
+  bounds it. Sparse-prose shape (7 drafted, below both trigger counts)
+  noted as a tuning follow-up, NOT implemented (attempt budget exhausted
+  at 3: piece-sig, base-emit, sticky-loop).
+- Bugs caught by tests along the way, all fixed: _feed piece arg, base
+  token dropped at index 0 (now emitted at prefill like Metal), fallback
+  restarting via stream path (manual loop now sticky).
+- Net: ship default-off for repetitive/agent text; prose users leave it off.
+
 ## M11: MLX as default (approved: code + docs)
 
 `EngineConfig.engine` and `ftm serve --engine` default to `mlx`; `mlx`/`mlx-lm`
