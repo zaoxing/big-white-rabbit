@@ -43,7 +43,8 @@ just the knob + proof it works.
 
 - [ ] T9a (M): C++ field + override install + lifetime handling + rebuild.
 - [ ] T9b (S): Python passthrough + validation + placement tests + 30B A/B.
-- [ ] T9c (S): verifier pass + STATE.md.
+- [x] T9c (S): verifier pass + STATE.md. DONE: verifier APPROVE (247
+      re-ran green + 4 MoE tests with evidence this session).
 
 L2 rules: worktree per attempt, <= 3 attempts per item, verifier after
 implementation, no push without human approval.
