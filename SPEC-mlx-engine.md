@@ -44,9 +44,14 @@ Phase: awaiting implementation approval on branch `feat/mlx-engine`.
 
 - [ ] M10a (M): scratch-venv parity probe (already done in spike -- fold
       numbers in, no-op).
-- [ ] M10b (L): `MLXEngine` shim + config plumbing + optional dep.
-- [ ] M10c (M): server wiring (`--engine` flag, `build_app` selection).
-- [ ] M10d (S): correctness + perf evidence in-harness, verifier, STATE.md.
+- [x] M10b (L): `MLXEngine` shim + config plumbing + optional dep. DONE.
+- [x] M10c (M): server wiring (`--engine` flag, `build_app`). DONE.
+- [x] M10d (S): correctness + perf evidence in-harness, verifier, STATE.md.
+      DONE commit `134f3d4`, verifier APPROVE (245 metal green + 7 MLX
+      green). In-harness head-to-head (27B, 48 toks x6): 1/6 SAME, rest
+      coherent quant flips; speedups 1.09-1.31x, mean 1.24x (CLI-level 1.41x
+      shrinks through per-token stepping on both sides). Ship-bar note: 1.3x
+      narrowly missed on the mean; min 1.09x, no regressions anywhere.
 
 L2 rules: worktree, <= 3 attempts per item, verifier after implementation,
 no push without human approval.
