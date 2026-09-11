@@ -24,6 +24,7 @@ def serve(
     served_model_name: str | None = None,
     log_level: str = "info",
     draft_model_path: str | None = None,
+    prefix_cache: bool = False,
 ) -> None:
     import uvicorn
 
@@ -42,6 +43,7 @@ def serve(
         n_ubatch=n_batch,
         n_seq_max=n_seq_max,
         kv_unified=kv_unified,
+        prefix_cache=prefix_cache,
     )
     app = build_app(
         model, config,

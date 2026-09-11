@@ -108,6 +108,10 @@ def _cmd_serve(argv: list[str]) -> int:
     ap.add_argument("--draft-model", default=None, metavar="GGUF",
                     help="draft model for draft-model speculation (SPEC-draft-model.md); "
                          "its weights stay resident alongside the target's")
+    ap.add_argument("--prefix-cache", action="store_true",
+                    help="auto-pin repeated prompt prefixes to skip re-prefill "
+                         "across requests (SPEC-prefix-cache.md)")
+    ap.add_argument("--log-level", default="info")
     ap.add_argument("--log-level", default="info")
     args = ap.parse_args(argv)
 
@@ -132,6 +136,7 @@ def _cmd_serve(argv: list[str]) -> int:
         served_model_name=args.served_model_name,
         log_level=args.log_level,
         draft_model_path=args.draft_model,
+        prefix_cache=args.prefix_cache,
     )
     return 0
 

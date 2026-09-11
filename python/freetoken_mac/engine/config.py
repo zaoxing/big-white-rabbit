@@ -52,6 +52,14 @@ class EngineConfig:
     # (not a path here: the caller owns loading). Mutually exclusive with
     # `speculative`; MetalEngine raises if both are set.
     draft_max_drafts: int = 4
+    # Prefix-cache TTFT (SPEC-prefix-cache.md). Off by default: pins hold
+    # seq slots outside the free pool, which only pays when prompts repeat.
+    # Retired requests with fully-prefilled prompts of effective savings
+    # >= min_tokens auto-pin (LRU, bounded by max_pins); admissions fork
+    # from the longest qualifying pin via full-copy + truncate-to-(K-1).
+    prefix_cache: bool = False
+    prefix_cache_pins: int = 2
+    prefix_cache_min_tokens: int = 256
 
     def to_context_params(self) -> ContextParams:
         cp = ContextParams()
