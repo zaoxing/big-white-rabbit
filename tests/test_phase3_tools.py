@@ -697,7 +697,7 @@ def client(model: ftm.Model):
     # A tools block is a few hundred tokens on its own, and n_ctx_seq is n_ctx/n_seq_max
     # (see docs/llamacpp-notes.md), so the per-sequence budget has to be real here.
     app = build_app(
-        model, ftm.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=2)
+        model, ftm.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=2, engine="metal")
     )
     with fastapi_testclient.TestClient(app) as c:
         yield c

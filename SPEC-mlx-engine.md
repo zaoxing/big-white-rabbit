@@ -70,3 +70,12 @@ no push without human approval.
 1. Proceed with M10b implementation? (awaiting human approval)
 2. Keep the 17GB spike artifacts as the dev weights, or re-fetch on demand?
    (Propose: keep until Phase 1 green, then decide canonical.)
+
+## M11: MLX as default (approved: code + docs)
+
+`EngineConfig.engine` and `ftm serve --engine` default to `mlx`; `mlx`/`mlx-lm`
+moved from the `[mlx]` extra to core dependencies (extra removed); README
+rewritten MLX-first. All pre-existing server/engine tests pin
+`engine="metal"` explicitly (13 call sites + bare `build_app(model)`); the
+new-default assertion lives in `test_speculative_verify.py`. Serve extras
+(`fastapi` etc.) unchanged.

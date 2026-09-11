@@ -3,10 +3,14 @@
 An edge-native MoE serving engine for Apple Silicon — the ideas behind
 [FreeToken](https://github.com/FlashML-org/FreeToken) (bandwidth-adaptive MoE placement,
 semantic-aware KV caching, an Anthropic/OpenAI-compatible API for coding agents) rebuilt on
-[llama.cpp](https://github.com/ggml-org/llama.cpp)'s Metal/ggml backend.
+Apple's [MLX](https://github.com/ml-explore/mlx) framework, with the original
+[llama.cpp](https://github.com/ggml-org/llama.cpp) Metal/ggml backend still available.
 
 > **Status: serving.** OpenAI- *and* Anthropic-compatible APIs with continuous
-> batching and tool calling. No MoE placement policy or semantic KV caching yet.
+> batching and tool calling. MLX is the default backend (measured ~1.24x the
+> Metal path in-harness, single-stream plain decode); `--engine metal` keeps
+> the llama.cpp path with speculation, prefix caching, and MoE placement.
+> No MoE placement policy or semantic KV caching yet.
 
 ## Why this is a rewrite, not a port
 
@@ -32,30 +36,29 @@ metadata reading, and the radix prefix-cache bookkeeping behind semantic-anchor 
 
 ```
    HTTP (OpenAI / Anthropic compatible)
-              │
+               │
    ┌──────────▼───────────┐
    │  control plane       │  FastAPI routes + Pydantic schemas, single process
    │  (python/…/server)   │  (no ZMQ: FreeToken's multi-process design exists for
    └──────────┬───────────┘   multi-GPU CUDA contexts, which UMA does not need)
-              │ in-process call
+               │ in-process call
    ┌──────────▼───────────┐
-   │  MetalEngine         │  admission table + step loop over llama_batch
-   │  (python/…/engine)   │  continuous batching
+   │  engine              │  MLXEngine (default): one mlx-lm generator per
+   │  (python/…/engine)   │  request, stepped in lockstep
+   │                      │  MetalEngine (--engine metal): admission table +
+   │                      │  step loop over llama_batch, continuous batching
    └──────────┬───────────┘
-              │ pybind11
+               │ mlx-lm  │  pybind11 (metal path only)
    ┌──────────▼───────────┐
-   │  csrc/               │  hand-written binding; buffer_control.cpp is the one
-   │                      │  seam that reaches ggml backend-buffer APIs
-   └──────────┬───────────┘
-   ┌──────────▼───────────┐
-   │  llama.cpp / ggml    │  submodule, Metal backend
+   │  MLX / Metal        │  Apple frameworks; llama.cpp/ggml vendored as a
+   │  backends           │  submodule for the metal path
    └──────────────────────┘
 ```
 
 ## Requirements
 
 - Apple Silicon Mac (developed on M1 Max / 64 GB), macOS 14+
-- Xcode command-line tools, CMake 3.21+
+- Xcode command-line tools, CMake 3.21+ (metal path only)
 - Python 3.10+
 
 ## Build
@@ -66,13 +69,18 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[serve]"
 ```
 
+(`mlx`/`mlx-lm` ship as core dependencies — no extra is needed for the default backend.)
+
 ## Run
 
 ```bash
-# Serve an OpenAI-compatible API (default port 1919)
-ftm serve -m /path/to/model.gguf --ctx-size 8192 --n-seq-max 8
+# Serve an OpenAI-compatible API (default port 1919) off MLX weights
+ftm serve -m /path/to/model-mlx --ctx-size 8192
 
-# Or generate straight from the CLI
+# Or the llama.cpp Metal backend off a GGUF
+ftm serve -m /path/to/model.gguf --engine metal --ctx-size 8192 --n-seq-max 8
+
+# Generate straight from the CLI (llama.cpp path)
 ftm generate -m /path/to/model.gguf -p "Hello" -n 64
 ftm info     -m /path/to/model.gguf
 ```
@@ -103,10 +111,11 @@ print(a.messages.create(
 Both surfaces share one prompt format and one tool-call parser: the client's choice of
 API never reaches the model, which sees only the format its chat template was trained on.
 
-`--n-seq-max` is how many requests decode concurrently. With the default split KV
-buffer each sequence gets `ctx-size / n-seq-max` tokens of context, so raising
-concurrency shrinks per-request context; `/health` reports both `n_ctx` and the
-per-sequence `n_ctx_seq`. Pass `--kv-unified` to share one buffer instead.
+On `--engine metal`, `--n-seq-max` is how many requests decode concurrently. With the
+default split KV buffer each sequence gets `ctx-size / n-seq-max` tokens of context, so
+raising concurrency shrinks per-request context; `/health` reports both `n_ctx` and the
+per-sequence `n_ctx_seq`. Pass `--kv-unified` to share one buffer instead. The MLX
+backend serves requests from independent generators (batching parity is follow-up work).
 
 ## License
 

@@ -38,11 +38,13 @@ class EngineConfig:
     n_threads: int = 0
     n_threads_batch: int = 0
     flash_attn: bool = True
-    # Backend selection (SPEC-mlx-engine.md). "metal" is today's behavior
-    # exactly; "mlx" routes engine construction to MLXEngine (single-stream
-    # plain decode). Geometry knobs below still apply where meaningful
-    # (n_ctx caps MLX admissions); the rest are Metal-only and ignored.
-    engine: str = "metal"
+    # Backend selection (SPEC-mlx-engine.md). "mlx" is the default: plain MLX
+    # decode measured ~1.24x the Metal path in-harness with identical serving
+    # semantics. "metal" keeps the llama.cpp backend (speculation, prefix
+    # cache, MoE placement, KV quant live there). Geometry knobs below still
+    # apply where meaningful (n_ctx caps MLX admissions); the rest are
+    # Metal-only and ignored.
+    engine: str = "mlx"
     # One shared KV buffer instead of one stream per sequence. Off = llama.cpp's own
     # default; on is what a partial-range ctx.memory_seq_cp (prefix fork) needs.
     kv_unified: bool = False
