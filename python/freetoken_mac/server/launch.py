@@ -25,10 +25,30 @@ def serve(
     log_level: str = "info",
     draft_model_path: str | None = None,
     prefix_cache: bool = False,
+    engine: str = "metal",
 ) -> None:
     import uvicorn
 
     from .app import build_app
+
+    config = EngineConfig(
+        n_ctx=n_ctx,
+        n_batch=n_batch,
+        n_ubatch=n_batch,
+        n_seq_max=n_seq_max,
+        kv_unified=kv_unified,
+        prefix_cache=prefix_cache,
+        engine=engine,
+    )
+    if engine == "mlx":
+        # model_path names an MLX weights directory here, not a GGUF: no
+        # llama Model to load (MLXEngine loads it lazily itself).
+        app = build_app(
+            None, config,
+            served_model_name=served_model_name, mlx_model_path=model_path,
+        )
+        uvicorn.run(app, host=host, port=port, log_level=log_level, workers=1)
+        return
 
     mp = ModelParams()
     mp.n_gpu_layers = n_gpu_layers

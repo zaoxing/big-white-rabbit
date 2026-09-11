@@ -229,15 +229,33 @@ def _tool_call_delta(call: ParsedToolCall) -> ToolCallDelta:
 
 
 def build_app(
-    model: Model,
+    model: Model | None,
     config: EngineConfig | None = None,
     *,
     served_model_name: str | None = None,
     draft_model: Model | None = None,
+    mlx_model_path: str | None = None,
 ) -> FastAPI:
-    engine = MetalEngine(model, config or EngineConfig(), draft_model=draft_model)
+    config = config or EngineConfig()
+    if config.engine not in ("metal", "mlx"):
+        raise ValueError(
+            f"engine must be 'metal' or 'mlx'; got {config.engine!r}"
+        )
+    if config.engine == "mlx":
+        if draft_model is not None:
+            raise ValueError("draft_model is a Metal-backend option; unset it with engine='mlx'")
+        if mlx_model_path is None:
+            raise ValueError("engine='mlx' needs mlx_model_path (directory of MLX weights)")
+        from ..engine.mlx_engine import MLXEngine
+
+        engine = MLXEngine(mlx_model_path, config)
+        model_name = served_model_name or mlx_model_path.rstrip("/").rsplit("/", 1)[-1] or "local"
+    else:
+        if model is None:
+            raise ValueError("engine='metal' needs a loaded Model")
+        engine = MetalEngine(model, config, draft_model=draft_model)
+        model_name = served_model_name or model.meta_val("general.name") or "local"
     async_engine = AsyncEngine(engine)
-    model_name = served_model_name or model.meta_val("general.name") or "local"
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:

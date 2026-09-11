@@ -98,7 +98,8 @@ class AsyncEngine:
             # is joined, so this is the only thread touching the engine now.
             self.engine.ctx.close()
             # Same abort class for the draft context, when speculation uses one.
-            if self.engine.draft is not None:
+            # (getattr: only MetalEngine carries a draft context.)
+            if getattr(self.engine, "draft", None) is not None:
                 self.engine.draft.close()
 
     # --- submission --------------------------------------------------------------

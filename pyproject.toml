@@ -28,6 +28,10 @@ serve = [
 dev = [
     "pytest>=8.0",
 ]
+mlx = [
+    "mlx>=0.32",
+    "mlx-lm",
+]
 
 [project.scripts]
 ftm = "freetoken_mac.cli:main"
