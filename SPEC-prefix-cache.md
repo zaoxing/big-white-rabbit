@@ -61,8 +61,19 @@ so a pinned slot's cells move to a new sequence with plain existing ops.
 
 ## Task breakdown
 
-- [ ] T8a (M): pin store + admission fork + retire/evict + tests + serve flag.
-- [ ] T8b (S): TTFT bench evidence, verifier, STATE.md.
+- [x] T8a (M): pin store + admission fork + retire/evict + tests + serve flag.
+      DONE commit `9e3fc74`, verifier APPROVE. 13 tests (exactness, calls
+      collapse, threshold, eviction bound, single-slot path, cancel hygiene,
+      stop agreement, validation, rm-failure fallback, hybrid gate,
+      triple-fork determinism). 1 fix used (test geometry: per-seq room).
+      Mid-task discovery: fork truncates need snapshots on hybrids; measured
+      snapshot memory (27B: +150MB per seq×snapshot) and found hybrid forks
+      DIVERGE nondeterministically (4B + 27B) while attention forks are exact
+      -> `check_prefix_cache_arch` refuses hybrids; snapshots knob dropped as
+      unneeded (attention needs none); rm-failure fallback kept as defense.
+- [x] T8b (S): TTFT bench evidence, verifier, STATE.md. DONE: 0.5B 2k-prefix
+      0.81s/39 calls -> 0.04s, 2000 saved, identical. Attempts on T8: 1 used
+      (the hybrid fork investigation above).
 
 L2 rules: worktree, <= 3 attempts per item, verifier after implementation,
 no push without human approval.
