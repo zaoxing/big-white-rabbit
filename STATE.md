@@ -1,6 +1,6 @@
 # Loop State — FreeToken-Mac
 
-Last run: 2026-09-10 (default-serve prove-out, human-asked "did you?") — verifier APPROVE, branch `feat/mlx-health` (worktree), no push
+Last run: 2026-09-10 (merge mlx-health, human-approved) — `995e1d6`, suite 254 green on main, worktrees/branches cleaned. kv-cache-quant DISREGARDED per human (branch + worktree deleted). expert-placement KEPT (branch + worktree intact, awaiting call).
 - Default MLX serve VERIFIED live: /health 200 + chat completion 200 (32 toks @ 9.7 tok/s served). Fixed two default-path gaps found live: health geometry + chat renderer duck-typing (both 500'd before). Note: thinking trace leaks into output (model default, needs enable_thinking=False passthrough — follow-up, not filed).
 - A/B served greedy-64 (same prompts): 27B nat 11.0 vs 9.7 (0.88x), rep 11.1 vs 8.9 (0.80x); 30B nat 62.7 vs 48.2 (0.77x), rep 62.5 vs 45.3 (0.72x). Gap widens where decodes are fast (Python per-step overhead). MLX backend at 1.24x ours would sit above upstream on dense.
 - Fix: M11 merge left a duplicate EngineConfig in launch.serve that discarded --engine (metal serve impossible); found live during A/B, fixed + verified by the A/B runs themselves. README quickstart added (Mac deps).
