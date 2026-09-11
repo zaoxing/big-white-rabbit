@@ -162,6 +162,40 @@ class MLXEngine:
             return {eos}
         return set(eos)
 
+    def tokenize(
+        self, text: str, add_special: bool = True, parse_special: bool = True
+    ) -> list[int]:
+        """Tokenize like ``Model.tokenize`` (server helpers call this shape).
+
+        ``parse_special`` is accepted for signature parity and ignored: the HF
+        tokenizer handles special tokens itself.
+        """
+        self._ensure_open()
+        return list(
+            self._tokenizer.encode(text, add_special_tokens=add_special)
+        )
+
+    def apply_chat_template(
+        self, pairs: Sequence[tuple[str, str]], add_assistant: bool = True
+    ) -> str:
+        """Render chat pairs via the HF chat template (server helper shape).
+
+        Raises ValueError when the tokenizer carries no usable template, so
+        ``render_pairs`` maps it to a 400 like the llama path.
+        """
+        self._ensure_open()
+        messages = [{"role": role, "content": text} for role, text in pairs]
+        try:
+            return str(
+                self._tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=add_assistant
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - request-level failure, mapped to 400
+            raise ValueError(
+                f"this model's chat template cannot be applied ({exc})"
+            ) from exc
+
     # --- admission ----------------------------------------------------------
 
     def add_request(

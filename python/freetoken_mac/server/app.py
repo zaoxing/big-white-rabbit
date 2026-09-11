@@ -33,6 +33,7 @@ from ..engine.config import (
     normalize_stops,
 )
 from ..engine.metal_engine import MetalEngine
+from ..engine.mlx_engine import MLXEngine
 from .schemas import (
     ChatCompletion,
     ChatCompletionChunk,
@@ -132,7 +133,9 @@ def _message_pairs(req: ChatCompletionRequest) -> list[tuple[str, str]]:
     return pairs
 
 
-def render_pairs(model: Model, pairs: list[tuple[str, str]]) -> str:
+def render_pairs(
+    model: Model | MLXEngine, pairs: list[tuple[str, str]]
+) -> str:
     """Apply the model's chat template to prepared `(role, text)` pairs.
 
     Shared with the Anthropic surface (server/anthropic_api.py), which prepares its own
@@ -146,7 +149,7 @@ def render_pairs(model: Model, pairs: list[tuple[str, str]]) -> str:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-def _render_prompt(model: Model, req: ChatCompletionRequest) -> str:
+def _render_prompt(model: Model | MLXEngine, req: ChatCompletionRequest) -> str:
     """Render a ChatCompletionRequest to the raw prompt string for the engine."""
     if not req.messages:
         raise HTTPException(status_code=400, detail="messages must not be empty")
@@ -255,6 +258,9 @@ def build_app(
             raise ValueError("engine='metal' needs a loaded Model")
         engine = MetalEngine(model, config, draft_model=draft_model)
         model_name = served_model_name or model.meta_val("general.name") or "local"
+    # Prompt rendering + token counting go through whichever object owns a
+    # tokenizer: the llama Model, or the MLXEngine itself (same two methods).
+    renderer = model if model is not None else engine
     async_engine = AsyncEngine(engine)
 
     @asynccontextmanager
@@ -299,10 +305,10 @@ def build_app(
         if cap_error is not None:
             raise HTTPException(status_code=400, detail=cap_error)
 
-        prompt = _render_prompt(model, req)
+        prompt = _render_prompt(renderer, req)
         params = _request_params(req)
         known_tools = _parsing_names(req)
-        n_prompt = count_tokens(model, prompt)
+        n_prompt = count_tokens(renderer, prompt)
         request_id = await submit_request(async_engine, prompt, params)
 
         if req.stream:
@@ -395,10 +401,10 @@ def build_app(
     anthropic_router = APIRouter()
     register_anthropic_routes(
         anthropic_router,
-        model=model,
+        model=renderer,
         async_engine=async_engine,
         model_name=model_name,
-        render_prompt=lambda pairs: render_pairs(model, pairs),
+        render_prompt=lambda pairs: render_pairs(renderer, pairs),
     )
     app.include_router(anthropic_router)
 

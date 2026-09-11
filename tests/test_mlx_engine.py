@@ -143,6 +143,34 @@ def test_async_engine_compat() -> None:
 
 
 @needs_weights
+def test_chat_completion_end_to_end() -> None:
+    """The reported default-serve 500: chat rendering needs the tokenizer,
+    not the llama Model. Proves a completion serves over HTTP."""
+    from fastapi.testclient import TestClient
+
+    from freetoken_mac.server.app import build_app
+
+    app = build_app(
+        None, EngineConfig(n_ctx=4096, engine="mlx"),
+        served_model_name="t", mlx_model_path=MODEL_PATH,
+    )
+    with TestClient(app) as c:
+        r = c.post(
+            "/v1/chat/completions",
+            json={
+                "model": "t",
+                "messages": [{"role": "user", "content": "Say hi."}],
+                "max_tokens": 8,
+                "temperature": 0.0,
+            },
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["choices"][0]["message"]["content"].strip() != ""
+        assert body["usage"]["completion_tokens"] >= 1
+
+
+@needs_weights
 def test_health_geometry() -> None:
     """The exact /health failure: geometry + counters must exist so serve
     boots (default engine) instead of 500ing."""
