@@ -6,11 +6,10 @@
 
 ## Tests
 
-- [ ] `FTM_TEST_MODEL=models/qwen2.5-0.5b-instruct-q4_k_m.gguf ./.venv/bin/python -m pytest tests/ -q` → `194 passed`
-- [ ] `npx @cobusgreyling/loop doctor .` → `L3 healthy`
+- [ ] `FTM_TEST_MODEL=models/qwen2.5-0.5b-instruct-q4_k_m.gguf ./.venv/bin/python -m pytest tests/ -q` green (add `FTM_MLX_MODEL=<dir>` / `FTM_MOE_MODEL=<file>` to cover those paths)
 
 ## Safety
 
-- [ ] No denylisted paths (`.env`, `auth/`, `payments/`, `secrets/`, `credentials/`, `.loop/`)
-- [ ] No auto-merge; human review required (see `docs/safety.md`)
-- [ ] One fix per PR, verifier `APPROVE` attached if L2
+- [ ] No secrets or credentials (`.env`, `auth/`, `payments/`, `secrets/`, `credentials/`)
+- [ ] No auto-merge; human review required
+- [ ] One change per PR

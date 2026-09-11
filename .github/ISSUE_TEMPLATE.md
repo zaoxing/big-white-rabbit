@@ -11,14 +11,3 @@ about: Report a bug in FreeToken-Mac
 
 ## Impact
 
----
-name: Loop item
-about: Propose a loop-engineering item for STATE.md
----
-
-## Pain
-
-## Suggested pattern
-
-## Effort
-

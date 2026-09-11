@@ -9,8 +9,8 @@ Apple's [MLX](https://github.com/ml-explore/mlx) framework, with the original
 > **Status: serving.** OpenAI- *and* Anthropic-compatible APIs with continuous
 > batching and tool calling. MLX is the default backend (measured ~1.24x the
 > Metal path in-harness, single-stream plain decode); `--engine metal` keeps
-> the llama.cpp path with speculation, prefix caching, and MoE placement.
-> No MoE placement policy or semantic KV caching yet.
+> the llama.cpp path with speculation, prefix caching, and MoE residency.
+> Expert residency control exists; no prefetch policy or semantic KV caching yet.
 
 ## Why this is a rewrite, not a port
 
@@ -127,6 +127,17 @@ default split KV buffer each sequence gets `ctx-size / n-seq-max` tokens of cont
 raising concurrency shrinks per-request context; `/health` reports both `n_ctx` and the
 per-sequence `n_ctx_seq`. Pass `--kv-unified` to share one buffer instead. The MLX
 backend serves requests from independent generators (batching parity is follow-up work).
+
+## Optional features (all default off unless noted)
+
+| Flag / knob | What | Notes |
+|---|---|---|
+| `--engine mlx` (default) / `metal` | Inference backend | Metal keeps the llama.cpp path below |
+| `EngineConfig(speculative=True)` | N-gram speculative decoding | Both backends, greedy only; ~1.5x on repetitive text, parity on prose |
+| `--draft-model GGUF` | Draft-model speculation (metal) | Attention targets only; refused on hybrids |
+| `--prefix-cache` | Pin repeated prompt prefixes, skip re-prefill (metal) | Attention only; ~20x TTFT win measured |
+| `EngineConfig(kv_cache="q8_0")` | Quantized KV cache (metal) | 2x KV headroom for long context; default `f16`; `q4_*` not recommended |
+| `ModelParams(expert_weights="cpu")` | MoE expert weights on CPU (metal) | Residency knob only — no prefetch policy yet |
 
 ## License
 
