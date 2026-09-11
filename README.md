@@ -57,31 +57,42 @@ metadata reading, and the radix prefix-cache bookkeeping behind semantic-anchor 
 
 ## Requirements
 
-- Apple Silicon Mac (developed on M1 Max / 64 GB), macOS 14+
-- Xcode command-line tools, CMake 3.21+ (metal path only)
-- Python 3.10+
+- Apple Silicon Mac, macOS 14+ (developed on M1 Max / 64 GB)
+- Python 3.11+ — **not** the macOS system `python3` (a stub): `brew install python@3.11`, or python.org
+- Xcode command-line tools: `xcode-select --install` (compiler for the metal-path extension build, which runs on every install)
+- ~20 GB free disk per 27B-class model; 24 GB+ free RAM to serve one
 
-## Build
+## Quick start
 
 ```bash
+# 1. Clone (submodules carry llama.cpp for the metal backend)
 git clone --recurse-submodules <this repo> && cd FreeToken-Mac
-python3 -m venv .venv && source .venv/bin/activate
+
+# 2. Fresh venv with a new pip (system pip is routinely too old)
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -U pip
 pip install -e ".[serve]"
+# ^ builds the metal extension too (~10-20 min first time, cached after);
+#   the default MLX backend needs no build of its own.
+
+# 3. Fetch weights — ONE of:
+# MLX (default backend), e.g. 27B 4-bit (~16 GB, multi-file: repeat per file into one dir)
+curl -L -o qwen38-mlx-4bit/model-00001-of-00003.safetensors \
+  https://huggingface.co/orcarouter/Qwen3.8-27B-MLX/resolve/main/4-bit/model-00001-of-00003.safetensors
+# GGUF (metal backend), e.g. 30B MoE (~17 GB, single file)
+curl -L -o models/qwen3-30b.gguf \
+  https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF/resolve/main/Qwen3-30B-A3B-Q4_K_M.gguf
+
+# 4. Serve (default port 1919)
+ftm serve -m qwen38-mlx-4bit --ctx-size 8192
+# metal instead: ftm serve -m models/qwen3-30b.gguf --engine metal --n-seq-max 8
+
+# 5. Check it answers
+curl http://127.0.0.1:1919/health
+curl http://127.0.0.1:1919/v1/chat/completions \
+  -H 'Content-Type: application/json' -d \
+  '{"model":"local","messages":[{"role":"user","content":"hi"}],"max_tokens":64}'
 ```
-
-(`mlx`/`mlx-lm` ship as core dependencies — no extra is needed for the default backend.)
-
-## Run
-
-```bash
-# Serve an OpenAI-compatible API (default port 1919) off MLX weights
-ftm serve -m /path/to/model-mlx --ctx-size 8192
-
-# Or the llama.cpp Metal backend off a GGUF
-ftm serve -m /path/to/model.gguf --engine metal --ctx-size 8192 --n-seq-max 8
-
-# Generate straight from the CLI (llama.cpp path)
-ftm generate -m /path/to/model.gguf -p "Hello" -n 64
 ftm info     -m /path/to/model.gguf
 ```
 

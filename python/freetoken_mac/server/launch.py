@@ -57,14 +57,6 @@ def serve(
     # target's, so budget ~target + draft weights before enabling this.
     draft_model = Model(draft_model_path, mp) if draft_model_path else None
 
-    config = EngineConfig(
-        n_ctx=n_ctx,
-        n_batch=n_batch,
-        n_ubatch=n_batch,
-        n_seq_max=n_seq_max,
-        kv_unified=kv_unified,
-        prefix_cache=prefix_cache,
-    )
     app = build_app(
         model, config,
         served_model_name=served_model_name, draft_model=draft_model
