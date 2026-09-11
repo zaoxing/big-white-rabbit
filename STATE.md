@@ -1,6 +1,9 @@
 # Loop State — FreeToken-Mac
 
-Last run: 2026-09-10 (M11 MLX default, human-approved code+docs) — verifier APPROVE, branch `feat/mlx-default` (worktree), no push
+Last run: 2026-09-10 (default-serve prove-out, human-asked "did you?") — verifier APPROVE, branch `feat/mlx-health` (worktree), no push
+- Default MLX serve VERIFIED live: /health 200 + chat completion 200 (32 toks @ 9.7 tok/s served). Fixed two default-path gaps found live: health geometry + chat renderer duck-typing (both 500'd before). Note: thinking trace leaks into output (model default, needs enable_thinking=False passthrough — follow-up, not filed).
+- A/B served greedy-64 (same prompts): 27B nat 11.0 vs 9.7 (0.88x), rep 11.1 vs 8.9 (0.80x); 30B nat 62.7 vs 48.2 (0.77x), rep 62.5 vs 45.3 (0.72x). Gap widens where decodes are fast (Python per-step overhead). MLX backend at 1.24x ours would sit above upstream on dense.
+- Fix: M11 merge left a duplicate EngineConfig in launch.serve that discarded --engine (metal serve impossible); found live during A/B, fixed + verified by the A/B runs themselves. README quickstart added (Mac deps).
 - M11 DONE: EngineConfig/CLI default mlx, mlx core deps, README MLX-first, 13 test sites pinned metal + new-default assert (247+5 green, 252 with weights).
 - M10 DONE: MLXEngine + `--engine` + build_app/launch wiring (245 metal + 7 MLX green). In-harness: 1.24x mean (1.09–1.31x), coherent, deterministic. Ship call open: bar was 1.3x.
 - MLX spike DONE (scratch venv mlx 0.32.2, orcarouter 27B 4-bit + mtp drafter): plain steady-state 13.8 tok/s vs ours 9.8 (1.41x); deterministic; 2/6 byte-identical to our Q4_K_M, rest coherent early-flips (different quant; one Chinese code-mix smell). MTP gate FAILED on M1 Max: mlx-lm can't load qwen3_5_mtp; via mlx-vlm it runs (60% accept) but totals ≈ plain (bf16 drafter, no bf16 GPU on M1 — warned upstream). Rewrite unjustified on 1.4x alone; unblockers: fp16-converted drafter retest, or M1-relevant upstream fixes.
