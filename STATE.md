@@ -1,6 +1,7 @@
 # Loop State — FreeToken-Mac
 
-Last run: 2026-09-10 (M10 MLX shim, human-approved) — verifier APPROVE, branch `feat/mlx-engine` (worktree), no push
+Last run: 2026-09-10 (M11 MLX default, human-approved code+docs) — verifier APPROVE, branch `feat/mlx-default` (worktree), no push
+- M11 DONE: EngineConfig/CLI default mlx, mlx core deps, README MLX-first, 13 test sites pinned metal + new-default assert (247+5 green, 252 with weights).
 - M10 DONE: MLXEngine + `--engine` + build_app/launch wiring (245 metal + 7 MLX green). In-harness: 1.24x mean (1.09–1.31x), coherent, deterministic. Ship call open: bar was 1.3x.
 - MLX spike DONE (scratch venv mlx 0.32.2, orcarouter 27B 4-bit + mtp drafter): plain steady-state 13.8 tok/s vs ours 9.8 (1.41x); deterministic; 2/6 byte-identical to our Q4_K_M, rest coherent early-flips (different quant; one Chinese code-mix smell). MTP gate FAILED on M1 Max: mlx-lm can't load qwen3_5_mtp; via mlx-vlm it runs (60% accept) but totals ≈ plain (bf16 drafter, no bf16 GPU on M1 — warned upstream). Rewrite unjustified on 1.4x alone; unblockers: fp16-converted drafter retest, or M1-relevant upstream fixes.
 - T9 DONE: `ModelParams(expert_weights)` metal/cpu + tests (247 + 4 green). 30B A/B: identical outputs, metal 0.2s vs cpu 2.2s (11x gap = residency target). Next: `residency` (activation tracking) → `qstar`.
