@@ -203,6 +203,13 @@ class MLXEngine:
         return StepOutput(req.request_id, token, piece, True, reason)
 
     def _eog_ids(self) -> set[int]:
+        # Prefer the wrapper's plural set (what stream_generate itself stops
+        # on): Qwen-family tokenizers end turns with <|endoftext|> while
+        # eos_token_id names <|im_end|>. A singular-only set leaks the
+        # other's piece text into output and mislabels the finish reason.
+        plural = getattr(self._tokenizer, "eos_token_ids", None)
+        if plural:
+            return set(plural)
         eos = getattr(self._tokenizer, "eos_token_id", None)
         if eos is None:
             return set()
@@ -228,15 +235,22 @@ class MLXEngine:
     ) -> str:
         """Render chat pairs via the HF chat template (server helper shape).
 
-        Raises ValueError when the tokenizer carries no usable template, so
-        ``render_pairs`` maps it to a 400 like the llama path.
+        Thinking is disabled server-wide (``enable_thinking=False``): thinking
+        traces would otherwise leak into output text and corrupt the tool-call
+        protocol the routes parse out of it. Per-request opt-in is a future
+        API item, not a silent default. Raises ValueError when the tokenizer
+        carries no usable template, so ``render_pairs`` maps it to a 400 like
+        the llama path.
         """
         self._ensure_open()
         messages = [{"role": role, "content": text} for role, text in pairs]
         try:
             return str(
                 self._tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=add_assistant
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=add_assistant,
+                    enable_thinking=False,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - request-level failure, mapped to 400
@@ -496,12 +510,13 @@ class MLXEngine:
         try:
             chunk = next(stream)
         except StopIteration:
-            # Generator spent without our rules firing: the request made
-            # its cap exactly (mlx stops after max_tokens) or something
-            # odd happened. Length iff we produced the full cap.
+            # The generator ends early only at EOS (it swallows the token:
+            # stream_generate breaks before yielding it), otherwise it runs
+            # to max_tokens and our cap rule retires first. So an incomplete
+            # count here IS a natural end, not an error.
             if req.n_generated >= req.params.max_tokens:
                 return [self._retire(req, "length")]
-            return [self._retire(req, "error")]
+            return [self._retire(req, "eog")]
         outputs = [self._feed(req, chunk.token, chunk.text)]
         if chunk.finish_reason in ("length", "stop") and not req.finished:
             # Belt-and-braces: our rules below retire first in every

@@ -301,3 +301,33 @@ def test_nongreedy_ignores_spec() -> None:
     assert engine.spec_drafted == 0
     assert len(engine.tokens_of(rid)) == 8
     assert engine.state(rid).finish_reason == "length"
+
+
+@needs_weights
+def test_eog_reason_and_no_eos_leak() -> None:
+    """A natural end must retire eog (not length), with no end-token piece
+    text leaking into output. Regression: the EOS set used to miss
+    <|endoftext|>, leaking its piece and mislabeling the finish."""
+    engine = MLXEngine(MODEL_PATH, EngineConfig(n_ctx=4096))
+    rid = engine.add_request(
+        "Say hi in one sentence.",
+        RequestParams(temp=0.0, max_tokens=64, stop_at_eog=True),
+    )
+    list(engine.drain())
+    assert engine.state(rid).finish_reason == "eog"
+    text = engine.text_of(rid)
+    assert "<|endoftext|>" not in text
+    assert "<|im_end|>" not in text
+
+
+@needs_weights
+def test_thinking_disabled_by_default() -> None:
+    """Server-shaped prompt (template-rendered) must produce no think block:
+    thinking is off unless a future API opts in."""
+    engine = MLXEngine(MODEL_PATH, EngineConfig(n_ctx=8192))
+    prompt = engine.apply_chat_template([("user", "Say hi in one sentence.")])
+    rid = engine.add_request(
+        prompt, RequestParams(temp=0.0, max_tokens=32, stop_at_eog=True)
+    )
+    list(engine.drain())
+    assert "<think>" not in engine.text_of(rid)
