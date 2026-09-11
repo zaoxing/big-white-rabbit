@@ -24,6 +24,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from .._freetoken_metal import Model
 from ..engine.async_engine import AsyncEngine
+from ..engine.mlx_engine import MLXEngine
 from ..engine.config import RequestParams, StopSequenceFilter, normalize_stops
 from . import anthropic_schemas as A
 from .common import block_text, count_tokens, sse_response, submit_request, text_from_blocks
@@ -219,7 +220,7 @@ def _input_object(call: ParsedToolCall) -> dict[str, Any]:
 def register_anthropic_routes(
     router: APIRouter,
     *,
-    model: Model,
+    model: Model | MLXEngine,
     async_engine: AsyncEngine,
     model_name: str,
     render_prompt,

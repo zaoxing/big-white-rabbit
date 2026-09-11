@@ -140,3 +140,62 @@ def test_async_engine_compat() -> None:
     seen, closed_before_stop = asyncio.run(scenario())
     assert len(seen) == N_TOKENS
     assert closed_before_stop is False
+
+
+@needs_weights
+def test_chat_completion_end_to_end() -> None:
+    """The reported default-serve 500: chat rendering needs the tokenizer,
+    not the llama Model. Proves a completion serves over HTTP."""
+    from fastapi.testclient import TestClient
+
+    from freetoken_mac.server.app import build_app
+
+    app = build_app(
+        None, EngineConfig(n_ctx=4096, engine="mlx"),
+        served_model_name="t", mlx_model_path=MODEL_PATH,
+    )
+    with TestClient(app) as c:
+        r = c.post(
+            "/v1/chat/completions",
+            json={
+                "model": "t",
+                "messages": [{"role": "user", "content": "Say hi."}],
+                "max_tokens": 8,
+                "temperature": 0.0,
+            },
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["choices"][0]["message"]["content"].strip() != ""
+        assert body["usage"]["completion_tokens"] >= 1
+
+
+@needs_weights
+def test_health_geometry() -> None:
+    """The exact /health failure: geometry + counters must exist so serve
+    boots (default engine) instead of 500ing."""
+    from fastapi.testclient import TestClient
+
+    from freetoken_mac.server.app import build_app
+
+    engine = MLXEngine(MODEL_PATH, EngineConfig(n_ctx=4096))
+    assert engine.ctx.n_ctx == 4096
+    assert engine.ctx.n_ctx_seq == 4096
+    assert engine.ctx.n_seq_max == 8
+    assert engine.ctx.decode_calls == 0
+    assert engine.n_free_seq_slots == 8
+    rid = engine.add_request("hi", greedy())
+    list(engine.drain())
+    assert engine.ctx.decode_calls == N_TOKENS
+
+    app = build_app(
+        None, EngineConfig(n_ctx=4096, engine="mlx"),
+        served_model_name="t", mlx_model_path=MODEL_PATH,
+    )
+    with TestClient(app) as c:
+        r = c.get("/health")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "ok"
+        assert body["n_ctx"] == 4096
+        assert body["free_seq_slots"] == 8

@@ -36,11 +36,18 @@ def _require_mlx():
 
 
 class _MLXContext:
-    """Teardown handle satisfying AsyncEngine.stop's ``engine.ctx.close()``.
+    """Teardown handle satisfying AsyncEngine.stop's ``engine.ctx.close()``,
+    plus the read-only geometry `/health` reports.
 
     Releasing weights on Apple Silicon is load-bearing (same abort class as
     Context::close documents): drop every reference and clear the Metal-side
     caches instead of waiting for the collector.
+
+    Geometry semantics differ from split-KV Metal by design: every request
+    gets the whole window (no pre-partition), so ``n_ctx_seq == n_ctx`` and
+    ``n_seq_max`` is the configured concurrency shape, not a slot count.
+    ``decode_calls`` counts evaluated tokens (one forward pass each), the
+    closest analog to llama.cpp's counter.
     """
 
     def __init__(self, engine: "MLXEngine") -> None:
@@ -68,6 +75,22 @@ class _MLXContext:
     def closed(self) -> bool:
         return self._closed
 
+    @property
+    def n_ctx(self) -> int:
+        return self._engine.config.n_ctx
+
+    @property
+    def n_ctx_seq(self) -> int:
+        return self._engine.config.n_ctx
+
+    @property
+    def n_seq_max(self) -> int:
+        return self._engine.config.n_seq_max
+
+    @property
+    def decode_calls(self) -> int:
+        return self._engine._decode_calls
+
 
 class MLXEngine:
     """One mlx-lm generator per request, stepped in lockstep.
@@ -93,6 +116,7 @@ class MLXEngine:
         self._states: dict[int, RequestState] = {}
         self._retired: dict[int, RequestState] = {}
         self._retired_limit = max(8, MIN_RETAINED_FINISHED)
+        self._decode_calls = 0
         self._next_request_id = 0
 
     # --- helpers ------------------------------------------------------------
@@ -137,6 +161,40 @@ class MLXEngine:
         if isinstance(eos, int):
             return {eos}
         return set(eos)
+
+    def tokenize(
+        self, text: str, add_special: bool = True, parse_special: bool = True
+    ) -> list[int]:
+        """Tokenize like ``Model.tokenize`` (server helpers call this shape).
+
+        ``parse_special`` is accepted for signature parity and ignored: the HF
+        tokenizer handles special tokens itself.
+        """
+        self._ensure_open()
+        return list(
+            self._tokenizer.encode(text, add_special_tokens=add_special)
+        )
+
+    def apply_chat_template(
+        self, pairs: Sequence[tuple[str, str]], add_assistant: bool = True
+    ) -> str:
+        """Render chat pairs via the HF chat template (server helper shape).
+
+        Raises ValueError when the tokenizer carries no usable template, so
+        ``render_pairs`` maps it to a 400 like the llama path.
+        """
+        self._ensure_open()
+        messages = [{"role": role, "content": text} for role, text in pairs]
+        try:
+            return str(
+                self._tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=add_assistant
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - request-level failure, mapped to 400
+            raise ValueError(
+                f"this model's chat template cannot be applied ({exc})"
+            ) from exc
 
     # --- admission ----------------------------------------------------------
 
@@ -239,6 +297,7 @@ class MLXEngine:
 
     def _feed(self, req: RequestState, token: int, piece: str) -> StepOutput:
         """Account for one generated token: EOG, then stop, then cap."""
+        self._decode_calls += 1
         if req.params.stop_at_eog and token in self._eog_ids():
             return self._retire(req, "eog", token, piece)
         req.output_tokens.append(token)
@@ -262,6 +321,10 @@ class MLXEngine:
     @property
     def n_in_flight(self) -> int:
         return len(self._states)
+
+    @property
+    def n_free_seq_slots(self) -> int:
+        return max(0, self.config.n_seq_max - len(self._states))
 
     def state(self, request_id: int) -> RequestState:
         return self._lookup(request_id)
