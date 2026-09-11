@@ -936,6 +936,32 @@ class MetalEngine:
     def text_of(self, request_id: int) -> str:
         return self.model.detokenize(self._lookup(request_id).output_tokens)
 
+    def expert_activations(self, request_id: int) -> list[dict[str, object]]:
+        """Drain this decode's recorded MoE router distributions.
+
+        Returns one entry per MoE layer seen since the last drain:
+        ``{"layer": int, "tokens": [[float, ...], ...]}`` with one
+        per-expert distribution row per decoded token. Consume semantics
+        (the C++ side clears on read); empty when recording is off.
+        Single-sequence only, like the recording itself -- the request id
+        just selects (and validates) the caller.
+        """
+        self._lookup(request_id)
+        out: list[dict[str, object]] = []
+        for frame in self.ctx.expert_activations():
+            n_tokens = frame.n_tokens
+            n_expert = len(frame.probs) // max(1, n_tokens) if n_tokens else 0
+            out.append(
+                {
+                    "layer": frame.layer,
+                    "tokens": [
+                        list(frame.probs[i * n_expert : (i + 1) * n_expert])
+                        for i in range(n_tokens)
+                    ],
+                }
+            )
+        return out
+
     @property
     def spec_acceptance_rate(self) -> float | None:
         """Fraction of drafted tokens the target confirmed, or None before any

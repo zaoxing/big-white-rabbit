@@ -9,6 +9,8 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <vector>
@@ -44,6 +46,12 @@ struct ContextParams {
     // target is a hybrid (e.g. qwen35); pure-attention models rewind fine at 0.
     // Costs memory: recurrent tensors widen to (1 + n_rs_seq) snapshot groups.
     uint32_t n_rs_seq        = 0;
+    // Record MoE router distributions per decode (SPEC-residency.md, T10b).
+    // Off by default: when on, every llama_decode pays one graph split per
+    // MoE layer (visible throughput cost -- profile, don't serve, with it).
+    // Single-sequence contexts only; the constructor refuses anything else
+    // because token columns cannot be attributed to requests past that.
+    bool     record_experts  = false;
 };
 
 struct SamplerParams {
@@ -51,6 +59,14 @@ struct SamplerParams {
     int32_t  top_k = 40;
     float    top_p = 0.95f;
     uint32_t seed  = LLAMA_DEFAULT_SEED;
+};
+
+// One MoE router distribution snapshot: `probs` is `n_tokens` rows of
+// per-expert probabilities in row-major order ([token][expert]).
+struct ExpertFrame {
+    int                layer    = -1;
+    int64_t            n_tokens = 0;
+    std::vector<float> probs;
 };
 
 class Context {
@@ -131,6 +147,13 @@ public:
     // Evict every sequence except `seq_id` (llama_memory_seq_keep).
     void memory_seq_keep(llama_seq_id seq_id);
 
+    // Drain this decode's recorded MoE router distributions (see
+    // ContextParams::record_experts). Consume semantics: returns the frames
+    // accumulated since the last call (or construction) and clears them, so
+    // an unread profiling run cannot grow memory without bound. Empty when
+    // recording is off or nothing decoded since the last drain.
+    std::vector<ExpertFrame> expert_activations();
+
     // Release the llama_context and its sampler chains NOW instead of waiting for the
     // destructor. Servers need deterministic teardown: ggml frees the Metal device from
     // a C++ static destructor at process exit and asserts its residency sets are empty
@@ -187,6 +210,14 @@ private:
     // Logits flags of the most recently decoded batch, so sample_seq() can reject a row
     // that produced no logits without relying on llama.cpp's (aborting) validation.
     std::vector<int8_t>  last_logits_;
+    // Recorded router frames since the last expert_activations() drain. Only
+    // filled when the context was built with record_experts (the sched
+    // callback is null otherwise, so recording costs exactly nothing).
+    std::vector<ExpertFrame> expert_frames_;
+    // Backend callback entry point: static to satisfy the C function pointer,
+    // forwarding to the instance in user_data. Runs on the decode thread
+    // without the GIL -- touches only expert_frames_, never Python state.
+    static bool expert_cb(struct ggml_tensor * t, bool ask, void * user_data);
 };
 
 } // namespace ftm

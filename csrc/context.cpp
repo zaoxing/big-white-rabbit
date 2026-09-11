@@ -1,5 +1,7 @@
 #include "context.h"
 
+#include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -40,6 +42,19 @@ Context::Context(std::shared_ptr<Model> model, const ContextParams & cp, const S
     lp.n_rs_seq        = cp.n_rs_seq;
     lp.flash_attn_type = cp.flash_attn ? LLAMA_FLASH_ATTN_TYPE_AUTO
                                        : LLAMA_FLASH_ATTN_TYPE_DISABLED;
+    if (cp.record_experts) {
+        // Token columns cannot be attributed to requests past one sequence,
+        // so multi-seq recording is refused loudly rather than misattributed
+        // silently. (Single-seq covers profiling, tests, and the qstar bench.)
+        if (cp.n_seq_max != 1) {
+            throw std::invalid_argument(
+                "record_experts needs n_seq_max == 1 (got " +
+                std::to_string(cp.n_seq_max) + "); multi-sequence attribution "
+                "is a later item, not a silent misattribution");
+        }
+        lp.cb_eval = &Context::expert_cb;
+        lp.cb_eval_user_data = this;
+    }
     if (cp.n_threads > 0) {
         lp.n_threads = cp.n_threads;
     }
@@ -103,6 +118,8 @@ void Context::close() {
         ctx_ = nullptr;
     }
     last_logits_.clear();
+    expert_frames_.clear();
+    expert_frames_.shrink_to_fit();
 }
 
 Context::~Context() {
@@ -174,6 +191,9 @@ void Context::decode(const Batch & batch) {
 void Context::decode_raw(const llama_batch & batch, int32_t n_tokens) {
     // The single llama_decode() call site. Counted here rather than in Python so the
     // "one decode per step" invariant is measured where it actually happens.
+    // Recorded router frames belong to exactly one decode the same way: a new
+    // decode starts a new frame set, so a reader always sees one decode.
+    expert_frames_.clear();
     const int32_t rc = llama_decode(ctx_, batch);
     ++decode_calls_;
 
@@ -387,5 +407,60 @@ uint32_t Context::n_ubatch()  const { ensure_open(); return llama_n_ubatch(ctx_)
 uint32_t Context::n_seq_max() const { ensure_open(); return llama_n_seq_max(ctx_); }
 uint32_t Context::n_ctx_seq() const { ensure_open(); return llama_n_ctx_seq(ctx_); }
 uint32_t Context::n_rs_seq()  const { ensure_open(); return llama_n_rs_seq(ctx_);  }
+
+bool Context::expert_cb(struct ggml_tensor * t, bool ask, void * user_data) {
+    // Router distributions are named "ffn_moe_probs-{layer}" by llama.cpp's
+    // graph builder for every MoE arch -- match that EXACTLY (trailing layer
+    // digits only). Sibling nodes share the prefix ("ffn_moe_probs_biased",
+    // "ffn_moe_probs_masked") but are selection intermediates with different
+    // shapes, not distributions; matching them would corrupt every consumer.
+    static const char kPrefix[] = "ffn_moe_probs-";
+    static const size_t kLen = sizeof(kPrefix) - 1;
+    if (t == nullptr || strncmp(t->name, kPrefix, kLen) != 0) {
+        return false;
+    }
+    // The suffix must be the bare layer index: "ffn_moe_probs_biased-N" and
+    // "ffn_moe_probs_masked-N" are selection intermediates with different
+    // shapes, and capturing them would corrupt every consumer downstream.
+    for (const char * p = t->name + kLen; *p != '\0'; ++p) {
+        if (*p < '0' || *p > '9') {
+            return false;
+        }
+    }
+    if (t->name[kLen] == '\0') {
+        return false;  // prefix with no layer: not a real node, stay fused
+    }
+    if (ask) {
+        return true;
+    }
+    // ask=false runs post-compute under the scheduler's own synchronization,
+    // so t->data is valid to copy (even on Metal's shared buffers). Returning
+    // false HERE would abort the whole remaining compute loop, so every path
+    // below returns true: a useless frame is harmless, a truncated decode is
+    // not. Only F32 router outputs are captured; anything else is skipped.
+    if (t->type != GGML_TYPE_F32) {
+        return true;
+    }
+    const int64_t n_tokens = t->ne[1];
+    const int64_t n_expert = t->ne[0];
+    if (n_tokens <= 0 || n_expert <= 0 || t->data == nullptr) {
+        return true;
+    }
+    auto * self = static_cast<Context *>(user_data);
+    ExpertFrame frame;
+    frame.layer = std::atoi(t->name + kLen);
+    frame.n_tokens = n_tokens;
+    const float * data = static_cast<const float *>(t->data);
+    frame.probs.assign(data, data + n_tokens * n_expert);
+    self->expert_frames_.push_back(std::move(frame));
+    return true;
+}
+
+std::vector<ExpertFrame> Context::expert_activations() {
+    ensure_open();
+    std::vector<ExpertFrame> out;
+    out.swap(expert_frames_);
+    return out;
+}
 
 } // namespace ftm
