@@ -1,6 +1,9 @@
 # Loop State — FreeToken-Mac
 
-Last run: 2026-09-10 (L2 spec-ngram T1, human-approved) — verifier APPROVE, worktree branch `feat/spec-ngram-t1` commit `470d197`, no push
+Last run: 2026-09-10 (T8 prefix-cache, human-approved "do 1, 4" + auto-pin) — verifier APPROVE, branch `feat/prefix-cache` (worktree), no push
+- T8 DONE: auto-pin + full-copy fork + `--prefix-cache` (233 green). 0.5B 2k-prefix TTFT 0.81s→0.04s (20x), 2000 saved, identical. Hybrid fork DIVERGES nondeterministically (4B+27B measured) → construction gate (attention exact, triple-fork proven); snapshots knob dropped as unneeded.
+- T7 DONE (branch `feat/draft-model`, verifier APPROVE, 232 green): DraftEngine + integration + serve flag. 27B BLOCKER: deterministic divergence on natural (bisected to cross-context interference, upstream #20075 class) → `check_draft_target` refuses hybrid targets (live-verified); attention path enabled. N-gram path unaffected (no foreign decodes).
+- T6 DONE (+long-ctx follow-up): q8_0 6/6 identical incl. 79-token long-ctx run, but decode SLOWER on Metal (21k ctx: f16 9.3/7.9 vs q8_0 5.3, thermals accounted) — capacity lever only, adopt solely anti-OOM; default f16. q4 diverges + slower, not adopted. 228 green, verifier APPROVE.
 
 ## Speculative n-gram decoding (L2, SPEC-speculative-ngram.md APPROVED 2026-09-10)
 
