@@ -36,11 +36,18 @@ def _require_mlx():
 
 
 class _MLXContext:
-    """Teardown handle satisfying AsyncEngine.stop's ``engine.ctx.close()``.
+    """Teardown handle satisfying AsyncEngine.stop's ``engine.ctx.close()``,
+    plus the read-only geometry `/health` reports.
 
     Releasing weights on Apple Silicon is load-bearing (same abort class as
     Context::close documents): drop every reference and clear the Metal-side
     caches instead of waiting for the collector.
+
+    Geometry semantics differ from split-KV Metal by design: every request
+    gets the whole window (no pre-partition), so ``n_ctx_seq == n_ctx`` and
+    ``n_seq_max`` is the configured concurrency shape, not a slot count.
+    ``decode_calls`` counts evaluated tokens (one forward pass each), the
+    closest analog to llama.cpp's counter.
     """
 
     def __init__(self, engine: "MLXEngine") -> None:
@@ -68,6 +75,22 @@ class _MLXContext:
     def closed(self) -> bool:
         return self._closed
 
+    @property
+    def n_ctx(self) -> int:
+        return self._engine.config.n_ctx
+
+    @property
+    def n_ctx_seq(self) -> int:
+        return self._engine.config.n_ctx
+
+    @property
+    def n_seq_max(self) -> int:
+        return self._engine.config.n_seq_max
+
+    @property
+    def decode_calls(self) -> int:
+        return self._engine._decode_calls
+
 
 class MLXEngine:
     """One mlx-lm generator per request, stepped in lockstep.
@@ -93,6 +116,7 @@ class MLXEngine:
         self._states: dict[int, RequestState] = {}
         self._retired: dict[int, RequestState] = {}
         self._retired_limit = max(8, MIN_RETAINED_FINISHED)
+        self._decode_calls = 0
         self._next_request_id = 0
 
     # --- helpers ------------------------------------------------------------
@@ -239,6 +263,7 @@ class MLXEngine:
 
     def _feed(self, req: RequestState, token: int, piece: str) -> StepOutput:
         """Account for one generated token: EOG, then stop, then cap."""
+        self._decode_calls += 1
         if req.params.stop_at_eog and token in self._eog_ids():
             return self._retire(req, "eog", token, piece)
         req.output_tokens.append(token)
@@ -262,6 +287,10 @@ class MLXEngine:
     @property
     def n_in_flight(self) -> int:
         return len(self._states)
+
+    @property
+    def n_free_seq_slots(self) -> int:
+        return max(0, self.config.n_seq_max - len(self._states))
 
     def state(self, request_id: int) -> RequestState:
         return self._lookup(request_id)
