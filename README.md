@@ -1,4 +1,6 @@
-# FreeToken-Mac
+# FreeToken-Metal
+
+The whole motivation is to explore the optimizations of model serving engine for Apple Silicon.
 
 An edge-native MoE serving engine for Apple Silicon — the ideas behind
 [FreeToken](https://github.com/FlashML-org/FreeToken) (bandwidth-adaptive MoE placement,
