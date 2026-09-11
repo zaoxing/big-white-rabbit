@@ -19,6 +19,10 @@ venv/
 
 # Models
 *.gguf
+# MLX weights (large, machine-local; FTM_MLX_MODEL points here)
+*.safetensors
+models/Qwen3.8-27B-MLX-4bit/
+models/Qwen3-30B-A3B-4bit/
 
 # macOS
 .DS_Store
