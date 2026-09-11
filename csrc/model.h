@@ -33,6 +33,12 @@ struct ModelParams {
     // Metadata-only load with simulated allocations -- lets the placement solver size a
     // model without paying for it. (llama_model_params.no_alloc)
     bool    no_alloc     = false;
+    // Expert-tensor residency (SPEC-expert-placement.md, T9). "metal" is
+    // today's behavior (no overrides installed). "cpu" installs upstream's
+    // canned MoE-expert override (the same regex as --cpu-moe), placing
+    // expert weights in CPU buffers -- the cold tier later phases stream
+    // against. Anything else throws before touching llama.cpp.
+    std::string expert_weights = "metal";
 };
 
 class Model {
@@ -92,6 +98,12 @@ public:
 
 private:
     void ensure_open() const;
+
+    // Override storage: the loader reads patterns + structs during load, so
+    // both must outlive the load call (common keeps them in params for the
+    // same lifetime reason). Member storage is free insurance.
+    std::vector<std::string> override_patterns_;
+    std::vector<llama_model_tensor_buft_override> overrides_;
 
     std::string         path_;
     llama_model       * model_ = nullptr;

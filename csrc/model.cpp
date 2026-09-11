@@ -3,6 +3,8 @@
 #include <mutex>
 #include <stdexcept>
 
+#include <ggml-backend.h>
+
 namespace ftm {
 
 void backend_init_once() {
@@ -31,6 +33,22 @@ Model::Model(const std::string & path, const ModelParams & params) : path_(path)
         // out of mmap and lazy mapping rather than inherit the caller's defaults.
         mp.load_mode = LLAMA_LOAD_MODE_NONE;
         mp.lazy_mode = LLAMA_LAZY_MODE_OFF;
+    }
+
+    if (params.expert_weights == "cpu") {
+        // Same regex as upstream --cpu-moe (common/common.h LLM_FFN_EXPS_REGEX):
+        // every MoE expert tensor, std::regex substring-matched by the loader.
+        // select_weight_buft routes CPU-overridden tensors through the CPU
+        // buffer list (extra bufts / repacking as applicable).
+        override_patterns_.emplace_back(R"(\.ffn_(up|down|gate|gate_up)_(ch|)exps)");
+        overrides_.push_back(
+            {override_patterns_.back().c_str(), ggml_backend_cpu_buffer_type()});
+        overrides_.push_back({nullptr, nullptr});
+        mp.tensor_buft_overrides = overrides_.data();
+    } else if (params.expert_weights != "metal") {
+        throw std::invalid_argument(
+            "ModelParams.expert_weights must be \"metal\" or \"cpu\"; got \"" +
+            params.expert_weights + "\"");
     }
 
     model_ = llama_model_load_from_file(path.c_str(), mp);

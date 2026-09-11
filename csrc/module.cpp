@@ -44,7 +44,9 @@ PYBIND11_MODULE(_freetoken_metal, m) {
         .def_readwrite("n_gpu_layers", &ftm::ModelParams::n_gpu_layers)
         .def_readwrite("load_mode",    &ftm::ModelParams::load_mode)
         .def_readwrite("lazy_mode",    &ftm::ModelParams::lazy_mode)
-        .def_readwrite("no_alloc",     &ftm::ModelParams::no_alloc);
+        .def_readwrite("no_alloc",     &ftm::ModelParams::no_alloc)
+        // MoE expert residency: "metal" (default) or "cpu" (SPEC-expert-placement.md).
+        .def_readwrite("expert_weights", &ftm::ModelParams::expert_weights);
 
     py::class_<ftm::ContextParams>(m, "ContextParams")
         .def(py::init<>())
