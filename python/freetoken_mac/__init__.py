@@ -21,6 +21,7 @@ from ._freetoken_metal import (  # noqa: F401
 )
 from .engine import (  # noqa: F401
     AdmissionPolicy,
+    DraftEngine,
     EngineConfig,
     FCFSPolicy,
     MetalEngine,
@@ -41,6 +42,7 @@ __all__ = [
     "Batch",
     "Context",
     "ContextParams",
+    "DraftEngine",
     "EngineConfig",
     "FCFSPolicy",
     "LazyMode",

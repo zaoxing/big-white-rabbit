@@ -47,6 +47,11 @@ class EngineConfig:
     # path (verification without logits cannot beat greedy).
     speculative: bool = False
     spec_max_drafts: int = 4
+    # Draft-model speculation (SPEC-draft-model.md): max drafts per step from
+    # the draft model. The draft Model object itself is passed to MetalEngine
+    # (not a path here: the caller owns loading). Mutually exclusive with
+    # `speculative`; MetalEngine raises if both are set.
+    draft_max_drafts: int = 4
 
     def to_context_params(self) -> ContextParams:
         cp = ContextParams()

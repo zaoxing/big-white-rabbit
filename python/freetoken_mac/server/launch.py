@@ -23,6 +23,7 @@ def serve(
     kv_unified: bool = False,
     served_model_name: str | None = None,
     log_level: str = "info",
+    draft_model_path: str | None = None,
 ) -> None:
     import uvicorn
 
@@ -31,6 +32,9 @@ def serve(
     mp = ModelParams()
     mp.n_gpu_layers = n_gpu_layers
     model = Model(model_path, mp)
+    # A second resident model: the drafter's weights live alongside the
+    # target's, so budget ~target + draft weights before enabling this.
+    draft_model = Model(draft_model_path, mp) if draft_model_path else None
 
     config = EngineConfig(
         n_ctx=n_ctx,
@@ -39,7 +43,10 @@ def serve(
         n_seq_max=n_seq_max,
         kv_unified=kv_unified,
     )
-    app = build_app(model, config, served_model_name=served_model_name)
+    app = build_app(
+        model, config,
+        served_model_name=served_model_name, draft_model=draft_model
+    )
 
     try:
         # Single worker on purpose: the model and its KV cache live in this process, so a
@@ -52,3 +59,5 @@ def serve(
         # asserts on its non-empty residency sets and abort()s a process that had already
         # shut down cleanly. See docs/llamacpp-notes.md.
         model.close()
+        if draft_model is not None:
+            draft_model.close()
