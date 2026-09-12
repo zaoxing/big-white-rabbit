@@ -67,6 +67,11 @@ class EngineConfig:
     prefix_cache: bool = False
     prefix_cache_pins: int = 2
     prefix_cache_min_tokens: int = 256
+    # MoE router recording (SPEC-residency.md). Off by default: when on,
+    # every decode pays one graph split per MoE layer (visible throughput
+    # cost -- profile, don't serve, with it). Single-sequence contexts
+    # only; the constructor refuses anything else.
+    record_experts: bool = False
 
     def to_context_params(self) -> ContextParams:
         cp = ContextParams()
@@ -78,6 +83,7 @@ class EngineConfig:
         cp.n_threads_batch = self.n_threads_batch
         cp.flash_attn = self.flash_attn
         cp.kv_unified = self.kv_unified
+        cp.record_experts = self.record_experts
         return cp
 
 

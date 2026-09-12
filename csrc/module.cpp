@@ -60,7 +60,15 @@ PYBIND11_MODULE(_freetoken_metal, m) {
         // Unified KV buffer: required for a partial-range memory_seq_cp (prefix fork).
         .def_readwrite("kv_unified",      &ftm::ContextParams::kv_unified)
         // Recurrent-state rollback snapshots for partial memory_seq_rm on hybrids.
-        .def_readwrite("n_rs_seq",        &ftm::ContextParams::n_rs_seq);
+        .def_readwrite("n_rs_seq",        &ftm::ContextParams::n_rs_seq)
+        // MoE router distribution recording (one graph split per MoE layer
+        // per decode while on -- profile, don't serve, with it).
+        .def_readwrite("record_experts",  &ftm::ContextParams::record_experts);
+
+    py::class_<ftm::ExpertFrame>(m, "ExpertFrame")
+        .def_readonly("layer", &ftm::ExpertFrame::layer)
+        .def_readonly("n_tokens", &ftm::ExpertFrame::n_tokens)
+        .def_readonly("probs", &ftm::ExpertFrame::probs);
 
     py::class_<ftm::SamplerParams>(m, "SamplerParams")
         .def(py::init<>())
@@ -155,6 +163,9 @@ PYBIND11_MODULE(_freetoken_metal, m) {
         .def("memory_seq_cp", &ftm::Context::memory_seq_cp,
              py::arg("src"), py::arg("dst"), py::arg("p0") = -1, py::arg("p1") = -1)
         .def("memory_seq_keep", &ftm::Context::memory_seq_keep, py::arg("seq_id"))
+        .def("expert_activations", &ftm::Context::expert_activations,
+             "Drain this decode's recorded MoE router frames (consume "
+             "semantics: reading clears). Empty unless built with record_experts.")
         .def_property_readonly("decode_calls", &ftm::Context::decode_calls)
         .def_property_readonly("n_ctx",     &ftm::Context::n_ctx)
         .def_property_readonly("n_batch",   &ftm::Context::n_batch)
