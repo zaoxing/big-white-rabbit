@@ -11,7 +11,6 @@ via re-prefill (slow but correct — true KV serialization is T12c).
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -76,7 +75,7 @@ class KVSnapStore:
                             stop_at_eog=pd.get("stop_at_eog", True),
                             stop=tuple(pd.get("stop", ())),
                         )
-                    except Exception:
+                    except Exception:  # noqa: BLE001 - best-effort disk hydration, ignore malformed params
                         params = None
                 self._snaps[p.stem] = _Snap(
                     prompt=data["prompt"],
@@ -88,7 +87,7 @@ class KVSnapStore:
                     next_token=data.get("next_token"),
                     live=False,  # disk-hydrated: no live KV in this engine
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 - best-effort disk hydration, ignore malformed snapshot file
                 continue
 
     def save(self, name: str, request_id: int) -> None:
@@ -123,7 +122,7 @@ class KVSnapStore:
                         "stop_at_eog": snap.params.stop_at_eog,
                         "stop": list(snap.params.stop),
                     }
-                except Exception:
+                except Exception:  # noqa: BLE001 - best-effort param serialization, ignore missing attrs
                     params_dict = None
             (self.kv_dir / f"{name}.json").write_text(
                 json.dumps(
@@ -137,7 +136,7 @@ class KVSnapStore:
                     }
                 )
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - best-effort disk persistence, no throw on I/O
             pass
 
     def load(self, name: str, new_request_id: int | None = None) -> int:
@@ -171,7 +170,7 @@ class KVSnapStore:
                                 stop_at_eog=pd.get("stop_at_eog", True),
                                 stop=tuple(pd.get("stop", ())),
                             )
-                        except Exception:
+                        except Exception:  # noqa: BLE001 - best-effort disk hydration, ignore malformed params
                             params = None
                     snap = _Snap(
                         prompt=data["prompt"],
@@ -184,7 +183,7 @@ class KVSnapStore:
                         live=False,
                     )
                     self._snaps[name] = snap
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - disk read failure, re-raised as KeyError
                     raise KeyError(f"unknown snapshot {name!r}") from exc
             else:
                 raise KeyError(f"unknown snapshot {name!r}")
@@ -254,7 +253,7 @@ class KVSnapStore:
         self._snaps.pop(name, None)
         try:
             (self.kv_dir / f"{name}.json").unlink(missing_ok=True)
-        except Exception:
+        except Exception:  # noqa: BLE001 - best-effort delete, ignore filesystem errors
             pass
 
     def clear(self) -> None:
@@ -262,5 +261,5 @@ class KVSnapStore:
         for p in self.kv_dir.glob("*.json"):
             try:
                 p.unlink()
-            except Exception:
+            except Exception:  # noqa: BLE001 - best-effort clear, ignore filesystem errors
                 continue
