@@ -45,6 +45,17 @@ class EngineConfig:
     # apply where meaningful (n_ctx caps MLX admissions); the rest are
     # Metal-only and ignored.
     engine: str = "mlx"
+    # Exact-prefix prompt cache for the MLX backend (agent-loop TTFT).
+    # Off by default: entries hold full prompt KV (256MB at 8K on 27B),
+    # which only pays when prompts repeat byte-identically. On an exact
+    # hit the request skips prefill entirely (cache + first token are
+    # replayed deterministically); misses prefill normally and insert a
+    # snapshot when len(prompt) >= prefix_cache_min_tokens. Bounded by
+    # count (LRU); mlx_lm's own LRUPromptCache is unusable here because
+    # ArraysCache (48/64 qwen3_5 layers) implements neither nbytes nor
+    # trim, so only exact matches are served (no partial-prefix reuse).
+    mlx_prefix_cache: bool = False
+    mlx_prefix_cache_size: int = 2
     # Quantized live KV for the MLX backend (mlx_lm QuantizedKVCache).
     # None = f16 stream path (default); 8/4 = int8/int4 KV on the
     # full-attention layers only (qwen3_5 hybrid keeps f32 recurrent state

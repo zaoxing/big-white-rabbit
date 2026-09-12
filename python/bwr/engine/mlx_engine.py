@@ -16,6 +16,8 @@ at ``import bwr`` time.
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from copy import deepcopy
 from typing import Iterable, Iterator, Sequence
 
 from .batching import RequestState
@@ -94,6 +96,7 @@ class _MLXContext:
         eng._spec_tables.clear()
         eng._spec_ok.clear()
         eng._spec_stats.clear()
+        eng._prefix.clear()
         eng._model = None
         eng._tokenizer = None
         try:
@@ -161,6 +164,14 @@ class MLXEngine:
         self.spec_accepted = 0
         self.spec_recomputes = 0
         self.spec_fallbacks = 0
+        # Exact-prefix prompt cache: prompt tokens -> (cache snapshot, base
+        # token). OrderedDict as bounded LRU (move_to_end on hit, popitem
+        # oldest on overflow). Entries are prompt-boundary snapshots: the
+        # cache covers exactly len(key) tokens and base is the argmax of the
+        # prefill's last logits row, so a hit replays deterministically.
+        self._prefix: OrderedDict[tuple[int, ...], tuple[list, int]] = OrderedDict()
+        self.prefix_hits = 0
+        self.prefix_misses = 0
         self._next_request_id = 0
 
     # --- helpers ------------------------------------------------------------
@@ -322,7 +333,11 @@ class MLXEngine:
         )
         if rp.stop:
             self._stop_filters[request_id] = StopSequenceFilter(rp.stop)
-        if self.config.speculative or self.config.mlx_kv_bits is not None:
+        if (
+            self.config.speculative
+            or self.config.mlx_kv_bits is not None
+            or self.config.mlx_prefix_cache
+        ):
             # Seed with the prompt (same rule as MetalEngine); the cache
             # itself is built lazily on the first spec step.
             table = NgramTable()
@@ -390,7 +405,39 @@ class MLXEngine:
             return True
         if self.config.mlx_kv_bits is not None:
             return True
+        if self.config.mlx_prefix_cache:
+            return True
         return bool(self.config.speculative and req.params.temp <= 0)
+
+    def _prefix_hit(self, req: RequestState) -> list[StepOutput] | None:
+        """Exact-prefix hit: install the snapshot and replay its base token.
+
+        Returns None on miss (caller prefills normally). The snapshot covers
+        exactly len(prompt) positions and base is the prefill's argmax, so
+        replay is deterministic — no forward pass, TTFT is deepcopy time.
+        """
+        key = tuple(req.prompt)
+        entry = self._prefix.get(key)
+        if entry is None:
+            self.prefix_misses += 1
+            return None
+        self._prefix.move_to_end(key)
+        cache, base = deepcopy(entry[0]), entry[1]
+        self.prefix_hits += 1
+        self._caches[req.request_id] = cache
+        req.next_token = base
+        return [self._feed(req, base, self._tokenizer.decode([base]))]
+
+    def _prefix_insert(self, req: RequestState, cache: list, base: int) -> None:
+        """Snapshot a freshly prefilled prompt for future exact repeats."""
+        if len(req.prompt) < self.config.prefix_cache_min_tokens:
+            return
+        key = tuple(req.prompt)
+        if key in self._prefix:
+            return
+        self._prefix[key] = (deepcopy(cache), base)
+        while len(self._prefix) > max(1, self.config.mlx_prefix_cache_size):
+            self._prefix.popitem(last=False)
 
     def _start_spec(self, req: RequestState) -> list[StepOutput]:
         """Prefill the prompt into an owned cache and emit the continuation.
@@ -399,8 +446,14 @@ class MLXEngine:
         is OUTPUT now (via _feed, so EOG/stop/cap apply) and stored as
         next_token for the following verify step to pack. Dropping it here
         would shift every later verify by one (the index-0 divergence).
+        With mlx_prefix_cache, an exact hit skips prefill via _prefix_hit
+        and a miss snapshots the fresh cache for future repeats.
         """
         try:
+            if self.config.mlx_prefix_cache:
+                hit = self._prefix_hit(req)
+                if hit is not None:
+                    return hit
             mx = _mx()
             cache = self._make_cache()
             tokens = req.prompt
@@ -412,7 +465,10 @@ class MLXEngine:
             self._caches[req.request_id] = cache
             base = int(mx.argmax(logits[0, -1]).item())
             req.next_token = base
-            return [self._feed(req, base, self._tokenizer.decode([base]))]
+            out = [self._feed(req, base, self._tokenizer.decode([base]))]
+            if self.config.mlx_prefix_cache:
+                self._prefix_insert(req, cache, base)
+            return out
         except BaseException:  # noqa: BLE001 - re-raised; must retire slot on any failure
             try:
                 self._retire(req, "error")

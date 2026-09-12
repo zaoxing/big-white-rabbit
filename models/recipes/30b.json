@@ -6,7 +6,7 @@
   "n_batch": 2048,
   "n_ubatch": 512,
   "n_seq_max": 2,
-  "n_threads": 10,
+  "n_threads": 0,
   "n_threads_batch": 0,
   "kv_unified": true,
   "speculative": true,
@@ -17,5 +17,5 @@
   "flash_attn": true,
   "mlx_fallback": "models/Qwen3-30B-A3B-4bit",
   "mlx_engine": "mlx",
-  "bench": {"engine":"metal","tok_s":58.2,"vs_mlx":15.97,"prefix_cache_first":"123.22s","prefix_cache_hit":"0.62s","spec_rep":"+7.5% drafts=4 accept=70%","notes":"flash_attn on is +20% vs off; n_threads_batch!=0 is -7%; geometry deltas otherwise within +-5% noise; drafts=8 collapses (accept 15%)"}
+  "bench": {"engine":"metal","tok_s":58.2,"vs_mlx":15.97,"prefix_cache_first":"123.22s","prefix_cache_hit":"0.62s","spec_rep":"+7.5% drafts=4 accept=70%","notes":"flash_attn on is +20% vs off; n_threads_batch!=0 is -7%; n_threads 10 was +1% (noise) so 0=auto for portability; geometry deltas otherwise within +-5% noise; drafts=8 collapses (accept 15%)"}
 }

@@ -114,6 +114,11 @@ def _cmd_serve(argv: list[str]) -> int:
                     help="n-gram speculative decoding (greedy only; +5-7%% on repetitive text)")
     ap.add_argument("--spec-max-drafts", type=int, default=4,
                     help="max n-gram drafts per step (4 tuned; 8 collapses acceptance)")
+    ap.add_argument("--mlx-prefix-cache", action="store_true",
+                    help="MLX exact-prefix prompt cache: repeat prompts skip prefill "
+                         "(agent-loop TTFT; 2K 28s->~1s measured)")
+    ap.add_argument("--mlx-prefix-cache-size", type=int, default=2,
+                    help="max cached MLX prompt snapshots, LRU (default 2)")
     ap.add_argument("--kv-unified", action="store_true",
                     help="share one KV buffer across sequences; required for partial "
                          "prefix copies (see docs/llamacpp-notes.md)")
@@ -138,6 +143,15 @@ def _cmd_serve(argv: list[str]) -> int:
     ap.add_argument("--log-level", default="info")
     args = ap.parse_args(argv)
 
+    # Explicitly-passed flags beat recipe values (fix: recipe used to
+    # clobber them silently). Long opts map directly; shorts cover -m/-c.
+    explicit: set[str] = set()
+    for tok in argv:
+        if tok.startswith("--"):
+            explicit.add(tok[2:].replace("-", "_").split("=")[0])
+        elif tok in ("-m", "-c"):
+            explicit.add({"-m": "model", "-c": "ctx_size"}[tok])
+
     # --recipe shorthand: 27b → models/recipes/27b.json, 30b → 30b.json (with --receipt deprecated alias)
     recipe_arg = args.recipe if args.recipe is not None else args.receipt
     if recipe_arg is not None:
@@ -152,29 +166,52 @@ def _cmd_serve(argv: list[str]) -> int:
             print(f"bwr: recipe {recipe_arg!r} not found at {p}", file=sys.stderr)
             return 2
         data = json.loads(p.read_text())
-        def _set_if_default(name, recipe_key=None):
-            rk = recipe_key or name
-            if rk in data:
-                setattr(args, name, data[rk])
-        for k in ("model", "engine", "ctx_size", "n_ctx"):
-            if k in data:
-                if k == "n_ctx":
-                    args.ctx_size = data[k]
-                else:
-                    setattr(args, k if k != "model" else "model", data[k])
-        if "n_ctx" in data:
-            args.ctx_size = data["n_ctx"]
-        for k in ("n_batch", "n_ubatch", "n_seq_max", "n_threads", "n_threads_batch",
-                  "kv_unified", "speculative", "spec_max_drafts",
-                  "prefix_cache", "prefix_cache_pins", "prefix_cache_min_tokens"):
-            if k in data:
-                setattr(args, k, data[k])
-        if "n_batch" in data:
-            args.n_batch = data["n_batch"]
+        # Recipe keys with their argparse dests (n_ctx maps to ctx_size).
+        # Unknown keys are rejected: silently dropping a perf-critical knob
+        # (as happened with flash_attn) is worse than failing fast.
+        known: dict[str, str] = {
+            "model": "model", "engine": "engine", "ctx_size": "ctx_size",
+            "n_ctx": "ctx_size", "n_batch": "n_batch", "n_ubatch": "n_ubatch",
+            "n_seq_max": "n_seq_max", "n_threads": "n_threads",
+            "n_threads_batch": "n_threads_batch", "kv_unified": "kv_unified",
+            "flash_attn": "no_flash_attn",
+            "speculative": "speculative", "spec_max_drafts": "spec_max_drafts",
+            "prefix_cache": "prefix_cache",
+            "prefix_cache_pins": "prefix_cache_pins",
+            "prefix_cache_min_tokens": "prefix_cache_min_tokens",
+            "mlx_prefix_cache": "mlx_prefix_cache",
+            "mlx_prefix_cache_size": "mlx_prefix_cache_size",
+            "mlx_kv_bits": "mlx_kv_bits",
+            "comment": "", "bench": "", "fallback_gguf": "",
+            "fallback_engine": "", "mlx_fallback": "", "mlx_engine": "",
+        }
+        unknown = sorted(k for k in data if k not in known)
+        if unknown:
+            print(f"bwr: recipe {p} has unknown keys: {', '.join(unknown)}",
+                  file=sys.stderr)
+            return 2
+        for k, dest in known.items():
+            if not dest or k not in data or dest in explicit:
+                continue
+            if k == "flash_attn":
+                # Inverted polarity: recipe true == flag absent.
+                args.no_flash_attn = not data[k]
+            else:
+                setattr(args, dest, data[k])
 
     if args.model is None:
         print("bwr serve: --model is required unless --recipe/--receipt is given", file=sys.stderr)
         return 2
+
+    # Draft-model speculation and n-gram speculation are mutually exclusive
+    # (MetalEngine refuses both). An explicitly passed --draft-model is the
+    # rarer, deliberate choice, so it wins over recipe-enabled spec with a
+    # warning; explicitly passing both is a genuine conflict and still errors.
+    if args.draft_model and args.speculative:
+        if "speculative" not in explicit:
+            print("bwr: --draft-model disables recipe-enabled n-gram speculation",
+                  file=sys.stderr)
+            args.speculative = False
 
     try:
         from .server.launch import serve
@@ -216,12 +253,16 @@ def _cmd_serve(argv: list[str]) -> int:
         n_seq_max=args.n_seq_max,
         n_threads=args.n_threads,
         n_threads_batch=args.n_threads_batch,
+        flash_attn=not args.no_flash_attn,
         kv_unified=args.kv_unified,
         served_model_name=args.served_model_name,
         log_level=args.log_level,
         draft_model_path=args.draft_model,
         speculative=args.speculative,
         spec_max_drafts=args.spec_max_drafts,
+        mlx_prefix_cache=args.mlx_prefix_cache,
+        mlx_prefix_cache_size=args.mlx_prefix_cache_size,
+        mlx_kv_bits=getattr(args, "mlx_kv_bits", None),
         prefix_cache=args.prefix_cache,
         prefix_cache_pins=getattr(args, "prefix_cache_pins", 2),
         prefix_cache_min_tokens=getattr(args, "prefix_cache_min_tokens", 256),

@@ -33,3 +33,9 @@ models/Qwen3-30B-A3B-4bit/
 # Agent coding specs — keep locally for dev, not on GitHub (user request 2026-09-11)
 SPEC-*.md
 docs/
+
+# Loop working files — local only (same policy as agent specs)
+loop-constraints.md
+loop-budget.md
+STATE.md
+loop-run-log.md

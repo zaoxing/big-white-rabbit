@@ -1,5 +1,5 @@
 {
-  "comment": "27B dense qwen35 hybrid — MLX 13.2 tok/s vs Metal 9.85. T15: q8 live-KV neutral on decode (13.06 vs 13.19, within noise; outputs identical to manual-f16), FA-Steel reverted (mlx_lm already uses Steel SDPA; SDPA<5% of decode, 48/64 layers are linear). TTFT is the prize: 0.92s short / 27.9s 2K / 112.7s 8K at ~16/s decode — MLX prompt cache is next.",
+  "comment": "27B dense qwen35 hybrid — MLX 13.2 tok/s vs Metal 9.85. T15: q8 live-KV neutral on decode, FA-Steel reverted. T16: mlx_prefix_cache ON — repeat 2K prompt TTFT 28.14s→0.07s (400x), token parity 16/16, LRU size 2; short prompts (<256 toks) unaffected.",
   "model": "models/Qwen3.8-27B-MLX-4bit",
   "engine": "mlx",
   "n_ctx": 8192,
@@ -9,6 +9,8 @@
   "prefix_cache": false,
   "kv_unified": false,
   "flash_attn": true,
+  "mlx_prefix_cache": true,
+  "mlx_prefix_cache_size": 2,
   "fallback_gguf": "models/Qwen3.8-27B-Q4_K_M.gguf",
   "fallback_engine": "metal",
   "bench": {"engine":"mlx","tok_s":13.2,"vs_metal":9.85,"n_ctx":8192}
