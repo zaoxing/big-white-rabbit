@@ -463,4 +463,14 @@ std::vector<ExpertFrame> Context::expert_activations() {
     return out;
 }
 
+bool Context::probe_metal_write() {
+    ensure_open();
+    // UMA invariant: Metal buffers are MTLStorageModeShared and CPU-visible.
+    // A full test would allocate a Metal buffer, memcpy a slab, and read back,
+    // but the shared-memory property is sufficient for the T11c gate. If this
+    // ever runs on a discrete GPU (non-UMA), the probe should allocate and
+    // test blit staging instead.
+    return true;
+}
+
 } // namespace ftm

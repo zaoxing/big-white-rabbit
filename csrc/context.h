@@ -154,6 +154,11 @@ public:
     // recording is off or nothing decoded since the last drain.
     std::vector<ExpertFrame> expert_activations();
 
+    // Spike gate for SSD fetch (SPEC-ssd-fetch.md, T11c): on UMA, Metal
+    // weight buffers are shared and CPU-writable, so a per-expert slab
+    // memcpy is sufficient (no blit staging). Returns true on this backend.
+    bool probe_metal_write();
+
     // Release the llama_context and its sampler chains NOW instead of waiting for the
     // destructor. Servers need deterministic teardown: ggml frees the Metal device from
     // a C++ static destructor at process exit and asserts its residency sets are empty

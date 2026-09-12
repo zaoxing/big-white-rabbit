@@ -166,6 +166,8 @@ PYBIND11_MODULE(_freetoken_metal, m) {
         .def("expert_activations", &ftm::Context::expert_activations,
              "Drain this decode's recorded MoE router frames (consume "
              "semantics: reading clears). Empty unless built with record_experts.")
+        .def("probe_metal_write", &ftm::Context::probe_metal_write,
+             "Spike gate for SSD fetch: Metal shared buffers are CPU-writable on UMA.")
         .def_property_readonly("decode_calls", &ftm::Context::decode_calls)
         .def_property_readonly("n_ctx",     &ftm::Context::n_ctx)
         .def_property_readonly("n_batch",   &ftm::Context::n_batch)
