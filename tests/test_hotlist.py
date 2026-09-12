@@ -73,6 +73,35 @@ def test_multi_layer_isolation() -> None:
     assert hl.resident(1) == [1]
 
 
+def test_engine_hotlist_wiring() -> None:
+    """Engine with ssd_hotlist auto-feeds hotlist from expert_activations."""
+    cfg = EngineConfig(
+        n_ctx=512, n_seq_max=1, record_experts=True,
+        ssd_hotlist=True, ssd_hotlist_k=32, ssd_hotlist_top_k=8,
+    )
+    model = ftm.Model(MODEL_PATH, ftm.ModelParams())
+    engine = MetalEngine(model, cfg)
+    assert engine._hotlist is not None
+    rid = engine.add_request("Count: 1 2 3", ftm.RequestParams(max_tokens=8, stop_at_eog=False, temp=0.0))
+    list(engine.drain())
+    # Hotlist auto-fed: should have hits/misses, manual drain now empty
+    assert engine._hotlist.hits + engine._hotlist.misses > 0
+    assert engine._hotlist.hit_rate() is not None
+    assert engine.expert_activations(rid) == []  # consumed by hotlist
+    model.close()
+
+
+def test_hotlist_needs_recording() -> None:
+    with pytest.raises(ValueError, match="record_experts"):
+        EngineConfig(n_ctx=512, n_seq_max=1, ssd_hotlist=True, record_experts=False).validate_hotlist()
+    # Engine should also refuse at construction
+    cfg = EngineConfig(n_ctx=512, n_seq_max=1, ssd_hotlist=True, record_experts=False)
+    model = ftm.Model(MODEL_PATH, ftm.ModelParams())
+    with pytest.raises(ValueError, match="record_experts"):
+        MetalEngine(model, cfg)
+    model.close()
+
+
 @pytest.mark.skipif(
     not MODEL_PATH or not os.path.exists(MODEL_PATH),
     reason="set FTM_MOE_MODEL to a MoE .gguf path to run hotlist integration",

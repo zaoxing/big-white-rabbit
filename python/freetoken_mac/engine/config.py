@@ -72,6 +72,12 @@ class EngineConfig:
     # cost -- profile, don't serve, with it). Single-sequence contexts
     # only; the constructor refuses anything else.
     record_experts: bool = False
+    # SSD hotlist (SPEC-ssd-hotlist.md, ds4-inspired). Tracks per-layer LRU
+    # residency for bounded expert caches. No I/O yet -- measures hit rate
+    # before touching memory. Requires record_experts.
+    ssd_hotlist: bool = False
+    ssd_hotlist_k: int = 32
+    ssd_hotlist_top_k: int = 8
 
     def to_context_params(self) -> ContextParams:
         cp = ContextParams()
@@ -85,6 +91,17 @@ class EngineConfig:
         cp.kv_unified = self.kv_unified
         cp.record_experts = self.record_experts
         return cp
+
+    def validate_hotlist(self) -> None:
+        """Raise if ssd_hotlist config is inconsistent."""
+        if self.ssd_hotlist and not self.record_experts:
+            raise ValueError("ssd_hotlist needs record_experts=True")
+        if self.ssd_hotlist_k < 1:
+            raise ValueError(f"ssd_hotlist_k must be >= 1; got {self.ssd_hotlist_k}")
+        if self.ssd_hotlist_top_k < 1:
+            raise ValueError(
+                f"ssd_hotlist_top_k must be >= 1; got {self.ssd_hotlist_top_k}"
+            )
 
 
 @dataclass
