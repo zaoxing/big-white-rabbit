@@ -94,8 +94,10 @@ def _cmd_serve(argv: list[str]) -> int:
         prog="bwr serve", description="Serve an OpenAI-compatible API over a GGUF model."
     )
     _add_model_args(ap, required=False)
+    ap.add_argument("--recipe", default=None, metavar="PATH|27b|30b",
+                    help="ready-to-use recipe: path to JSON or shorthand '27b' (MLX 13.2 tok/s) / '30b' (Metal 57 tok/s, prefix-cache 200× on 21k); see models/recipes/")
     ap.add_argument("--receipt", default=None, metavar="PATH|27b|30b",
-                    help="ready-to-use receipt: path to JSON or shorthand '27b' (MLX 13.2 tok/s) / '30b' (Metal 57 tok/s, prefix-cache 200× on 21k); see models/receipts/")
+                    help=argparse.SUPPRESS)  # deprecated alias for --recipe
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=1919)
     ap.add_argument("--n-batch", type=int, default=512)
@@ -126,21 +128,22 @@ def _cmd_serve(argv: list[str]) -> int:
     ap.add_argument("--log-level", default="info")
     args = ap.parse_args(argv)
 
-    # --receipt shorthand: 27b → models/receipts/27b.json, 30b → 30b.json
-    if args.receipt is not None:
+    # --recipe shorthand: 27b → models/recipes/27b.json, 30b → 30b.json (with --receipt deprecated alias)
+    recipe_arg = args.recipe if args.recipe is not None else args.receipt
+    if recipe_arg is not None:
         import json, pathlib
-        receipt_path = args.receipt
-        if receipt_path in ("27b", "27B", "qwen27b", "27"):
-            receipt_path = "models/receipts/27b.json"
-        elif receipt_path in ("30b", "30B", "qwen30b", "30", "moe"):
-            receipt_path = "models/receipts/30b.json"
-        p = pathlib.Path(receipt_path)
+        recipe_path = recipe_arg
+        if recipe_path in ("27b", "27B", "qwen27b", "27"):
+            recipe_path = "models/recipes/27b.json"
+        elif recipe_path in ("30b", "30B", "qwen30b", "30", "moe"):
+            recipe_path = "models/recipes/30b.json"
+        p = pathlib.Path(recipe_path)
         if not p.exists():
-            print(f"bwr: receipt {args.receipt!r} not found at {p}", file=sys.stderr)
+            print(f"bwr: recipe {recipe_arg!r} not found at {p}", file=sys.stderr)
             return 2
         data = json.loads(p.read_text())
-        def _set_if_default(name, receipt_key=None):
-            rk = receipt_key or name
+        def _set_if_default(name, recipe_key=None):
+            rk = recipe_key or name
             if rk in data:
                 setattr(args, name, data[rk])
         for k in ("model", "engine", "ctx_size", "n_ctx"):
@@ -158,7 +161,7 @@ def _cmd_serve(argv: list[str]) -> int:
             args.n_batch = data["n_batch"]
 
     if args.model is None:
-        print("bwr serve: --model is required unless --receipt is given", file=sys.stderr)
+        print("bwr serve: --model is required unless --recipe/--receipt is given", file=sys.stderr)
         return 2
 
     try:

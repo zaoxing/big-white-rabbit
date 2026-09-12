@@ -65,9 +65,9 @@ curl -L -o qwen38-mlx-4bit/model-00001-of-00003.safetensors \
 curl -L -o models/qwen3-30b.gguf \
   https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF/resolve/main/Qwen3-30B-A3B-Q4_K_M.gguf
 
-# 4. Serve (default port 1919) — ready-to-use receipts
-bwr serve --receipt 27b   # 27B dense qwen35 hybrid: MLX 13.2 tok/s, 4bit 15G, n_ctx 8192 (fallback GGUF: bwr serve --receipt 27b --engine metal)
-bwr serve --receipt 30b   # 30B-A3B MoE qwen3moe: Metal 57.15 tok/s (vs MLX 15.97), 4bit 17G, n_ctx 8192, prefix-cache 200× on 21k, spec +5% on rep
+# 4. Serve (default port 1919) — ready-to-use recipes
+bwr serve --recipe 27b   # 27B dense qwen35 hybrid: MLX 13.2 tok/s, 4bit 15G, n_ctx 8192 (fallback GGUF: bwr serve --recipe 27b --engine metal)
+bwr serve --recipe 30b   # 30B-A3B MoE qwen3moe: Metal 57.15 tok/s (vs MLX 15.97), 4bit 17G, n_ctx 8192, prefix-cache 200× on 21k, spec +5% on rep
 # or explicit:
 bwr serve -m models/Qwen3.8-27B-MLX-4bit --engine mlx --ctx-size 8192
 bwr serve -m models/Qwen3-30B-A3B-Q4_K_M.gguf --engine metal --ctx-size 8192 --n-seq-max 2 --kv-unified --prefix-cache --speculative
@@ -113,14 +113,14 @@ raising concurrency shrinks per-request context; `/health` reports both `n_ctx` 
 per-sequence `n_ctx_seq`. Pass `--kv-unified` to share one buffer instead. The MLX
 backend serves requests from independent generators (batching parity is follow-up work).
 
-## Ready-to-use receipts (bench on M1 Max 64GB, `bwr` `df334a2`)
+## Ready-to-use recipes (bench on M1 Max 64GB, `bwr` `df334a2`)
 
-| Receipt | Model | Engine | `n_ctx` | `tok/s` | Notes |
+| Recipe | Model | Engine | `n_ctx` | `tok/s` | Notes |
 |---|---|---|---|---|---|
-| `bwr serve --receipt 27b` | `Qwen3.8-27B-MLX-4bit` `qwen35` hybrid 64L `248320` | `mlx` | `8192` | `13.2` | `4bit 15G` fallback `Q4_K_M` `9.85` `metal`; `spec`/`prefix-cache` off (hybrid) |
-| `bwr serve --receipt 30b` | `Qwen3-30B-A3B-Q4_K_M.gguf` `qwen3moe` 48L `151936` | `metal` | `8192` `n_seq_max=2 kv_unified` | `57.15` | `vs MLX 15.97` `3.5×`; `spec +5%` rep (`38.12 vs 36.35`), `prefix-cache 123.22s→0.62s 200×` on `21k`, `MLX fallback` `models/Qwen3-30B-A3B-4bit` |
+| `bwr serve --recipe 27b` | `Qwen3.8-27B-MLX-4bit` `qwen35` hybrid 64L `248320` | `mlx` | `8192` | `13.2` | `4bit 15G` fallback `Q4_K_M` `9.85` `metal`; `spec`/`prefix-cache` off (hybrid) |
+| `bwr serve --recipe 30b` | `Qwen3-30B-A3B-Q4_K_M.gguf` `qwen3moe` 48L `151936` | `metal` | `8192` `n_seq_max=2 kv_unified` | `57.15` | `vs MLX 15.97` `3.5×`; `spec +5%` rep (`38.12 vs 36.35`), `prefix-cache 123.22s→0.62s 200×` on `21k`, `MLX fallback` `models/Qwen3-30B-A3B-4bit` |
 
-Receipts are `models/receipts/27b.json` / `30b.json` (JSON `EngineConfig` + `model` + `bench`); `bwr serve --receipt 27b --port 1919` or `bwr serve --receipt models/receipts/30b.json` (explicit `CLI` wins).
+Recipes are `models/recipes/27b.json` / `30b.json` (JSON `EngineConfig` + `model` + `bench`); `bwr serve --recipe 27b --port 1919` or `bwr serve --recipe models/recipes/30b.json` (explicit `CLI` wins; `--receipt` is a deprecated alias).
 
 ## Optional features (all default off unless noted)
 
