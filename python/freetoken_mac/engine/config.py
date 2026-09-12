@@ -78,6 +78,10 @@ class EngineConfig:
     ssd_hotlist: bool = False
     ssd_hotlist_k: int = 32
     ssd_hotlist_top_k: int = 8
+    # Byte budget alternative to k (ds4: --ssd-streaming-cache-experts 32GB).
+    # When set, K is auto-fit as bytes // (n_layer * slab_bytes), capped at
+    # n_expert. None means use ssd_hotlist_k directly. Single-source: set one.
+    ssd_hotlist_bytes: int | None = None
 
     def to_context_params(self) -> ContextParams:
         cp = ContextParams()
@@ -96,12 +100,24 @@ class EngineConfig:
         """Raise if ssd_hotlist config is inconsistent."""
         if self.ssd_hotlist and not self.record_experts:
             raise ValueError("ssd_hotlist needs record_experts=True")
+        if self.ssd_hotlist and self.ssd_hotlist_bytes is not None and self.ssd_hotlist_bytes < 1:
+            raise ValueError(f"ssd_hotlist_bytes must be >= 1; got {self.ssd_hotlist_bytes}")
         if self.ssd_hotlist_k < 1:
             raise ValueError(f"ssd_hotlist_k must be >= 1; got {self.ssd_hotlist_k}")
         if self.ssd_hotlist_top_k < 1:
             raise ValueError(
                 f"ssd_hotlist_top_k must be >= 1; got {self.ssd_hotlist_top_k}"
             )
+
+    def effective_hotlist_k(self, n_layer: int, n_expert: int = 128) -> int:
+        """K actually used, byte budget auto-fitted if set (ds4: target, not guarantee)."""
+        if self.ssd_hotlist_bytes is None:
+            return self.ssd_hotlist_k
+        # 30B probe: 0.91MB per expert slab. Use 1MB ceiling as safe estimate
+        # until per-tensor sizing is plumbed; capped at n_expert.
+        slab = 1_000_000  # ~0.91MB measured, rounded up
+        k = max(1, self.ssd_hotlist_bytes // (n_layer * slab))
+        return min(k, n_expert)
 
 
 @dataclass

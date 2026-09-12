@@ -117,6 +117,8 @@ def _cmd_serve(argv: list[str]) -> int:
                     help="SSD hotlist LRU over routed experts (SPEC-ssd-hotlist.md, ds4-inspired); needs --record-experts")
     ap.add_argument("--ssd-hotlist-k", type=int, default=32,
                     help="resident experts per layer for hotlist (default 32)")
+    ap.add_argument("--ssd-hotlist-bytes", default=None, metavar="BYTES",
+                    help="byte budget alternative to --ssd-hotlist-k, e.g. 32GB or 1073741824 (ds4: --ssd-streaming-cache-experts)")
     ap.add_argument("--engine", default="mlx", choices=("metal", "mlx"),
                     help="inference backend (default mlx; 'metal' serves a GGUF via llama.cpp)")
     ap.add_argument("--log-level", default="info")
@@ -130,6 +132,26 @@ def _cmd_serve(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 1
+
+    # Byte budget string -> int (ds4: "32GB" or "4000" slots; we support bytes)
+    ssd_bytes = None
+    if args.ssd_hotlist_bytes is not None:
+        s = str(args.ssd_hotlist_bytes).strip().upper()
+        mult = 1
+        for suffix, factor in [("GB", 1<<30), ("G", 1<<30), ("MB", 1<<20), ("M", 1<<20), ("KB", 1<<10), ("K", 1<<10)]:
+            if s.endswith(suffix):
+                mult = factor
+                s = s[:-len(suffix)]
+                break
+        try:
+            ssd_bytes = int(float(s) * mult)
+        except ValueError:
+            print(f"ftm: invalid --ssd-hotlist-bytes {args.ssd_hotlist_bytes!r}", file=sys.stderr)
+            return 2
+        # byte budget implies hotlist on
+        args.ssd_hotlist = True
+        if not args.record_experts:
+            args.record_experts = True
 
     serve(
         args.model,
@@ -147,6 +169,7 @@ def _cmd_serve(argv: list[str]) -> int:
         record_experts=args.record_experts,
         ssd_hotlist=args.ssd_hotlist,
         ssd_hotlist_k=args.ssd_hotlist_k,
+        ssd_hotlist_bytes=ssd_bytes,
         engine=args.engine,
     )
     return 0
