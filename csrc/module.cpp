@@ -168,6 +168,9 @@ PYBIND11_MODULE(_freetoken_metal, m) {
              "semantics: reading clears). Empty unless built with record_experts.")
         .def("probe_metal_write", &ftm::Context::probe_metal_write,
              "Spike gate for SSD fetch: Metal shared buffers are CPU-writable on UMA.")
+        .def("fetch_expert", &ftm::Context::fetch_expert,
+             py::arg("layer"), py::arg("expert_idx"),
+             "Simulate SSD fetch of expert slab (0.35ms, T11c spike).")
         .def_property_readonly("decode_calls", &ftm::Context::decode_calls)
         .def_property_readonly("n_ctx",     &ftm::Context::n_ctx)
         .def_property_readonly("n_batch",   &ftm::Context::n_batch)

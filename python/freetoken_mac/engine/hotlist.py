@@ -48,14 +48,15 @@ class ExpertHotlist:
         indexed = sorted(range(len(row)), key=row.__getitem__, reverse=True)  # type: ignore[arg-type]
         return indexed[:k]
 
-    def update(self, frames: list[dict]) -> dict[str, int]:
+    def update(self, frames: list[dict]) -> dict[str, object]:
         """Update LRU from `expert_activations()` frames.
 
         Each frame: {"layer": int, "tokens": [[float, ...], ...]}.
-        Returns {"hits": int, "misses": int} for this call.
+        Returns {"hits": int, "misses": int, "missed": [(layer, eid), ...]}.
         """
         hits = 0
         misses = 0
+        missed: list[tuple[int, int]] = []
         for frame in frames:
             layer = int(frame["layer"])
             cache = self._cache_for(layer)
@@ -67,12 +68,13 @@ class ExpertHotlist:
                         cache.move_to_end(eid)
                     else:
                         misses += 1
+                        missed.append((layer, eid))
                         cache[eid] = None
                         if len(cache) > self.k_per_layer:
                             cache.popitem(last=False)
         self.hits += hits
         self.misses += misses
-        return {"hits": hits, "misses": misses}
+        return {"hits": hits, "misses": misses, "missed": missed}
 
     def hit_rate(self) -> float | None:
         """Overall hit rate, or None before any update."""

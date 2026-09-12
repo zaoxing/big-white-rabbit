@@ -453,8 +453,8 @@ class MetalEngine:
         for req, n_prefilled, n_pos in commits:
             req.n_prefilled = n_prefilled
             req.n_pos = n_pos
-        # SSD hotlist (T11b): feed router distributions into per-layer LRU.
-        # No I/O yet — just residency accounting before next step's qstar.
+        # SSD hotlist (T11b+c): feed router distributions into per-layer LRU
+        # and simulate SSD fetch for misses (0.35ms per 0.91MB slab).
         if self._hotlist is not None:
             raw_frames = self.ctx.expert_activations()
             if raw_frames:
@@ -471,7 +471,9 @@ class MetalEngine:
                             ],
                         }
                     )
-                self._hotlist.update(converted)
+                result = self._hotlist.update(converted)
+                for layer, eid in result.get("missed", []):  # type: ignore[arg-type]
+                    self.ctx.fetch_expert(layer, eid)
 
         outputs: list[StepOutput] = []
         for entry in entries:
