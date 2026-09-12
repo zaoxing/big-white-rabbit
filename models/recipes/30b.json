@@ -1,10 +1,13 @@
 {
-  "comment": "30B-A3B MoE qwen3moe 48L 128 experts — Metal 57.15 tok/s vs MLX 15.97; spec +5% on rep, prefix-cache 200x on 21k",
+  "comment": "30B-A3B MoE qwen3moe 48L 128 experts — Metal ~58 tok/s vs MLX 15.97 (3.6x); tuned 2026-09-12 sweep",
   "model": "models/Qwen3-30B-A3B-Q4_K_M.gguf",
   "engine": "metal",
   "n_ctx": 8192,
-  "n_batch": 512,
+  "n_batch": 2048,
+  "n_ubatch": 512,
   "n_seq_max": 2,
+  "n_threads": 10,
+  "n_threads_batch": 0,
   "kv_unified": true,
   "speculative": true,
   "spec_max_drafts": 4,
@@ -14,5 +17,5 @@
   "flash_attn": true,
   "mlx_fallback": "models/Qwen3-30B-A3B-4bit",
   "mlx_engine": "mlx",
-  "bench": {"engine":"metal","tok_s":57.15,"vs_mlx":15.97,"prefix_cache_first":"123.22s","prefix_cache_hit":"0.62s","spec_rep":"38.12 vs 36.35"}
+  "bench": {"engine":"metal","tok_s":58.2,"vs_mlx":15.97,"prefix_cache_first":"123.22s","prefix_cache_hit":"0.62s","spec_rep":"+7.5% drafts=4 accept=70%","notes":"flash_attn on is +20% vs off; n_threads_batch!=0 is -7%; geometry deltas otherwise within +-5% noise; drafts=8 collapses (accept 15%)"}
 }

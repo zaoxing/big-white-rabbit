@@ -101,9 +101,19 @@ def _cmd_serve(argv: list[str]) -> int:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=1919)
     ap.add_argument("--n-batch", type=int, default=512)
+    ap.add_argument("--n-ubatch", type=int, default=None,
+                    help="micro-batch (default = n-batch; 512 is the tuned value for 30B MoE)")
     ap.add_argument("--n-seq-max", type=int, default=8,
                     help="max concurrent requests (each gets ctx-size/n-seq-max tokens "
                          "of KV unless --kv-unified)")
+    ap.add_argument("--n-threads", type=int, default=0,
+                    help="CPU threads (0 = auto; 10 is tuned for 30B MoE on M1 Max)")
+    ap.add_argument("--n-threads-batch", type=int, default=0,
+                    help="CPU threads for batch/prefill (0 = auto; keep 0, nonzero measured -7%%)")
+    ap.add_argument("--speculative", action="store_true",
+                    help="n-gram speculative decoding (greedy only; +5-7%% on repetitive text)")
+    ap.add_argument("--spec-max-drafts", type=int, default=4,
+                    help="max n-gram drafts per step (4 tuned; 8 collapses acceptance)")
     ap.add_argument("--kv-unified", action="store_true",
                     help="share one KV buffer across sequences; required for partial "
                          "prefix copies (see docs/llamacpp-notes.md)")
@@ -154,7 +164,9 @@ def _cmd_serve(argv: list[str]) -> int:
                     setattr(args, k if k != "model" else "model", data[k])
         if "n_ctx" in data:
             args.ctx_size = data["n_ctx"]
-        for k in ("n_batch", "n_seq_max", "kv_unified", "speculative", "spec_max_drafts", "prefix_cache", "prefix_cache_pins", "prefix_cache_min_tokens"):
+        for k in ("n_batch", "n_ubatch", "n_seq_max", "n_threads", "n_threads_batch",
+                  "kv_unified", "speculative", "spec_max_drafts",
+                  "prefix_cache", "prefix_cache_pins", "prefix_cache_min_tokens"):
             if k in data:
                 setattr(args, k, data[k])
         if "n_batch" in data:
@@ -200,12 +212,19 @@ def _cmd_serve(argv: list[str]) -> int:
         n_gpu_layers=args.n_gpu_layers,
         n_ctx=args.ctx_size,
         n_batch=args.n_batch,
+        n_ubatch=args.n_ubatch,
         n_seq_max=args.n_seq_max,
+        n_threads=args.n_threads,
+        n_threads_batch=args.n_threads_batch,
         kv_unified=args.kv_unified,
         served_model_name=args.served_model_name,
         log_level=args.log_level,
         draft_model_path=args.draft_model,
+        speculative=args.speculative,
+        spec_max_drafts=args.spec_max_drafts,
         prefix_cache=args.prefix_cache,
+        prefix_cache_pins=getattr(args, "prefix_cache_pins", 2),
+        prefix_cache_min_tokens=getattr(args, "prefix_cache_min_tokens", 256),
         record_experts=args.record_experts,
         ssd_hotlist=args.ssd_hotlist,
         ssd_hotlist_k=args.ssd_hotlist_k,
