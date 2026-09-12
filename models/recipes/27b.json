@@ -1,5 +1,5 @@
 {
-  "comment": "27B dense qwen35 hybrid — MLX is 13.2 tok/s vs Metal 9.85; spec hurts, prefix-cache not for hybrid",
+  "comment": "27B dense qwen35 hybrid — MLX 13.2 tok/s vs Metal 9.85. T15: q8 live-KV neutral on decode (13.06 vs 13.19, within noise; outputs identical to manual-f16), FA-Steel reverted (mlx_lm already uses Steel SDPA; SDPA<5% of decode, 48/64 layers are linear). TTFT is the prize: 0.92s short / 27.9s 2K / 112.7s 8K at ~16/s decode — MLX prompt cache is next.",
   "model": "models/Qwen3.8-27B-MLX-4bit",
   "engine": "mlx",
   "n_ctx": 8192,

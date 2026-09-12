@@ -171,6 +171,32 @@ class MLXEngine:
                 "this MLXEngine has been closed; create a new one to keep serving"
             )
 
+    def _make_cache(self) -> list:
+        """Owned cache with optional quantized KV (mlx_kv_bits).
+
+        Builds the model default (ArraysCache for linear layers, KVCache
+        for full attention on qwen3_5) then swaps exact-type KVCache entries
+        for QuantizedKVCache. Order is preserved positionally, which the
+        model relies on (cache[i] belongs to layer i).
+        """
+        from mlx_lm.models.cache import QuantizedKVCache
+        from mlx_lm.models.cache import KVCache
+
+        cache = self._model.make_cache()
+        if self.config.mlx_kv_bits is None:
+            return cache
+        bits = self.config.mlx_kv_bits
+        if bits == 0:
+            return cache  # manual-loop f16 control (no swap)
+        if bits not in (4, 8):
+            raise ValueError(f"mlx_kv_bits must be 0, 4 or 8; got {bits}")
+        return [
+            QuantizedKVCache(group_size=64, bits=bits)
+            if type(c) is KVCache
+            else c
+            for c in cache
+        ]
+
     def _lookup(self, request_id: int) -> RequestState:
         req = self._states.get(request_id)
         if req is None:
@@ -296,7 +322,7 @@ class MLXEngine:
         )
         if rp.stop:
             self._stop_filters[request_id] = StopSequenceFilter(rp.stop)
-        if self.config.speculative:
+        if self.config.speculative or self.config.mlx_kv_bits is not None:
             # Seed with the prompt (same rule as MetalEngine); the cache
             # itself is built lazily on the first spec step.
             table = NgramTable()
@@ -357,8 +383,12 @@ class MLXEngine:
         stays manual. Falling back to the stream path would restart
         generation from the prompt (a fresh generator knows nothing of
         emitted tokens), so fallback only ever disables DRAFTING, never the
-        loop. Entry requires the flag plus greedy sampling."""
+        loop. Entry requires the flag plus greedy sampling, or a quantized
+        KV setting (the stream path builds its own f16 cache internally,
+        so mlx_kv_bits can only take effect through the owned cache)."""
         if req.request_id in self._caches:
+            return True
+        if self.config.mlx_kv_bits is not None:
             return True
         return bool(self.config.speculative and req.params.temp <= 0)
 
@@ -372,7 +402,7 @@ class MLXEngine:
         """
         try:
             mx = _mx()
-            cache = self._model.make_cache()
+            cache = self._make_cache()
             tokens = req.prompt
             logits = None
             for i in range(0, len(tokens), _PREFILL_CHUNK):
@@ -398,7 +428,7 @@ class MLXEngine:
         Exact by construction -- same tokens, same order, same positions.
         """
         mx = _mx()
-        cache = self._model.make_cache()
+        cache = self._make_cache()
         tokens = req.prompt + req.output_tokens
         logits = None
         for i in range(0, len(tokens), _PREFILL_CHUNK):
@@ -424,9 +454,12 @@ class MLXEngine:
         mx = _mx()
         table = self._spec_tables[req.request_id]
         remaining = req.params.max_tokens - req.n_generated
+        # Drafting only when speculation is on; mlx_kv_bits alone rides the
+        # manual loop with zero drafts (single-row forward, same as plain
+        # decode but through the owned, possibly quantized, cache).
         max_drafts = (
             self.config.spec_max_drafts
-            if self._spec_ok.get(req.request_id, True)
+            if (self.config.speculative and self._spec_ok.get(req.request_id, True))
             else 0
         )
         allow = max(0, min(max_drafts, remaining - 1))

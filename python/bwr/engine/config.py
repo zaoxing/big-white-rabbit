@@ -45,6 +45,15 @@ class EngineConfig:
     # apply where meaningful (n_ctx caps MLX admissions); the rest are
     # Metal-only and ignored.
     engine: str = "mlx"
+    # Quantized live KV for the MLX backend (mlx_lm QuantizedKVCache).
+    # None = f16 stream path (default); 8/4 = int8/int4 KV on the
+    # full-attention layers only (qwen3_5 hybrid keeps f32 recurrent state
+    # in ArraysCache untouched), served through the owned manual loop;
+    # 0 = f16 through the manual loop (bench control isolating loop
+    # overhead from quantization). mlx_lm routes to quantized SDPA
+    # automatically when the cache has `bits`. Metal-only knobs below are
+    # ignored on this path.
+    mlx_kv_bits: int | None = None
     # One shared KV buffer instead of one stream per sequence. Off = llama.cpp's own
     # default; on is what a partial-range ctx.memory_seq_cp (prefix fork) needs.
     kv_unified: bool = False
