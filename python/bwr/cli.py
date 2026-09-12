@@ -275,10 +275,71 @@ def _cmd_serve(argv: list[str]) -> int:
     return 0
 
 
+def _cmd_tune(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(
+        prog="bwr tune",
+        description="Measure greedy decode speed per n-gram depth on this Mac "
+                    "(report-only).",
+    )
+    _add_model_args(ap, required=True)
+    ap.add_argument("--engine", default="metal", choices=("metal", "mlx"),
+                    help="backend to tune (metal: GGUF file; mlx: weights dir)")
+    ap.add_argument("--depths", default="off,2,4",
+                    help="candidate grid, 'off' = autoregressive baseline (default off,2,4)")
+    ap.add_argument("--reps", type=int, default=3,
+                    help="repeats per candidate, median wins (default 3)")
+    ap.add_argument("--max-tokens", type=int, default=64,
+                    help="decode tokens per rep (default 64)")
+    ap.add_argument("--prompt", default=None,
+                    help="probe prompt (default: repetitive loop text; n-gram needs repeats)")
+    ap.add_argument("--n-batch", type=int, default=512)
+    args = ap.parse_args(argv)
+
+    from .tune import DEFAULT_PROMPT, bench_one, parse_depths, pick_winner, render
+
+    try:
+        depths = parse_depths(args.depths)
+    except ValueError as exc:
+        print(f"bwr tune: {exc}", file=sys.stderr)
+        return 2
+    if args.reps < 1 or args.max_tokens < 1:
+        print("bwr tune: --reps and --max-tokens must be >= 1", file=sys.stderr)
+        return 2
+
+    if args.engine == "mlx":
+        import pathlib
+        if not pathlib.Path(args.model).is_dir():
+            print(f"bwr tune: --engine mlx needs a weights dir, got {args.model!r}",
+                  file=sys.stderr)
+            return 2
+        model: object = args.model
+    else:
+        if not args.model.endswith(".gguf"):
+            print(f"bwr tune: --engine metal needs a .gguf file, got {args.model!r}",
+                  file=sys.stderr)
+            return 2
+        from . import Model, ModelParams
+
+        mp = ModelParams()
+        mp.n_gpu_layers = args.n_gpu_layers
+        model = Model(args.model, mp)
+
+    prompt = args.prompt if args.prompt is not None else DEFAULT_PROMPT
+    rows = [
+        bench_one(model, backend=args.engine, prompt=prompt,
+                  max_tokens=args.max_tokens, reps=args.reps,
+                  n_ctx=args.ctx_size, n_batch=args.n_batch, depth=d)
+        for d in depths
+    ]
+    print(render(rows, pick_winner(rows)))
+    return 0
+
+
 _COMMANDS = {
     "info": _cmd_info,
     "generate": _cmd_generate,
     "serve": _cmd_serve,
+    "tune": _cmd_tune,
 }
 
 
