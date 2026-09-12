@@ -18,6 +18,7 @@ from .._freetoken_metal import Batch, Context, Model
 from .batching import AdmissionPolicy, FCFSPolicy, RequestState, StepBudget, StepPlan
 from .config import EngineConfig, RequestParams, StopSequenceFilter
 from .draft import DraftEngine
+from .hotlist import ExpertHotlist
 from .ngram import NgramTable
 
 
@@ -281,6 +282,16 @@ class MetalEngine:
         self._pins: dict[tuple[int, ...], int] = {}
         self.prefix_cache_hits = 0
         self.prefix_cache_tokens_saved = 0
+        # SSD hotlist (SPEC-ssd-hotlist.md, ds4-inspired, T11b): per-layer LRU
+        # over routed experts, driven by expert_activations() after each
+        # decode. No I/O yet — measures residency that would exist.
+        self._hotlist: ExpertHotlist | None = None
+        if self.config.ssd_hotlist:
+            self.config.validate_hotlist()
+            self._hotlist = ExpertHotlist(
+                k_per_layer=self.config.ssd_hotlist_k,
+                top_k=self.config.ssd_hotlist_top_k,
+            )
         self._next_request_id = 0
 
     # --- admission --------------------------------------------------------------
@@ -441,6 +452,25 @@ class MetalEngine:
         for req, n_prefilled, n_pos in commits:
             req.n_prefilled = n_prefilled
             req.n_pos = n_pos
+        # SSD hotlist (T11b): feed router distributions into per-layer LRU.
+        # No I/O yet — just residency accounting before next step's qstar.
+        if self._hotlist is not None:
+            raw_frames = self.ctx.expert_activations()
+            if raw_frames:
+                converted: list[dict[str, object]] = []
+                for f in raw_frames:
+                    n_tokens = f.n_tokens
+                    n_expert = len(f.probs) // max(1, n_tokens) if n_tokens else 0
+                    converted.append(
+                        {
+                            "layer": f.layer,
+                            "tokens": [
+                                list(f.probs[i * n_expert : (i + 1) * n_expert])
+                                for i in range(n_tokens)
+                            ],
+                        }
+                    )
+                self._hotlist.update(converted)
 
         outputs: list[StepOutput] = []
         for entry in entries:

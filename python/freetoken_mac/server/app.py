@@ -278,7 +278,7 @@ def build_app(
 
     @app.get("/health")
     async def health() -> dict[str, object]:
-        return {
+        body: dict[str, object] = {
             "status": "ok",
             "model": model_name,
             "n_ctx": engine.ctx.n_ctx,
@@ -287,6 +287,14 @@ def build_app(
             "free_seq_slots": engine.n_free_seq_slots,
             "decode_calls": engine.ctx.decode_calls,
         }
+        hotlist = getattr(engine, "_hotlist", None)
+        if hotlist is not None:
+            body["hotlist"] = {
+                "hits": hotlist.hits,
+                "misses": hotlist.misses,
+                "hit_rate": hotlist.hit_rate(),
+            }
+        return body
 
     @app.get("/v1/models")
     async def list_models() -> ModelList:
