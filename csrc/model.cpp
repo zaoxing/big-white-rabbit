@@ -82,6 +82,62 @@ void Model::ensure_open() const {
     }
 }
 
+// llama.cpp's token pieces are raw bytes, not necessarily valid UTF-8 (GPT-2 style
+// byte-fallback tokens are single bytes 0x80-0xff). pybind11 decodes `std::string`
+// returns as UTF-8, so force valid UTF-8 here by replacing any invalid sequence with
+// the Unicode replacement character U+FFFD (UTF-8: EF BF BD).
+static std::string ensure_valid_utf8(const std::string & s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c < 0x80) {
+            out += static_cast<char>(c);
+            ++i;
+        } else if (c < 0xC0) {
+            out += "\xEF\xBF\xBD";
+            ++i;
+        } else if (c < 0xE0) {
+            if (i + 1 < s.size() && (static_cast<unsigned char>(s[i + 1]) & 0xC0) == 0x80) {
+                out += s[i];
+                out += s[i + 1];
+                i += 2;
+            } else {
+                out += "\xEF\xBF\xBD";
+                ++i;
+            }
+        } else if (c < 0xF0) {
+            if (i + 2 < s.size() && (static_cast<unsigned char>(s[i + 1]) & 0xC0) == 0x80
+                    && (static_cast<unsigned char>(s[i + 2]) & 0xC0) == 0x80) {
+                out += s[i];
+                out += s[i + 1];
+                out += s[i + 2];
+                i += 3;
+            } else {
+                out += "\xEF\xBF\xBD";
+                ++i;
+            }
+        } else if (c < 0xF8) {
+            if (i + 3 < s.size() && (static_cast<unsigned char>(s[i + 1]) & 0xC0) == 0x80
+                    && (static_cast<unsigned char>(s[i + 2]) & 0xC0) == 0x80
+                    && (static_cast<unsigned char>(s[i + 3]) & 0xC0) == 0x80) {
+                out += s[i];
+                out += s[i + 1];
+                out += s[i + 2];
+                out += s[i + 3];
+                i += 4;
+            } else {
+                out += "\xEF\xBF\xBD";
+                ++i;
+            }
+        } else {
+            out += "\xEF\xBF\xBD";
+            ++i;
+        }
+    }
+    return out;
+}
+
 std::vector<llama_token> Model::tokenize(const std::string & text, bool add_special, bool parse_special) const {
     ensure_open();
     // Negative return = -(required capacity); retry once at that size.
@@ -108,9 +164,9 @@ std::string Model::token_to_piece(llama_token tok, bool special) const {
             throw std::runtime_error("token_to_piece failed for token " + std::to_string(tok));
         }
         big.resize(n2);
-        return big;
+        return ensure_valid_utf8(big);
     }
-    return std::string(buf, n);
+    return ensure_valid_utf8(std::string(buf, n));
 }
 
 std::string Model::detokenize(const std::vector<llama_token> & toks, bool unparse_special) const {
