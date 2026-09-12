@@ -50,10 +50,12 @@ class EngineConfig:
     kv_unified: bool = False
     # Greedy n-gram speculative decoding (SPEC-speculative-ngram.md). Off by
     # default: drafts cost batch rows, which only pays when the acceptance
-    # rate is high. Greedy requests only; non-greedy always takes the plain
-    # path (verification without logits cannot beat greedy).
+    # rate is high. Greedy requests only by default; with
+    # speculative_opportunistic=True, temp>0 requests also draft (ds4:
+    # opportunistic sampling — matching greedy drafts accepted directly).
     speculative: bool = False
     spec_max_drafts: int = 4
+    speculative_opportunistic: bool = False
     # Draft-model speculation (SPEC-draft-model.md): max drafts per step from
     # the draft model. The draft Model object itself is passed to MetalEngine
     # (not a path here: the caller owns loading). Mutually exclusive with
