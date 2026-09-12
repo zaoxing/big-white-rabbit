@@ -25,6 +25,9 @@ def serve(
     log_level: str = "info",
     draft_model_path: str | None = None,
     prefix_cache: bool = False,
+    record_experts: bool = False,
+    ssd_hotlist: bool = False,
+    ssd_hotlist_k: int = 32,
     engine: str = "metal",
 ) -> None:
     import uvicorn
@@ -38,6 +41,9 @@ def serve(
         n_seq_max=n_seq_max,
         kv_unified=kv_unified,
         prefix_cache=prefix_cache,
+        record_experts=record_experts,
+        ssd_hotlist=ssd_hotlist,
+        ssd_hotlist_k=ssd_hotlist_k,
         engine=engine,
     )
     if engine == "mlx":

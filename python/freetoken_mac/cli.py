@@ -111,6 +111,12 @@ def _cmd_serve(argv: list[str]) -> int:
     ap.add_argument("--prefix-cache", action="store_true",
                     help="auto-pin repeated prompt prefixes to skip re-prefill "
                          "across requests (SPEC-prefix-cache.md)")
+    ap.add_argument("--record-experts", action="store_true",
+                    help="record MoE router distributions (SPEC-residency.md); single-seq only, profiling cost")
+    ap.add_argument("--ssd-hotlist", action="store_true",
+                    help="SSD hotlist LRU over routed experts (SPEC-ssd-hotlist.md, ds4-inspired); needs --record-experts")
+    ap.add_argument("--ssd-hotlist-k", type=int, default=32,
+                    help="resident experts per layer for hotlist (default 32)")
     ap.add_argument("--engine", default="mlx", choices=("metal", "mlx"),
                     help="inference backend (default mlx; 'metal' serves a GGUF via llama.cpp)")
     ap.add_argument("--log-level", default="info")
@@ -138,6 +144,9 @@ def _cmd_serve(argv: list[str]) -> int:
         log_level=args.log_level,
         draft_model_path=args.draft_model,
         prefix_cache=args.prefix_cache,
+        record_experts=args.record_experts,
+        ssd_hotlist=args.ssd_hotlist,
+        ssd_hotlist_k=args.ssd_hotlist_k,
         engine=args.engine,
     )
     return 0
