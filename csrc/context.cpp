@@ -2,9 +2,12 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <stdexcept>
 #include <string>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 namespace ftm {
 
@@ -476,18 +479,44 @@ bool Context::probe_metal_write() {
 
 bool Context::fetch_expert(int layer, int expert_idx) {
     ensure_open();
-    // Spike: simulate 0.35ms NVMe read for 0.91MB slab. Real impl: pread from
-    // mmap'd GGUF at tensor_offset + expert_idx * slab_stride, memcpy into
-    // Metal shared buffer, didModifyRange. Sleep keeps the timing model honest
-    // for qstar policy tuning without risking buffer corruption.
-    (void) layer;
-    (void) expert_idx;
-    // Use nanosleep for portability (usleep deprecated on some toolchains)
-    struct timespec ts;
-    ts.tv_sec = 0;
-    ts.tv_nsec = 350000; // 0.35ms
-    nanosleep(&ts, nullptr);
-    return true;
+    // Real SSD fetch: pread 1MB slab from GGUF at deterministic offset. Real
+    // impl would memcpy into Metal shared buffer at
+    // tensor_offset + expert_idx * slab_stride + didModifyRange. For the
+    // spike, the pread itself validates the SSD path and timing (0.35ms for
+    // 0.91MB @ 2.6GB/s) without risking buffer corruption.
+    const std::string &path = model_->path();
+    int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        return false;
+    }
+    struct stat st;
+    if (::fstat(fd, &st) != 0) {
+        ::close(fd);
+        return false;
+    }
+    const size_t slab = 1 << 20; // 1MB ~ 0.91MB expert slab, rounded up
+    if ((size_t) st.st_size <= slab) {
+        ::close(fd);
+        return false;
+    }
+    // Deterministic offset per expert, wraps within file (simulates tensor
+    // slab location without parsing GGUF header).
+    off_t offset = (off_t)((layer * 128 + expert_idx) * (off_t) slab) % (st.st_size - slab);
+    char *buf = (char *) malloc(slab);
+    if (!buf) {
+        ::close(fd);
+        return false;
+    }
+    ssize_t n = ::pread(fd, buf, slab, offset);
+    // Touch the buffer so the read isn't optimized away (volatile read)
+    volatile char sink = 0;
+    if (n > 0) {
+        sink = buf[0] ^ buf[slab - 1];
+    }
+    (void) sink;
+    free(buf);
+    ::close(fd);
+    return n == (ssize_t) slab;
 }
 
 } // namespace ftm
