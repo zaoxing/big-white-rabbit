@@ -403,6 +403,37 @@ void Context::memory_seq_keep(llama_seq_id seq_id) {
     llama_memory_seq_keep(llama_get_memory(ctx_), seq_id);
 }
 
+size_t Context::state_seq_get_size(llama_seq_id seq_id) const {
+    ensure_open();
+    validate_seq_id(seq_id);
+    return llama_state_seq_get_size(ctx_, seq_id);
+}
+
+std::vector<uint8_t> Context::state_seq_get_data(llama_seq_id seq_id) const {
+    ensure_open();
+    validate_seq_id(seq_id);
+    size_t n = llama_state_seq_get_size(ctx_, seq_id);
+    if (n == 0) {
+        return {};
+    }
+    std::vector<uint8_t> out(n);
+    size_t got = llama_state_seq_get_data(ctx_, out.data(), out.size(), seq_id);
+    if (got == 0 || got > n) {
+        return {};
+    }
+    out.resize(got);
+    return out;
+}
+
+size_t Context::state_seq_set_data(llama_seq_id seq_id, const std::vector<uint8_t> & data) {
+    ensure_open();
+    validate_seq_id(seq_id);
+    if (data.empty()) {
+        return 0;
+    }
+    return llama_state_seq_set_data(ctx_, data.data(), data.size(), seq_id);
+}
+
 // Geometry accessors read through ctx_, so they must refuse a closed context too --
 // a health endpoint reading n_ctx during shutdown would otherwise null-deref.
 uint32_t Context::n_ctx()     const { ensure_open(); return llama_n_ctx(ctx_);     }

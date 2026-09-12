@@ -147,6 +147,14 @@ public:
     // Evict every sequence except `seq_id` (llama_memory_seq_keep).
     void memory_seq_keep(llama_seq_id seq_id);
 
+    // T12c: true KV serialization per sequence (llama_state_seq_*).
+    // get_data returns the binary blob for seq_id; set_data restores it
+    // into seq_id and returns bytes consumed (0 on failure). Both are
+    // per-sequence, unlike the whole-context llama_state_get_data.
+    size_t state_seq_get_size(llama_seq_id seq_id) const;
+    std::vector<uint8_t> state_seq_get_data(llama_seq_id seq_id) const;
+    size_t state_seq_set_data(llama_seq_id seq_id, const std::vector<uint8_t> & data);
+
     // Drain this decode's recorded MoE router distributions (see
     // ContextParams::record_experts). Consume semantics: returns the frames
     // accumulated since the last call (or construction) and clears them, so

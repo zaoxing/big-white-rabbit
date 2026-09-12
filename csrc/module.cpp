@@ -163,6 +163,24 @@ PYBIND11_MODULE(_freetoken_metal, m) {
         .def("memory_seq_cp", &ftm::Context::memory_seq_cp,
              py::arg("src"), py::arg("dst"), py::arg("p0") = -1, py::arg("p1") = -1)
         .def("memory_seq_keep", &ftm::Context::memory_seq_keep, py::arg("seq_id"))
+        .def("state_seq_get_size", &ftm::Context::state_seq_get_size, py::arg("seq_id"),
+             py::call_guard<py::gil_scoped_release>(),
+             "T12c: byte size of serialized state for seq_id (llama_state_seq_get_size).")
+        .def("state_seq_get_data",
+             [](ftm::Context & self, llama_seq_id seq_id) {
+                 auto v = self.state_seq_get_data(seq_id);
+                 return py::bytes(reinterpret_cast<const char *>(v.data()), v.size());
+             },
+             py::arg("seq_id"), py::call_guard<py::gil_scoped_release>(),
+             "T12c: serialized KV+state for seq_id as bytes (llama_state_seq_get_data).")
+        .def("state_seq_set_data",
+             [](ftm::Context & self, llama_seq_id seq_id, py::bytes data) {
+                 std::string s = data;
+                 std::vector<uint8_t> v(s.begin(), s.end());
+                 return self.state_seq_set_data(seq_id, v);
+             },
+             py::arg("seq_id"), py::arg("data"), py::call_guard<py::gil_scoped_release>(),
+             "T12c: restore serialized state into seq_id, returns bytes consumed (llama_state_seq_set_data).")
         .def("expert_activations", &ftm::Context::expert_activations,
              "Drain this decode's recorded MoE router frames (consume "
              "semantics: reading clears). Empty unless built with record_experts.")
