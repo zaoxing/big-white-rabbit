@@ -29,3 +29,7 @@ models/Qwen3-30B-A3B-4bit/
 
 # loop-eng working state (contract, evidence logs, round history)
 .loop/
+
+# Agent coding specs — keep locally for dev, not on GitHub (user request 2026-09-11)
+SPEC-*.md
+docs/
