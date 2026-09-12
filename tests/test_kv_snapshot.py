@@ -1,8 +1,9 @@
-"""KV snapshot primitive — in-memory (T12a).
+"""KV snapshot primitive — in-memory + disk (T12a/b/c).
 
 Needs FTM_MOE_MODEL or any model; uses n_seq_max=2 so a snapshot seq exists.
 What is asserted: save while in-flight preserves KV, load restores and
-generates identical continuation vs plain re-prefill, list/delete.
+generates identical continuation vs plain re-prefill, list/delete, and
+T12c binary KV restores across engine restart without re-prefill.
 """
 
 from __future__ import annotations
@@ -72,7 +73,7 @@ def test_snapshot_needs_spare_seq() -> None:
 
 
 def test_snapshot_disk_roundtrip(tmp_path) -> None:
-    """Disk persistence survives engine restart (slow path via re-prefill)."""
+    """Disk persistence survives engine restart (T12b re-prefill or T12c binary)."""
     cfg = EngineConfig(n_ctx=512, n_seq_max=2)
     engine = MetalEngine(ftm.Model(MODEL_PATH, ftm.ModelParams()), cfg)
     store = KVSnapStore(engine, kv_dir=tmp_path)
@@ -85,8 +86,38 @@ def test_snapshot_disk_roundtrip(tmp_path) -> None:
     assert "disk" in store2.list()
     rid2 = store2.load("disk")
     list(engine2.drain())
-    # Disk load does re-prefill, but output should still be deterministic
-    # (temp=0, same prompt) — we just check it completes, not identical to
-    # in-memory fast path which would have had extra output tokens stashed
+    # Disk load via T12c binary or re-prefill — both deterministic
     assert len(engine2.tokens_of(rid2)) == 4
     assert engine2.state(rid2).finish_reason == "length"
+
+
+def test_snapshot_binary_roundtrip_identical(tmp_path) -> None:
+    """T12c: binary KV restores identical tokens across restart without re-prefill."""
+    cfg = EngineConfig(n_ctx=512, n_seq_max=2, record_experts=False)
+    engine = MetalEngine(ftm.Model(MODEL_PATH, ftm.ModelParams()), cfg)
+    store = KVSnapStore(engine, kv_dir=tmp_path)
+
+    # Reference: prefill + snapshot + drain
+    rid = engine.add_request(PROMPT, ftm.RequestParams(max_tokens=N_TOKENS, stop_at_eog=False, temp=0.0))
+    engine.step()
+    store.save("snap_bin", rid)
+    # bin should exist (T12c)
+    assert (tmp_path / "snap_bin.bin").exists()
+    assert (tmp_path / "snap_bin.bin").stat().st_size > 0
+    ref_out = list(engine.drain())
+    ref_tokens = engine.tokens_of(rid)
+
+    # New engine, same dir — load via binary
+    engine2 = MetalEngine(ftm.Model(MODEL_PATH, ftm.ModelParams()), cfg)
+    store2 = KVSnapStore(engine2, kv_dir=tmp_path)
+    assert "snap_bin" in store2.list()
+    rid2 = store2.load("snap_bin")
+    list(engine2.drain())
+    assert engine2.tokens_of(rid2) == ref_tokens
+    assert engine2.state(rid2).finish_reason == engine.state(rid).finish_reason
+
+    # Delete cleans both json and bin
+    store2.delete("snap_bin")
+    assert "snap_bin" not in store2.list()
+    assert not (tmp_path / "snap_bin.bin").exists()
+    assert not (tmp_path / "snap_bin.json").exists()
