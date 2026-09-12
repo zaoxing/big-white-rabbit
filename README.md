@@ -14,26 +14,6 @@ Apple's [MLX](https://github.com/ml-explore/mlx) framework, with the original
 > the llama.cpp path with speculation, prefix caching, and MoE residency.
 > Expert residency control exists; no prefetch policy or semantic KV caching yet.
 
-## Why this is a rewrite, not a port
-
-FreeToken is CUDA-only by construction: `nvcc`-JIT'd `.cu` kernels, `torch.cuda` throughout,
-and CUDA-graph capture baked directly into its attention/MoE backend base classes. There is no
-vendor abstraction to plug a Metal backend into.
-
-More importantly, FreeToken's central idea does not transplant. Its `q*` policy solves a
-**capacity + PCIe-transfer-cost** problem: VRAM is a small pool physically separate from host
-RAM, so experts are streamed across a bus. Apple Silicon has **one physical DRAM pool** shared
-by CPU and GPU — there is no transfer to amortize. The binding constraints become:
-
-1. whether total resident memory (weights + KV + activations) fits the RAM budget without OS
-   paging pressure or Metal working-set stalls — the primary driver, and
-2. which physical engine (GPU shader cores vs. CPU cores) computes each expert matmul — a
-   softer, mostly tie-break factor.
-
-So `q*-Mac` is a re-derived cost model, not translated code. What *does* carry over cleanly is
-FreeToken's hardware-agnostic Python: the FastAPI route/schema layer, the tokenizer, GGUF
-metadata reading, and the radix prefix-cache bookkeeping behind semantic-anchor caching.
-
 ## Architecture
 
 ```
