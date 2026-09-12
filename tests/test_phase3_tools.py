@@ -20,14 +20,14 @@ import re
 
 import pytest
 
-import freetoken_mac as ftm
-from freetoken_mac.server import tools as T
+import bwr as bwr
+from bwr.server import tools as T
 
-MODEL_PATH = os.environ.get("FTM_TEST_MODEL")
+MODEL_PATH = os.environ.get("BWR_TEST_MODEL")
 
 pytestmark = pytest.mark.skipif(
     not MODEL_PATH or not os.path.exists(MODEL_PATH),
-    reason="set FTM_TEST_MODEL to a .gguf path to run these",
+    reason="set BWR_TEST_MODEL to a .gguf path to run these",
 )
 
 
@@ -122,8 +122,8 @@ def _ids():
 
 
 @pytest.fixture(scope="module")
-def model() -> ftm.Model:
-    m = ftm.Model(MODEL_PATH, ftm.ModelParams())
+def model() -> bwr.Model:
+    m = bwr.Model(MODEL_PATH, bwr.ModelParams())
     yield m
     # Release the weights before the interpreter exits: ggml frees the Metal device from
     # a static destructor and asserts its residency sets are empty, so a live model then
@@ -136,7 +136,7 @@ def model() -> ftm.Model:
 # ===================================================================================
 
 
-def test_prompt_injection_appends_to_existing_system(model: ftm.Model) -> None:
+def test_prompt_injection_appends_to_existing_system(model: bwr.Model) -> None:
     """The declarations must land *after* existing system content, in the model's own
     wire format -- reproduced byte-for-byte, because the format is fixed by the GGUF's
     embedded template and the weights were trained against it.
@@ -217,7 +217,7 @@ def test_prompt_injection_none_omits_tools_block() -> None:
     assert '"name": "get_weather"' in named
 
 
-def test_prompt_injection_survives_the_real_chat_template(model: ftm.Model) -> None:
+def test_prompt_injection_survives_the_real_chat_template(model: bwr.Model) -> None:
     """llama_chat_apply_template has no tools argument (it pattern-matches ~56 templates
     instead of running jinja), so the block has to survive as message *text*."""
     pairs = T.inject_tools(
@@ -282,13 +282,13 @@ def test_prompt_injection_round_trips_assistant_calls_and_tool_results() -> None
     assert T.render_tool_response("22C") == "<tool_response>\n22C\n</tool_response>"
 
 
-def test_prompt_injection_groups_consecutive_tool_results(model: ftm.Model) -> None:
+def test_prompt_injection_groups_consecutive_tool_results(model: bwr.Model) -> None:
     """Parallel calls come back as several `role: "tool"` messages in a row. The template
     opens `<|im_start|>user` only when the previous message was not a tool and closes it
     only when the next one is not, so a whole run is ONE user turn carrying several
     <tool_response> blocks -- not one turn each."""
-    from freetoken_mac.server.app import _message_pairs
-    from freetoken_mac.server.schemas import ChatCompletionRequest
+    from bwr.server.app import _message_pairs
+    from bwr.server.schemas import ChatCompletionRequest
 
     req = ChatCompletionRequest(
         model="local",
@@ -534,8 +534,8 @@ def test_parse_streaming_deltas_carry_index() -> None:
 
     # And the wire frames the route builds keep it through `exclude_none` serialisation,
     # which is what strips absent delta fields.
-    from freetoken_mac.server.app import _tool_call_delta
-    from freetoken_mac.server.schemas import ChunkChoice, Delta
+    from bwr.server.app import _tool_call_delta
+    from bwr.server.schemas import ChunkChoice, Delta
 
     payload = ChunkChoice(
         delta=Delta(tool_calls=[_tool_call_delta(seen[1])])
@@ -690,14 +690,14 @@ def test_parse_malformed_never_raises_on_fuzzed_input() -> None:
 
 
 @pytest.fixture(scope="module")
-def client(model: ftm.Model):
+def client(model: bwr.Model):
     fastapi_testclient = pytest.importorskip("fastapi.testclient")
-    from freetoken_mac.server.app import build_app
+    from bwr.server.app import build_app
 
     # A tools block is a few hundred tokens on its own, and n_ctx_seq is n_ctx/n_seq_max
     # (see docs/llamacpp-notes.md), so the per-sequence budget has to be real here.
     app = build_app(
-        model, ftm.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=2, engine="metal")
+        model, bwr.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=2, engine="metal")
     )
     with fastapi_testclient.TestClient(app) as c:
         yield c

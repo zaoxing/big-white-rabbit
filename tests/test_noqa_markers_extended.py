@@ -11,7 +11,7 @@ import re
 
 
 def test_no_bare_broad_except_without_noqa() -> None:
-    root = pathlib.Path("python/freetoken_mac")
+    root = pathlib.Path("python/bwr")
     # Matches `except Exception:` / `except BaseException:` plus alias form
     # (`except Exception as e:`) and tuple form (`except (Exception, ValueError):`),
     # without trailing `# noqa: BLE001`. The old criterion missed all three.

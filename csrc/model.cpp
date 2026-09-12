@@ -5,7 +5,7 @@
 
 #include <ggml-backend.h>
 
-namespace ftm {
+namespace bwr {
 
 void backend_init_once() {
     static std::once_flag once;
@@ -232,4 +232,4 @@ std::string Model::apply_chat_template(
     return out;
 }
 
-} // namespace ftm
+} // namespace bwr

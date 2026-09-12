@@ -3,9 +3,9 @@ requires = ["scikit-build-core>=0.9", "pybind11>=2.12"]
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "freetoken-mac"
+name = "big-white-rabbit"
 version = "0.0.1.dev0"
-description = "Edge-native MoE serving engine for Apple Silicon, built on llama.cpp/Metal"
+description = "Big White Rabbit — edge-native MoE serving engine for Apple Silicon, built on llama.cpp/Metal"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
@@ -33,10 +33,10 @@ dev = [
 ]
 
 [project.scripts]
-ftm = "freetoken_mac.cli:main"
+bwr = "bwr.cli:main"
 
 [tool.scikit-build]
-wheel.packages = ["python/freetoken_mac"]
+wheel.packages = ["python/bwr"]
 cmake.version = ">=3.21"
 cmake.build-type = "Release"
 build-dir = "build/{wheel_tag}"

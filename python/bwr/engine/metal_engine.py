@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
-from .._freetoken_metal import Batch, Context, Model
+from .._bwr_metal import Batch, Context, Model
 from .batching import AdmissionPolicy, FCFSPolicy, RequestState, StepBudget, StepPlan
 from .config import EngineConfig, RequestParams, StopSequenceFilter
 from .draft import DraftEngine

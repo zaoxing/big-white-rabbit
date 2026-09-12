@@ -1,7 +1,7 @@
 """OpenAI-compatible request/response schemas.
 
 Field names and shapes follow the OpenAI chat-completions API so existing clients (the
-`openai` SDK, Claude Code, Codex, curl) work unchanged. Modelled on FreeToken's
+`openai` SDK, Claude Code, Codex, curl) work unchanged. Modelled on Big White Rabbit's
 ``server/api_models.py``, which is pure pydantic with no engine coupling; trimmed here to
 the surface Phase 2 actually serves, plus the Phase 3 tool-calling fields. Both OpenAI
 and Anthropic surfaces are implemented.
@@ -315,7 +315,7 @@ class ModelCard(BaseModel):
     id: str
     object: Literal["model"] = "model"
     created: int = Field(default_factory=lambda: int(time.time()))
-    owned_by: str = "freetoken-mac"
+    owned_by: str = "big-white-rabbit"
 
 
 class ModelList(BaseModel):

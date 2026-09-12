@@ -1,7 +1,7 @@
 # Spec: greedy n-gram speculative decoding
 
 Status: APPROVED 2026-09-10 (human: `spec_max_drafts` default 4 OK, save spec OK, start T1).
-Phase: T1 in progress on branch `feat/spec-ngram-t1` (worktree `../FreeToken-Mac-wt-specngram`).
+Phase: T1 in progress on branch `feat/spec-ngram-t1` (worktree `../Big White Rabbit-wt-specngram`).
 
 ## Objective
 
@@ -59,7 +59,7 @@ already issues per step.
   exactness under speculation.
 - Unit tests for the table (pure Python, no model).
 - Full suite stays green:
-  `FTM_TEST_MODEL=models/qwen2.5-0.5b-instruct-q4_k_m.gguf .venv/bin/python -m pytest tests/ -q`
+  `BWR_TEST_MODEL=models/qwen2.5-0.5b-instruct-q4_k_m.gguf .venv/bin/python -m pytest tests/ -q`
 
 ## Task breakdown
 

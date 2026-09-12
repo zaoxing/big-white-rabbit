@@ -15,9 +15,9 @@ tools go into the system message as a `<tools>` block, calls come back as
 `<tool_call>\\n{"name": ..., "arguments": {...}}\\n</tool_call>`. Deviating would still
 "work" as prompt engineering, but the model would be reading something it never saw.
 
-Parsing is a re-implementation of the behaviour of FreeToken's `Qwen25Detector`
+Parsing is a re-implementation of the behaviour of Big White Rabbit's `Qwen25Detector`
 (`freetoken/server/function_call_parser.py`, Apache-2.0; see NOTICE) against the same
-format. No code is copied: FreeToken streams *partial* JSON arguments and needs
+format. No code is copied: Big White Rabbit streams *partial* JSON arguments and needs
 `partial_json_parser` plus a 900-line reasoning parser for it, whereas here the one-shot
 and streaming paths are deliberately the *same* state machine (`parse_tool_calls` is one
 `push` plus a `flush`) so that assembling the SSE deltas cannot drift from the

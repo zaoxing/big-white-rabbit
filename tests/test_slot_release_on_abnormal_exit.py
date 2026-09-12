@@ -24,13 +24,13 @@ import time
 
 import pytest
 
-import freetoken_mac as ftm
+import bwr as bwr
 
-MODEL_PATH = os.environ.get("FTM_TEST_MODEL")
+MODEL_PATH = os.environ.get("BWR_TEST_MODEL")
 
 pytestmark = pytest.mark.skipif(
     not MODEL_PATH or not os.path.exists(MODEL_PATH),
-    reason="set FTM_TEST_MODEL to a .gguf path to run these",
+    reason="set BWR_TEST_MODEL to a .gguf path to run these",
 )
 
 
@@ -44,8 +44,8 @@ def _boom() -> None:
 
 
 @pytest.fixture(scope="module")
-def model() -> ftm.Model:
-    m = ftm.Model(MODEL_PATH, ftm.ModelParams())
+def model() -> bwr.Model:
+    m = bwr.Model(MODEL_PATH, bwr.ModelParams())
     yield m
     # Release the weights before interpreter exit or ggml's Metal device destructor
     # aborts the process (exit 134). See docs/llamacpp-notes.md.
@@ -55,20 +55,20 @@ def model() -> ftm.Model:
 # --- the engine seam ----------------------------------------------------------------
 
 
-def test_release_cancels_a_request_the_engine_never_retired(model: ftm.Model) -> None:
+def test_release_cancels_a_request_the_engine_never_retired(model: bwr.Model) -> None:
     """The unit-level statement of the bug: release() on an errored request must retire it."""
-    from freetoken_mac.engine.async_engine import AsyncEngine
-    from freetoken_mac.engine.metal_engine import MetalEngine
+    from bwr.engine.async_engine import AsyncEngine
+    from bwr.engine.metal_engine import MetalEngine
 
     async def run() -> tuple[int, int, str | None]:
         engine = MetalEngine(
-            model, ftm.EngineConfig(n_ctx=1024, n_batch=256, n_ubatch=256, n_seq_max=2)
+            model, bwr.EngineConfig(n_ctx=1024, n_batch=256, n_ubatch=256, n_seq_max=2)
         )
         eng = AsyncEngine(engine)
         await eng.start()
         try:
             engine.step = _boom
-            rid = await eng.submit("Count slowly:", ftm.RequestParams(max_tokens=64))
+            rid = await eng.submit("Count slowly:", bwr.RequestParams(max_tokens=64))
             assert engine.n_free_seq_slots == engine.ctx.n_seq_max - 1, "admission took no slot"
 
             with pytest.raises(RuntimeError):
@@ -95,22 +95,22 @@ def test_release_cancels_a_request_the_engine_never_retired(model: ftm.Model) ->
     assert reason == "cancelled", f"request was not retired (finish_reason={reason!r})"
 
 
-def test_release_after_normal_completion_does_not_cancel(model: ftm.Model) -> None:
+def test_release_after_normal_completion_does_not_cancel(model: bwr.Model) -> None:
     """The other half of the contract: a request that finished on its own is already
     retired, so release() must NOT post a cancel for it -- its recorded reason has to
     stay the engine's own ("length" here), not become "cancelled"."""
-    from freetoken_mac.engine.async_engine import AsyncEngine
-    from freetoken_mac.engine.metal_engine import MetalEngine
+    from bwr.engine.async_engine import AsyncEngine
+    from bwr.engine.metal_engine import MetalEngine
 
     async def run() -> tuple[int, int, str | None]:
         engine = MetalEngine(
-            model, ftm.EngineConfig(n_ctx=1024, n_batch=256, n_ubatch=256, n_seq_max=2)
+            model, bwr.EngineConfig(n_ctx=1024, n_batch=256, n_ubatch=256, n_seq_max=2)
         )
         eng = AsyncEngine(engine)
         await eng.start()
         try:
             rid = await eng.submit(
-                "The capital of France is", ftm.RequestParams(max_tokens=4, temp=0.0)
+                "The capital of France is", bwr.RequestParams(max_tokens=4, temp=0.0)
             )
             async for _ in eng.stream(rid):
                 pass
@@ -133,12 +133,12 @@ def test_release_after_normal_completion_does_not_cancel(model: ftm.Model) -> No
 
 
 @pytest.fixture(scope="module")
-def served(model: ftm.Model):
+def served(model: bwr.Model):
     tc = pytest.importorskip("fastapi.testclient")
-    from freetoken_mac.server.app import build_app
+    from bwr.server.app import build_app
 
     app = build_app(
-        model, ftm.EngineConfig(n_ctx=2048, n_batch=256, n_ubatch=256, n_seq_max=4, engine="metal")
+        model, bwr.EngineConfig(n_ctx=2048, n_batch=256, n_ubatch=256, n_seq_max=4, engine="metal")
     )
     # raise_server_exceptions=False: the engine failure must surface the way a real
     # client sees it (a 500), instead of being re-raised into the test body.

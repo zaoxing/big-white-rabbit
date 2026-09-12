@@ -10,7 +10,7 @@ translation layer:
      plus a sibling `tool_calls` array.
   4. A tool call's `input` is an OBJECT; OpenAI's `arguments` is a JSON string.
 
-Adapted in shape from FreeToken's `server/anthropic_models.py`, which is pure pydantic
+Adapted in shape from Big White Rabbit's `server/anthropic_models.py`, which is pure pydantic
 with no engine coupling; trimmed to the surface this server actually serves.
 """
 

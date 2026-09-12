@@ -1,6 +1,6 @@
 """Phase 1 tests: N requests interleave through ONE llama_decode per step.
 
-Point FTM_TEST_MODEL at a .gguf to run these; they skip otherwise so the suite stays
+Point BWR_TEST_MODEL at a .gguf to run these; they skip otherwise so the suite stays
 runnable on a machine with no models checked out.
 """
 
@@ -11,14 +11,14 @@ import os
 
 import pytest
 
-import freetoken_mac as ftm
-from freetoken_mac.engine import EngineConfig, MetalEngine, RequestParams
+import bwr as bwr
+from bwr.engine import EngineConfig, MetalEngine, RequestParams
 
-MODEL_PATH = os.environ.get("FTM_TEST_MODEL")
+MODEL_PATH = os.environ.get("BWR_TEST_MODEL")
 
 pytestmark = pytest.mark.skipif(
     not MODEL_PATH or not os.path.exists(MODEL_PATH),
-    reason="set FTM_TEST_MODEL to a .gguf path to run bring-up tests",
+    reason="set BWR_TEST_MODEL to a .gguf path to run bring-up tests",
 )
 
 # Three visibly different prompts. Cross-talk between sequences shows up as one
@@ -40,11 +40,11 @@ def greedy(max_tokens: int = N_TOKENS) -> RequestParams:
 
 
 @pytest.fixture(scope="module")
-def model() -> ftm.Model:
-    return ftm.Model(MODEL_PATH, ftm.ModelParams())
+def model() -> bwr.Model:
+    return bwr.Model(MODEL_PATH, bwr.ModelParams())
 
 
-def solo_tokens(model: ftm.Model, prompt: str, max_tokens: int = N_TOKENS) -> list[int]:
+def solo_tokens(model: bwr.Model, prompt: str, max_tokens: int = N_TOKENS) -> list[int]:
     """Greedy continuation of one prompt, alone in a FRESH context (n_seq_max=1)."""
     engine = MetalEngine(model, EngineConfig(n_ctx=512, n_seq_max=1))
     request_id = engine.add_request(prompt, greedy(max_tokens))
@@ -53,14 +53,14 @@ def solo_tokens(model: ftm.Model, prompt: str, max_tokens: int = N_TOKENS) -> li
 
 
 def run_batched(
-    model: ftm.Model, prompts: list[str], max_tokens: int = N_TOKENS
+    model: bwr.Model, prompts: list[str], max_tokens: int = N_TOKENS
 ) -> tuple[MetalEngine, list[int]]:
     engine = MetalEngine(model, EngineConfig(n_ctx=512, n_seq_max=4))
     ids = [engine.add_request(p, greedy(max_tokens)) for p in prompts]
     return engine, ids
 
 
-def test_batched_matches_solo(model: ftm.Model) -> None:
+def test_batched_matches_solo(model: bwr.Model) -> None:
     """The no-cross-talk proof: three sequences sharing every decode call must each
     produce exactly what that prompt produces alone in its own context. A shared
     llama_batch mixes positions and seq_ids in one attention pass, so a seq_id or
@@ -85,7 +85,7 @@ def test_batched_matches_solo(model: ftm.Model) -> None:
         )
 
 
-def test_one_decode_call_per_step(model: ftm.Model) -> None:
+def test_one_decode_call_per_step(model: bwr.Model) -> None:
     """One step == one llama_decode, however many sequences are in flight. Asserted on
     the C++-side counter, never on timing."""
     engine, ids = run_batched(model, PROMPTS, max_tokens=6)
@@ -111,7 +111,7 @@ def test_one_decode_call_per_step(model: ftm.Model) -> None:
         assert len(engine.tokens_of(request_id)) == 6
 
 
-def test_cancel_does_not_disturb_others(model: ftm.Model) -> None:
+def test_cancel_does_not_disturb_others(model: bwr.Model) -> None:
     """Cancelling one sequence reclaims its slot without perturbing its peers: their
     tokens must match an otherwise identical run in which nobody was cancelled."""
 
@@ -137,7 +137,7 @@ def test_cancel_does_not_disturb_others(model: ftm.Model) -> None:
     assert cancelled[0] == baseline[0][:3]
 
 
-def test_seq_id_exhaustion_raises(model: ftm.Model) -> None:
+def test_seq_id_exhaustion_raises(model: bwr.Model) -> None:
     """Over-admission must raise, not abort: llama.cpp rejects a batch naming a
     seq_id >= n_seq_max, and the surrounding failure modes are GGML_ASSERT/abort()."""
     engine = MetalEngine(model, EngineConfig(n_ctx=256, n_seq_max=2))
@@ -152,7 +152,7 @@ def test_seq_id_exhaustion_raises(model: ftm.Model) -> None:
 
     # Same guard one level down: a hand-built batch naming an out-of-range seq_id is a
     # Python exception, not a dead process.
-    rogue = ftm.Batch(4, 1)
+    rogue = bwr.Batch(4, 1)
     rogue.add(1, 0, 5, True)
     with pytest.raises(ValueError, match="n_seq_max"):
         engine.ctx.decode(rogue)
@@ -166,7 +166,7 @@ def test_seq_id_exhaustion_raises(model: ftm.Model) -> None:
     assert engine.state(third).n_pos > 0
 
 
-def test_engine_chunks_prefill_to_effective_n_batch(model: ftm.Model) -> None:
+def test_engine_chunks_prefill_to_effective_n_batch(model: bwr.Model) -> None:
     """A prompt longer than the EFFECTIVE n_batch is admitted and prefilled in
     n_batch-sized chunks -- one decode per chunk, still one decode per step."""
     engine = MetalEngine(model, EngineConfig(n_ctx=1024, n_batch=64, n_ubatch=64, n_seq_max=2))
@@ -198,10 +198,10 @@ def test_engine_chunks_prefill_to_effective_n_batch(model: ftm.Model) -> None:
     assert engine.text_of(request_id)
 
 
-def test_batch_append_past_capacity_raises(model: ftm.Model) -> None:
+def test_batch_append_past_capacity_raises(model: bwr.Model) -> None:
     """Batch bounds-checks its own appends: llama_batch_init hands back raw arrays and
     nothing in the C API stops a write past n_tokens."""
-    batch = ftm.Batch(2, 1)
+    batch = bwr.Batch(2, 1)
     batch.add(1, 0, 0, False)
     batch.add(2, 1, 0, True)
     assert batch.n_tokens == 2
@@ -213,28 +213,28 @@ def test_batch_append_past_capacity_raises(model: ftm.Model) -> None:
 
 
 def raw_context(
-    model: ftm.Model,
+    model: bwr.Model,
     *,
     n_ctx: int = 256,
     n_batch: int = 64,
     n_seq_max: int = 2,
     kv_unified: bool = False,
-) -> ftm.Context:
+) -> bwr.Context:
     """A bare Context: the KV-manipulation tests below drive seq_cp/seq_rm directly,
     below MetalEngine, because that is the layer whose guards they are checking."""
-    cp = ftm.ContextParams()
+    cp = bwr.ContextParams()
     cp.n_ctx = n_ctx
     cp.n_batch = n_batch
     cp.n_ubatch = n_batch
     cp.n_seq_max = n_seq_max
     cp.kv_unified = kv_unified
-    return ftm.Context(model, cp)
+    return bwr.Context(model, cp)
 
 
-def prefill(ctx: ftm.Context, tokens: list[int], seq_id: int, start: int = 0) -> int:
+def prefill(ctx: bwr.Context, tokens: list[int], seq_id: int, start: int = 0) -> int:
     """Decode tokens[start:] into `seq_id` at their own positions and sample the next
     token from the (only) flagged row."""
-    batch = ftm.Batch(ctx.n_batch, 1)
+    batch = bwr.Batch(ctx.n_batch, 1)
     last = len(tokens) - 1
     for pos in range(start, len(tokens)):
         batch.add(tokens[pos], pos, seq_id, pos == last)
@@ -242,7 +242,7 @@ def prefill(ctx: ftm.Context, tokens: list[int], seq_id: int, start: int = 0) ->
     return ctx.sample_seq(seq_id, last - start)
 
 
-def test_partial_seq_cp_without_kv_unified_raises(model: ftm.Model) -> None:
+def test_partial_seq_cp_without_kv_unified_raises(model: bwr.Model) -> None:
     """With per-sequence KV streams (llama.cpp's default), a cross-sequence copy of a
     PARTIAL position range hits GGML_ASSERT(is_full && "seq_cp() is only supported for
     full KV buffers") -> abort(). The binding must refuse it as an exception, and the
@@ -263,7 +263,7 @@ def test_partial_seq_cp_without_kv_unified_raises(model: ftm.Model) -> None:
     assert prefill(ctx, tokens + [expected], seq_id=0, start=len(tokens)) > 0
 
 
-def test_partial_seq_cp_with_kv_unified_forks_a_prefix(model: ftm.Model) -> None:
+def test_partial_seq_cp_with_kv_unified_forks_a_prefix(model: bwr.Model) -> None:
     """The Phase 4 primitive: with a unified KV buffer a partial copy is legal and must
     actually transplant the prefix -- seq 1 gets [0, split) from seq 0, decodes only the
     remaining prompt tokens, and lands on the same greedy token as the full prefill."""
@@ -287,7 +287,7 @@ def test_partial_seq_cp_with_kv_unified_forks_a_prefix(model: ftm.Model) -> None
     assert prefill(ctx, tokens, seq_id=2, start=split) != expected
 
 
-def test_full_range_seq_cp_forks_a_sequence(model: ftm.Model) -> None:
+def test_full_range_seq_cp_forks_a_sequence(model: bwr.Model) -> None:
     """The full-range copy is the one cross-stream case llama.cpp implements, and it must
     keep working: seq 1 becomes a clone of seq 0 and continues identically."""
     tokens = list(model.tokenize(PROMPTS[0]))
@@ -301,14 +301,14 @@ def test_full_range_seq_cp_forks_a_sequence(model: ftm.Model) -> None:
     # One batch, both sequences fed the same token at the same position. A clone must
     # produce the same continuation; had the copy been a no-op, seq 1's row would start
     # at a position with no KV under it and llama.cpp would reject the batch.
-    batch = ftm.Batch(ctx.n_batch, 1)
+    batch = bwr.Batch(ctx.n_batch, 1)
     row0 = batch.add(first, len(tokens), 0, True)
     row1 = batch.add(first, len(tokens), 1, True)
     ctx.decode(batch)
     assert ctx.sample_seq(1, row1) == ctx.sample_seq(0, row0)
 
 
-def test_memory_seq_rm_rejects_out_of_range_seq_id(model: ftm.Model) -> None:
+def test_memory_seq_rm_rejects_out_of_range_seq_id(model: bwr.Model) -> None:
     """seq_rm's assert exempts exactly -1 ("all sequences"), so -1 must still work while
     every other out-of-range id raises instead of aborting."""
     tokens = list(model.tokenize(PROMPTS[0]))
@@ -329,7 +329,7 @@ def test_memory_seq_rm_rejects_out_of_range_seq_id(model: ftm.Model) -> None:
     assert prefill(ctx, tokens, seq_id=0) == expected
 
 
-def test_context_narrower_than_n_seq_max_raises(model: ftm.Model) -> None:
+def test_context_narrower_than_n_seq_max_raises(model: bwr.Model) -> None:
     """llama.cpp reserves one output row per sequence out of the EFFECTIVE n_batch and
     GGML_ASSERTs when they do not fit -- inside llama_init_from_model, before any handle
     exists -- so the geometry has to be refused up front."""
@@ -347,7 +347,7 @@ def test_context_narrower_than_n_seq_max_raises(model: ftm.Model) -> None:
     assert ctx.n_batch >= ctx.n_seq_max
 
 
-def test_sampling_an_unflagged_row_raises(model: ftm.Model) -> None:
+def test_sampling_an_unflagged_row_raises(model: bwr.Model) -> None:
     """llama_sampler_sample GGML_ASSERTs on a row that produced no logits, so the
     binding refuses the row instead of letting the process die."""
     prompt = "The capital of France is"
@@ -367,7 +367,7 @@ def test_sampling_an_unflagged_row_raises(model: ftm.Model) -> None:
         engine.ctx.sample_seq(0, 999)
 
 
-def test_sample_last_on_fresh_context_raises(model: ftm.Model) -> None:
+def test_sample_last_on_fresh_context_raises(model: bwr.Model) -> None:
     """sample_last() samples index -1 -- "the last OUTPUT row" -- which only resolves if
     the last decoded batch produced logits at all. On a context that has decoded nothing
     there is no such row, and llama_sampler_sample() would hit
@@ -384,7 +384,7 @@ def test_sample_last_on_fresh_context_raises(model: ftm.Model) -> None:
     assert isinstance(ctx.sample_last(), int)
 
 
-def test_sample_last_after_unflagged_decode_raises(model: ftm.Model) -> None:
+def test_sample_last_after_unflagged_decode_raises(model: bwr.Model) -> None:
     """The state Phase 1 introduced: a real decode whose batch flagged NO row for output.
     Phase 0 could not reach it (llama_batch_get_one's null .logits always means "last
     token only", so decode_raw records a set flag), but decode(const Batch &) can, and
@@ -394,7 +394,7 @@ def test_sample_last_after_unflagged_decode_raises(model: ftm.Model) -> None:
     assert len(tokens) > 1
 
     ctx = raw_context(model, n_seq_max=1)
-    batch = ftm.Batch(ctx.n_batch, 1)
+    batch = bwr.Batch(ctx.n_batch, 1)
     for pos, token in enumerate(tokens):
         batch.add(token, pos, 0, False)
     ctx.decode(batch)
@@ -417,7 +417,7 @@ def test_sample_last_after_unflagged_decode_raises(model: ftm.Model) -> None:
     assert isinstance(ctx.sample_last(), int)
 
 
-def test_engine_sample_last_mid_prefill_raises(model: ftm.Model) -> None:
+def test_engine_sample_last_mid_prefill_raises(model: bwr.Model) -> None:
     """The realistic reachable case: MetalEngine's _fill_batch flags only the FINAL
     prompt token, so every intermediate chunk of a chunked prefill leaves the context
     with zero logits rows. `Context` is re-exported and `MetalEngine.ctx` is public, so
@@ -440,7 +440,7 @@ def test_engine_sample_last_mid_prefill_raises(model: ftm.Model) -> None:
     assert len(engine.tokens_of(request_id)) == 2
 
 
-def test_sample_last_after_decode_seq0_still_works(model: ftm.Model) -> None:
+def test_sample_last_after_decode_seq0_still_works(model: bwr.Model) -> None:
     """The Phase 0 path must be untouched by the guard: llama_batch_get_one leaves
     .logits null, which llama.cpp reads as "last token only", so a normal decode_seq0
     always leaves exactly one output row and sample_last() must return a token."""
@@ -467,7 +467,7 @@ def test_sample_last_after_decode_seq0_still_works(model: ftm.Model) -> None:
 # its room by a factor of n_seq_max, admitting prompts that only fail later mid-decode.
 
 
-def test_n_ctx_seq_is_the_per_sequence_capacity(model: ftm.Model) -> None:
+def test_n_ctx_seq_is_the_per_sequence_capacity(model: bwr.Model) -> None:
     """n_ctx_seq must differ from n_ctx exactly when the KV buffer is split, and match
     it when unified -- otherwise the accessor is not measuring what we think."""
     split = raw_context(model, n_ctx=512, n_batch=256, n_seq_max=2)
@@ -480,11 +480,11 @@ def test_n_ctx_seq_is_the_per_sequence_capacity(model: ftm.Model) -> None:
     assert unified.n_ctx_seq == unified.n_ctx, "a unified buffer is shared, not divided"
 
 
-def test_engine_rejects_prompt_over_per_sequence_capacity(model: ftm.Model) -> None:
+def test_engine_rejects_prompt_over_per_sequence_capacity(model: bwr.Model) -> None:
     """A prompt that fits ctx.n_ctx but NOT ctx.n_ctx_seq must be refused at admission.
     Before this fix it was admitted and died later inside decode with a KV-slot error."""
-    engine = ftm.MetalEngine(
-        model, ftm.EngineConfig(n_ctx=512, n_batch=512, n_ubatch=512, n_seq_max=2)
+    engine = bwr.MetalEngine(
+        model, bwr.EngineConfig(n_ctx=512, n_batch=512, n_ubatch=512, n_seq_max=2)
     )
     n_seq = engine.ctx.n_ctx_seq
     assert n_seq < engine.ctx.n_ctx, "geometry precondition: KV must be split"
@@ -505,7 +505,7 @@ def test_engine_rejects_prompt_over_per_sequence_capacity(model: ftm.Model) -> N
 # --- failed decode must not leave a claimable logits mask ---------------------------
 
 
-def test_failed_decode_clears_the_logits_mask(model: ftm.Model) -> None:
+def test_failed_decode_clears_the_logits_mask(model: bwr.Model) -> None:
     """A decode that fails must leave NO claimable logits.
 
     Two unsound behaviours are pinned here at once. Recording the mask before checking
@@ -520,14 +520,14 @@ def test_failed_decode_clears_the_logits_mask(model: ftm.Model) -> None:
 
     # (b) first: a good flagged decode, so logits genuinely exist.
     # The sampler must exist before prefill(), which samples as its last act.
-    ctx.set_seq_sampler(0, ftm.SamplerParams())
+    ctx.set_seq_sampler(0, bwr.SamplerParams())
     prefill(ctx, tokens, seq_id=0)
     assert ctx.any_row_has_logits is True
     good = ctx.sample_last()
     assert isinstance(good, int)
 
     # Now overrun sequence 0's own capacity so llama_decode fails (rc=1).
-    batch = ftm.Batch(64, 1)
+    batch = bwr.Batch(64, 1)
     pos = len(tokens)
     while pos < n_seq + 32:
         batch.clear()

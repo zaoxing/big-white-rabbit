@@ -22,7 +22,7 @@ from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, HTTPException, Request
 
-from .._freetoken_metal import Model
+from .._bwr_metal import Model
 from ..engine.async_engine import AsyncEngine
 from ..engine.mlx_engine import MLXEngine
 from ..engine.config import RequestParams, StopSequenceFilter, normalize_stops

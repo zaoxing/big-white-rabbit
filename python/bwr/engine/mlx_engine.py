@@ -8,10 +8,10 @@ rewind: on any mismatch the cache is rebuilt exactly by re-feeding (never
 lossy), and a per-request rolling acceptance disables drafting below 0.5
 after 8 drafted. Greedy only, like Metal.
 
-mlx-lm is a core dependency (it ships with freetoken-mac). Nothing in this
+mlx-lm is a core dependency (it ships with big-white-rabbit). Nothing in this
 module imports it at top level anyway: the import happens in ``__init__``
 so a broken install fails with a clear error naming the backend instead of
-at ``import freetoken_mac`` time.
+at ``import bwr`` time.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ def _require_mlx():
     except ImportError as exc:
         raise ImportError(
             "the mlx backend needs mlx/mlx-lm installed "
-            "(pip install freetoken-mac)"
+            "(pip install big-white-rabbit)"
         ) from exc
     return load, make_sampler
 
@@ -45,7 +45,7 @@ def _mx():
     except ImportError as exc:
         raise ImportError(
             "the mlx backend needs mlx/mlx-lm installed "
-            "(pip install freetoken-mac)"
+            "(pip install big-white-rabbit)"
         ) from exc
     return mx
 

@@ -1,7 +1,7 @@
 # Spec: draft-model speculation (T7)
 
 Status: APPROVED (human: "do 1, 4 first", item 1).
-Phase: implementation on branch `feat/draft-model` (worktree `../FreeToken-Mac-wt-draft`).
+Phase: implementation on branch `feat/draft-model` (worktree `../Big White Rabbit-wt-draft`).
 
 ## Objective
 
@@ -41,7 +41,7 @@ D+2 tokens.
 - Draft ctx geometry: `n_ctx` = target TOTAL `n_ctx` (per-stream room must
   cover the target per-seq span), `n_seq_max` = target's (seq_ids shared),
   `n_batch` = target effective `n_batch` (prompt chunking).
-- `ftm serve --draft-model PATH`: second Model load (documented RAM cost),
+- `bwr serve --draft-model PATH`: second Model load (documented RAM cost),
   closed after uvicorn alongside the target. `AsyncEngine.stop` also closes
   the draft context (same Metal-teardown abort class as the main context).
 - Correctness is vocab-independent: mismatched-vocab drafts just reject, so
@@ -50,7 +50,7 @@ D+2 tokens.
 
 ## Testing strategy
 
-- `tests/test_draft_model.py`: DraftEngine mechanics on FTM_TEST_MODEL
+- `tests/test_draft_model.py`: DraftEngine mechanics on BWR_TEST_MODEL
   (prepare/propose determinism, sync advance, release/re-prepare, max_d=0,
   unknown-rid KeyError) + integration with a second same-file Model
   (invariant on/off identical + reason, calls<=, drafted>0, mutual

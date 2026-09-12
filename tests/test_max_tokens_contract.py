@@ -49,16 +49,16 @@ import os
 
 import pytest
 
-import freetoken_mac as ftm
-from freetoken_mac.server.anthropic_api import _STOP_REASONS
-from freetoken_mac.server.app import DEFAULT_MAX_TOKENS, _FINISH_REASONS
-from freetoken_mac.server.schemas import ChatCompletionRequest, max_tokens_error
+import bwr as bwr
+from bwr.server.anthropic_api import _STOP_REASONS
+from bwr.server.app import DEFAULT_MAX_TOKENS, _FINISH_REASONS
+from bwr.server.schemas import ChatCompletionRequest, max_tokens_error
 
-MODEL_PATH = os.environ.get("FTM_TEST_MODEL")
+MODEL_PATH = os.environ.get("BWR_TEST_MODEL")
 
 pytestmark = pytest.mark.skipif(
     not MODEL_PATH or not os.path.exists(MODEL_PATH),
-    reason="set FTM_TEST_MODEL to a .gguf path to run these",
+    reason="set BWR_TEST_MODEL to a .gguf path to run these",
 )
 
 # The exact cap under test. Small enough that the model cannot plausibly finish first on
@@ -193,8 +193,8 @@ def test_the_reason_tables_map_every_engine_cause_to_one_protocol_reason() -> No
 
 
 @pytest.fixture(scope="module")
-def model() -> ftm.Model:
-    m = ftm.Model(MODEL_PATH, ftm.ModelParams())
+def model() -> bwr.Model:
+    m = bwr.Model(MODEL_PATH, bwr.ModelParams())
     yield m
     # Release the weights before interpreter exit or ggml's Metal device destructor
     # aborts the process (exit 134). See docs/llamacpp-notes.md.
@@ -202,12 +202,12 @@ def model() -> ftm.Model:
 
 
 @pytest.fixture(scope="module")
-def served(model: ftm.Model):
+def served(model: bwr.Model):
     tc = pytest.importorskip("fastapi.testclient")
-    from freetoken_mac.server.app import build_app
+    from bwr.server.app import build_app
 
     app = build_app(
-        model, ftm.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=2, engine="metal")
+        model, bwr.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=2, engine="metal")
     )
     with tc.TestClient(app) as c:
         yield app, c
@@ -225,7 +225,7 @@ def _canned_stream(text: str, reason: str, *, chunk: int = 3):
     Pieces are fixed-size rather than token-aligned, which is what a real tokeniser
     delivers as far as the routes can tell.
     """
-    from freetoken_mac.engine.metal_engine import StepOutput
+    from bwr.engine.metal_engine import StepOutput
 
     pieces = [text[i : i + chunk] for i in range(0, len(text), chunk)] or [""]
 
@@ -523,7 +523,7 @@ def test_a_normal_positive_cap_is_untouched(client) -> None:
     assert 1 <= plain["usage"]["completion_tokens"] <= DEFAULT_MAX_TOKENS
 
 
-def test_engine_admission_refuses_a_non_positive_cap(model: ftm.Model) -> None:
+def test_engine_admission_refuses_a_non_positive_cap(model: bwr.Model) -> None:
     """Belt and braces, at the layer where `-5` actually did its damage.
 
     `_advance` compares `n_generated >= max_tokens`, so a non-positive cap retires the
@@ -532,11 +532,11 @@ def test_engine_admission_refuses_a_non_positive_cap(model: ftm.Model) -> None:
     prompt, so it is where this belongs: any future route, and any direct engine caller,
     gets the same refusal instead of a one-token generation.
     """
-    from freetoken_mac.engine.config import RequestParams
-    from freetoken_mac.engine.metal_engine import MetalEngine
+    from bwr.engine.config import RequestParams
+    from bwr.engine.metal_engine import MetalEngine
 
     engine = MetalEngine(
-        model, ftm.EngineConfig(n_ctx=1024, n_batch=256, n_ubatch=256, n_seq_max=2)
+        model, bwr.EngineConfig(n_ctx=1024, n_batch=256, n_ubatch=256, n_seq_max=2)
     )
     try:
         free_before = engine.n_free_seq_slots

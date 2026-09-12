@@ -8,19 +8,19 @@ import os
 
 import pytest
 
-import freetoken_mac as ftm
+import bwr as bwr
 
-MODEL_PATH = os.environ.get("FTM_TEST_MODEL")
+MODEL_PATH = os.environ.get("BWR_TEST_MODEL")
 
 pytestmark = pytest.mark.skipif(
     not MODEL_PATH or not os.path.exists(MODEL_PATH),
-    reason="set FTM_TEST_MODEL to a .gguf path to run these",
+    reason="set BWR_TEST_MODEL to a .gguf path to run these",
 )
 
 
 @pytest.fixture(scope="module")
-def model() -> ftm.Model:
-    m = ftm.Model(MODEL_PATH, ftm.ModelParams())
+def model() -> bwr.Model:
+    m = bwr.Model(MODEL_PATH, bwr.ModelParams())
     yield m
     # Release the weights before the interpreter exits. ggml frees the Metal device from
     # a static destructor and asserts its residency sets are empty; a model still alive
@@ -31,7 +31,7 @@ def model() -> ftm.Model:
 # --- metadata strings longer than any fixed buffer ----------------------------------
 
 
-def test_long_metadata_value_is_read_in_full(model: ftm.Model) -> None:
+def test_long_metadata_value_is_read_in_full(model: bwr.Model) -> None:
     """llama.cpp's string getters are snprintf-backed: they return the length the value
     WOULD need, not what was written. Reading that many bytes out of a fixed buffer is a
     stack over-read, and clamping to the buffer edge splits multi-byte UTF-8. Chat
@@ -49,7 +49,7 @@ def test_long_metadata_value_is_read_in_full(model: ftm.Model) -> None:
 # --- chat templating ---------------------------------------------------------------
 
 
-def test_apply_chat_template_renders_roles(model: ftm.Model) -> None:
+def test_apply_chat_template_renders_roles(model: bwr.Model) -> None:
     out = model.apply_chat_template(
         [("system", "You are terse."), ("user", "Hi")], True
     )
@@ -63,7 +63,7 @@ def test_apply_chat_template_renders_roles(model: ftm.Model) -> None:
     assert len(without) < len(out)
 
 
-def test_apply_chat_template_rejects_empty(model: ftm.Model) -> None:
+def test_apply_chat_template_rejects_empty(model: bwr.Model) -> None:
     with pytest.raises(ValueError, match="no messages"):
         model.apply_chat_template([], True)
 
@@ -71,20 +71,20 @@ def test_apply_chat_template_rejects_empty(model: ftm.Model) -> None:
 # --- async engine bridge -----------------------------------------------------------
 
 
-def _engine(model: ftm.Model, **kw: int) -> ftm.MetalEngine:
-    cfg = ftm.EngineConfig(n_ctx=kw.get("n_ctx", 1024), n_batch=kw.get("n_batch", 256),
+def _engine(model: bwr.Model, **kw: int) -> bwr.MetalEngine:
+    cfg = bwr.EngineConfig(n_ctx=kw.get("n_ctx", 1024), n_batch=kw.get("n_batch", 256),
                            n_ubatch=kw.get("n_batch", 256), n_seq_max=kw.get("n_seq_max", 4))
-    return ftm.MetalEngine(model, cfg)
+    return bwr.MetalEngine(model, cfg)
 
 
-def test_async_engine_streams_one_request(model: ftm.Model) -> None:
-    from freetoken_mac.engine.async_engine import AsyncEngine
+def test_async_engine_streams_one_request(model: bwr.Model) -> None:
+    from bwr.engine.async_engine import AsyncEngine
 
     async def run() -> list[str]:
         eng = AsyncEngine(_engine(model))
         await eng.start()
         try:
-            rid = await eng.submit("The capital of France is", ftm.RequestParams(max_tokens=6))
+            rid = await eng.submit("The capital of France is", bwr.RequestParams(max_tokens=6))
             return [o.piece async for o in eng.stream(rid)]
         finally:
             await eng.stop()
@@ -94,10 +94,10 @@ def test_async_engine_streams_one_request(model: ftm.Model) -> None:
     assert "".join(pieces).strip()
 
 
-def test_async_engine_interleaves_concurrent_requests(model: ftm.Model) -> None:
+def test_async_engine_interleaves_concurrent_requests(model: bwr.Model) -> None:
     """Three coroutines streaming at once must each get their own tokens, and the
     engine must fold them into shared decodes rather than serialising."""
-    from freetoken_mac.engine.async_engine import AsyncEngine
+    from bwr.engine.async_engine import AsyncEngine
 
     prompts = ["The capital of France is", "Count: 1 2 3", "def add(a, b):"]
 
@@ -106,7 +106,7 @@ def test_async_engine_interleaves_concurrent_requests(model: ftm.Model) -> None:
         await eng.start()
         try:
             rids = [
-                await eng.submit(p, ftm.RequestParams(max_tokens=6, temp=0.0))
+                await eng.submit(p, bwr.RequestParams(max_tokens=6, temp=0.0))
                 for p in prompts
             ]
 
@@ -126,14 +126,14 @@ def test_async_engine_interleaves_concurrent_requests(model: ftm.Model) -> None:
     assert decode_calls < 18, f"expected batched decodes, got {decode_calls}"
 
 
-def test_async_engine_cancel_stops_a_stream(model: ftm.Model) -> None:
-    from freetoken_mac.engine.async_engine import AsyncEngine
+def test_async_engine_cancel_stops_a_stream(model: bwr.Model) -> None:
+    from bwr.engine.async_engine import AsyncEngine
 
     async def run() -> int:
         eng = AsyncEngine(_engine(model))
         await eng.start()
         try:
-            rid = await eng.submit("Count slowly:", ftm.RequestParams(max_tokens=64))
+            rid = await eng.submit("Count slowly:", bwr.RequestParams(max_tokens=64))
             seen = 0
             async for _ in eng.stream(rid):
                 seen += 1
@@ -148,19 +148,19 @@ def test_async_engine_cancel_stops_a_stream(model: ftm.Model) -> None:
     assert 3 <= seen < 64, f"cancel did not stop the stream: {seen} tokens"
 
 
-def test_async_engine_survives_a_bad_request(model: ftm.Model) -> None:
+def test_async_engine_survives_a_bad_request(model: bwr.Model) -> None:
     """A rejected request must not kill the worker thread -- the whole point of the
     single-process design is that one bad request cannot take the server down."""
-    from freetoken_mac.engine.async_engine import AsyncEngine
+    from bwr.engine.async_engine import AsyncEngine
 
     async def run() -> str:
         eng = AsyncEngine(_engine(model, n_ctx=512, n_seq_max=2))
         await eng.start()
         try:
             with pytest.raises(ValueError):
-                await eng.submit([1] * 10_000, ftm.RequestParams(max_tokens=4))
+                await eng.submit([1] * 10_000, bwr.RequestParams(max_tokens=4))
             # The engine is still alive and serving.
-            rid = await eng.submit("Hello", ftm.RequestParams(max_tokens=4))
+            rid = await eng.submit("Hello", bwr.RequestParams(max_tokens=4))
             return "".join([o.piece async for o in eng.stream(rid)])
         finally:
             await eng.stop()
@@ -172,11 +172,11 @@ def test_async_engine_survives_a_bad_request(model: ftm.Model) -> None:
 
 
 @pytest.fixture(scope="module")
-def client(model: ftm.Model):
+def client(model: bwr.Model):
     fastapi_testclient = pytest.importorskip("fastapi.testclient")
-    from freetoken_mac.server.app import build_app
+    from bwr.server.app import build_app
 
-    app = build_app(model, ftm.EngineConfig(n_ctx=1024, n_batch=256, n_ubatch=256, n_seq_max=4, engine="metal"))
+    app = build_app(model, bwr.EngineConfig(n_ctx=1024, n_batch=256, n_ubatch=256, n_seq_max=4, engine="metal"))
     with fastapi_testclient.TestClient(app) as c:
         yield c
     # Leaving the context block ran the lifespan's shutdown, which closes the context.
@@ -286,12 +286,12 @@ def test_server_process_exits_cleanly() -> None:
     import textwrap
 
     script = textwrap.dedent(f"""
-        import freetoken_mac as ftm
-        from freetoken_mac.server.app import build_app
+        import bwr as bwr
+        from bwr.server.app import build_app
         from fastapi.testclient import TestClient
 
-        model = ftm.Model({MODEL_PATH!r}, ftm.ModelParams())
-        app = build_app(model, ftm.EngineConfig(engine="metal"))
+        model = bwr.Model({MODEL_PATH!r}, bwr.ModelParams())
+        app = build_app(model, bwr.EngineConfig(engine="metal"))
         with TestClient(app) as c:
             r = c.post("/v1/chat/completions", json={{
                 "model": "m",
@@ -313,8 +313,8 @@ def test_server_process_exits_cleanly() -> None:
 
 def test_closed_handles_raise_instead_of_crashing() -> None:
     """close() must make later use an exception, not a null-deref inside llama.cpp."""
-    model = ftm.Model(MODEL_PATH, ftm.ModelParams())
-    ctx = ftm.Context(model, ftm.ContextParams())
+    model = bwr.Model(MODEL_PATH, bwr.ModelParams())
+    ctx = bwr.Context(model, bwr.ContextParams())
 
     ctx.close()
     assert ctx.closed

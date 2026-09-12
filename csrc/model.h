@@ -13,7 +13,7 @@
 
 #include "llama.h"
 
-namespace ftm {
+namespace bwr {
 
 // Initializes the ggml/llama backend once per process. Safe to call repeatedly.
 void backend_init_once();
@@ -110,4 +110,4 @@ private:
     const llama_vocab * vocab_ = nullptr;
 };
 
-} // namespace ftm
+} // namespace bwr

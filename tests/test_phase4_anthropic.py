@@ -13,13 +13,13 @@ import os
 
 import pytest
 
-import freetoken_mac as ftm
+import bwr as bwr
 
-MODEL_PATH = os.environ.get("FTM_TEST_MODEL")
+MODEL_PATH = os.environ.get("BWR_TEST_MODEL")
 
 pytestmark = pytest.mark.skipif(
     not MODEL_PATH or not os.path.exists(MODEL_PATH),
-    reason="set FTM_TEST_MODEL to a .gguf path to run these",
+    reason="set BWR_TEST_MODEL to a .gguf path to run these",
 )
 
 WEATHER_TOOL = {
@@ -34,8 +34,8 @@ WEATHER_TOOL = {
 
 
 @pytest.fixture(scope="module")
-def model() -> ftm.Model:
-    m = ftm.Model(MODEL_PATH, ftm.ModelParams())
+def model() -> bwr.Model:
+    m = bwr.Model(MODEL_PATH, bwr.ModelParams())
     yield m
     # Release the weights before interpreter exit or ggml's Metal device destructor
     # aborts the process (exit 134). See docs/llamacpp-notes.md.
@@ -43,12 +43,12 @@ def model() -> ftm.Model:
 
 
 @pytest.fixture(scope="module")
-def client(model: ftm.Model):
+def client(model: bwr.Model):
     tc = pytest.importorskip("fastapi.testclient")
-    from freetoken_mac.server.app import build_app
+    from bwr.server.app import build_app
 
     app = build_app(
-        model, ftm.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=2, engine="metal")
+        model, bwr.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=2, engine="metal")
     )
     with tc.TestClient(app) as c:
         yield c
@@ -58,16 +58,16 @@ def client(model: ftm.Model):
 # --- prompt equivalence with the OpenAI surface -------------------------------------
 
 
-def test_prompt_matches_openai_surface_for_equivalent_request(model: ftm.Model) -> None:
+def test_prompt_matches_openai_surface_for_equivalent_request(model: bwr.Model) -> None:
     """The whole point of translating at the edges: an Anthropic request and the
     equivalent OpenAI request must render the IDENTICAL prompt. If these diverge, one of
     the two surfaces is feeding the model text it was not trained on."""
-    from freetoken_mac.server import anthropic_api as AA
-    from freetoken_mac.server.app import _message_pairs as oai_pairs
-    from freetoken_mac.server.app import render_pairs
-    from freetoken_mac.server.anthropic_schemas import MessagesRequest
-    from freetoken_mac.server.schemas import ChatCompletionRequest
-    from freetoken_mac.server.tools import inject_tools
+    from bwr.server import anthropic_api as AA
+    from bwr.server.app import _message_pairs as oai_pairs
+    from bwr.server.app import render_pairs
+    from bwr.server.anthropic_schemas import MessagesRequest
+    from bwr.server.schemas import ChatCompletionRequest
+    from bwr.server.tools import inject_tools
 
     anth = MessagesRequest(
         model="m",
@@ -105,10 +105,10 @@ def test_prompt_matches_openai_surface_for_equivalent_request(model: ftm.Model) 
     assert "<tools>" in a_prompt and "get_weather" in a_prompt
 
 
-def test_system_is_a_top_level_field_not_a_message(model: ftm.Model) -> None:
+def test_system_is_a_top_level_field_not_a_message(model: bwr.Model) -> None:
     """Anthropic puts `system` outside `messages`; it must still land in the system turn."""
-    from freetoken_mac.server import anthropic_api as AA
-    from freetoken_mac.server.anthropic_schemas import MessagesRequest
+    from bwr.server import anthropic_api as AA
+    from bwr.server.anthropic_schemas import MessagesRequest
 
     req = MessagesRequest(
         model="m", max_tokens=8, system="SENTINEL_SYS",
@@ -126,10 +126,10 @@ def test_system_is_a_top_level_field_not_a_message(model: ftm.Model) -> None:
     assert AA._message_pairs(req2)[0] == ("system", "SENTINEL_SYS")
 
 
-def test_tool_use_and_tool_result_blocks_round_trip(model: ftm.Model) -> None:
+def test_tool_use_and_tool_result_blocks_round_trip(model: bwr.Model) -> None:
     """A replayed tool exchange must reach the prompt in the model's own syntax."""
-    from freetoken_mac.server import anthropic_api as AA
-    from freetoken_mac.server.anthropic_schemas import MessagesRequest
+    from bwr.server import anthropic_api as AA
+    from bwr.server.anthropic_schemas import MessagesRequest
 
     req = MessagesRequest(
         model="m", max_tokens=8,
@@ -156,9 +156,9 @@ def test_tool_use_and_tool_result_blocks_round_trip(model: ftm.Model) -> None:
     assert "<tool_response>" in pairs[2][1] and "18C" in pairs[2][1]
 
 
-def test_consecutive_tool_results_collapse_into_one_turn(model: ftm.Model) -> None:
-    from freetoken_mac.server import anthropic_api as AA
-    from freetoken_mac.server.anthropic_schemas import MessagesRequest
+def test_consecutive_tool_results_collapse_into_one_turn(model: bwr.Model) -> None:
+    from bwr.server import anthropic_api as AA
+    from bwr.server.anthropic_schemas import MessagesRequest
 
     req = MessagesRequest(
         model="m", max_tokens=8,
@@ -176,10 +176,10 @@ def test_consecutive_tool_results_collapse_into_one_turn(model: ftm.Model) -> No
     assert tool_turns[0].count("<tool_response>") == 2
 
 
-def test_tool_choice_translation(model: ftm.Model) -> None:
+def test_tool_choice_translation(model: bwr.Model) -> None:
     """Anthropic's `any`/`tool` map onto the OpenAI spellings inject_tools understands."""
-    from freetoken_mac.server.anthropic_api import _openai_tool_choice
-    from freetoken_mac.server.tools import resolve_tool_choice
+    from bwr.server.anthropic_api import _openai_tool_choice
+    from bwr.server.tools import resolve_tool_choice
 
     assert resolve_tool_choice(_openai_tool_choice(None)) == ("auto", None)
     assert resolve_tool_choice(_openai_tool_choice({"type": "auto"})) == ("auto", None)

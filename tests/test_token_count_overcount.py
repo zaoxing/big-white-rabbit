@@ -6,7 +6,7 @@ so `n_completion = len(pieces)` is off by one on every naturally-ended turn.
 
 This test is the Prove-It pattern: it must FAIL before the fix and PASS after.
 
-Bug: `python/freetoken_mac/server/app.py:310` and `anthropic_api.py:308`
+Bug: `python/bwr/server/app.py:310` and `anthropic_api.py:308`
 increment `n_completion` for every `StepOutput`, including the final
 `StepOutput(piece="", finished=True, finish_reason="eog")` whose piece is empty.
 Observed: 10 vs engine `n_generated=9` (backlog).
@@ -20,8 +20,8 @@ from __future__ import annotations
 
 import pytest
 
-import freetoken_mac as ftm
-from freetoken_mac.engine.metal_engine import StepOutput
+import bwr as bwr
+from bwr.engine.metal_engine import StepOutput
 
 # Use a tiny canned generation: two real pieces + one empty eog terminal.
 # This mirrors the real engine's StepOutputs for a natural end.
@@ -49,10 +49,10 @@ def _canned_eog_stream(text_pieces, reason="eog"):
 def model():
     import os
 
-    path = os.environ.get("FTM_TEST_MODEL")
+    path = os.environ.get("BWR_TEST_MODEL")
     if not path:
-        pytest.skip("FTM_TEST_MODEL not set")
-    m = ftm.Model(path, ftm.ModelParams())
+        pytest.skip("BWR_TEST_MODEL not set")
+    m = bwr.Model(path, bwr.ModelParams())
     yield m
     m.close()
 
@@ -60,10 +60,10 @@ def model():
 @pytest.fixture(scope="module")
 def served(model):
     tc = pytest.importorskip("fastapi.testclient")
-    from freetoken_mac.server.app import build_app
+    from bwr.server.app import build_app
 
     app = build_app(
-        model, ftm.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=2, engine="metal")
+        model, bwr.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=2, engine="metal")
     )
     with tc.TestClient(app) as c:
         yield app, c

@@ -1,6 +1,6 @@
 """Thin argv dispatcher.
 
-Mirrors FreeToken's ``cli.py`` shape (parse a subcommand, lazily import the module that
+Mirrors Big White Rabbit's ``cli.py`` shape (parse a subcommand, lazily import the module that
 implements it) so the Phase 2 control-plane port can slot ``serve``/``shell``/``ctl`` in
 next to these without restructuring. Phase 0 ships only ``generate`` and ``info``.
 """
@@ -21,7 +21,7 @@ def _add_model_args(p: argparse.ArgumentParser) -> None:
 
 
 def _cmd_info(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(prog="ftm info", description="Print GGUF/model metadata.")
+    ap = argparse.ArgumentParser(prog="bwr info", description="Print GGUF/model metadata.")
     _add_model_args(ap)
     args = ap.parse_args(argv)
 
@@ -49,7 +49,7 @@ def _cmd_info(argv: list[str]) -> int:
 
 
 def _cmd_generate(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(prog="ftm generate", description="Generate from a prompt.")
+    ap = argparse.ArgumentParser(prog="bwr generate", description="Generate from a prompt.")
     _add_model_args(ap)
     ap.add_argument("--prompt", "-p", default="Explain what a mixture-of-experts model is, briefly.")
     ap.add_argument("--max-tokens", "-n", type=int, default=128)
@@ -91,7 +91,7 @@ def _cmd_generate(argv: list[str]) -> int:
 
 def _cmd_serve(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(
-        prog="ftm serve", description="Serve an OpenAI-compatible API over a GGUF model."
+        prog="bwr serve", description="Serve an OpenAI-compatible API over a GGUF model."
     )
     _add_model_args(ap)
     ap.add_argument("--host", default="127.0.0.1")
@@ -128,7 +128,7 @@ def _cmd_serve(argv: list[str]) -> int:
         from .server.launch import serve
     except ImportError as exc:  # fastapi/uvicorn are the [serve] extra, not a core dep
         print(
-            f"ftm serve needs the server extras: pip install 'freetoken-mac[serve]' ({exc})",
+            f"bwr serve needs the server extras: pip install 'big-white-rabbit[serve]' ({exc})",
             file=sys.stderr,
         )
         return 1
@@ -146,7 +146,7 @@ def _cmd_serve(argv: list[str]) -> int:
         try:
             ssd_bytes = int(float(s) * mult)
         except ValueError:
-            print(f"ftm: invalid --ssd-hotlist-bytes {args.ssd_hotlist_bytes!r}", file=sys.stderr)
+            print(f"bwr: invalid --ssd-hotlist-bytes {args.ssd_hotlist_bytes!r}", file=sys.stderr)
             return 2
         # byte budget implies hotlist on
         args.ssd_hotlist = True
@@ -185,13 +185,13 @@ _COMMANDS = {
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in ("-h", "--help"):
-        print(f"usage: ftm <{'|'.join(_COMMANDS)}> [options]", file=sys.stderr)
+        print(f"usage: bwr <{'|'.join(_COMMANDS)}> [options]", file=sys.stderr)
         return 0 if argv else 2
 
     cmd, rest = argv[0], argv[1:]
     handler = _COMMANDS.get(cmd)
     if handler is None:
-        print(f"ftm: unknown command {cmd!r}; expected one of {', '.join(_COMMANDS)}", file=sys.stderr)
+        print(f"bwr: unknown command {cmd!r}; expected one of {', '.join(_COMMANDS)}", file=sys.stderr)
         return 2
     return handler(rest)
 

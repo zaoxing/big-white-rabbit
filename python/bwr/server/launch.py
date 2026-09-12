@@ -1,13 +1,13 @@
-"""`ftm serve` -- load a model, build the app, run uvicorn.
+"""`bwr serve` -- load a model, build the app, run uvicorn.
 
-Replaces FreeToken's ``server/launch.py``, which spawns scheduler/tokenizer/detokenizer
+Replaces Big White Rabbit's ``server/launch.py``, which spawns scheduler/tokenizer/detokenizer
 processes and wires them over ZMQ. There is nothing to spawn here: one process owns the
 model, and the engine thread is started by the app's lifespan hook.
 """
 
 from __future__ import annotations
 
-from .._freetoken_metal import Model, ModelParams
+from .._bwr_metal import Model, ModelParams
 from ..engine.config import EngineConfig
 
 

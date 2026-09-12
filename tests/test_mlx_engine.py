@@ -1,6 +1,6 @@
 """MLX backend (SPEC-mlx-engine.md, M10b/M10c).
 
-Skips unless the mlx extra is installed AND FTM_MLX_MODEL names an MLX
+Skips unless the mlx extra is installed AND BWR_MLX_MODEL names an MLX
 weights directory. Text-equality with the Metal backend is NOT asserted:
 different precisions may legally flip greedy argmaxes (same standard as the
 KV-quant battery). What is asserted: interface parity (admit/step/drain/
@@ -16,21 +16,21 @@ import os
 
 import pytest
 
-import freetoken_mac as ftm
-from freetoken_mac.engine import EngineConfig, RequestParams
-from freetoken_mac.engine.mlx_engine import MLXEngine
+import bwr as bwr
+from bwr.engine import EngineConfig, RequestParams
+from bwr.engine.mlx_engine import MLXEngine
 
-MODEL_PATH = os.environ.get("FTM_MLX_MODEL")
+MODEL_PATH = os.environ.get("BWR_MLX_MODEL")
 
 needs_mlx = pytest.mark.skipif(
     importlib.util.find_spec("mlx_lm") is None,
-    reason="pip install 'freetoken-mac[mlx]' to run MLX tests",
+    reason="pip install 'big-white-rabbit[mlx]' to run MLX tests",
 )
 needs_weights = pytest.mark.skipif(
     importlib.util.find_spec("mlx_lm") is None
     or not MODEL_PATH
     or not os.path.isdir(MODEL_PATH or ""),
-    reason="need mlx installed and FTM_MLX_MODEL to run MLX backend tests",
+    reason="need mlx installed and BWR_MLX_MODEL to run MLX backend tests",
 )
 
 N_TOKENS = 8
@@ -41,14 +41,14 @@ def greedy(max_tokens: int = N_TOKENS) -> RequestParams:
 
 
 def test_bad_engine_name_rejected_without_weights() -> None:
-    from freetoken_mac.server.app import build_app
+    from bwr.server.app import build_app
 
     with pytest.raises(ValueError, match="engine"):
         build_app(None, EngineConfig(engine="bogus"))  # type: ignore[arg-type]
 
 
 def test_mlx_engine_requires_path() -> None:
-    from freetoken_mac.server.app import build_app
+    from bwr.server.app import build_app
 
     with pytest.raises(ValueError, match="mlx_model_path"):
         build_app(None, EngineConfig(engine="mlx"))  # type: ignore[arg-type]
@@ -120,7 +120,7 @@ def test_async_engine_compat() -> None:
     """AsyncEngine drives MLXEngine end to end, including context close."""
 
     async def scenario() -> tuple[list[int], bool]:
-        from freetoken_mac.engine.async_engine import AsyncEngine
+        from bwr.engine.async_engine import AsyncEngine
 
         engine = MLXEngine(MODEL_PATH, EngineConfig(n_ctx=4096))
         async_engine = AsyncEngine(engine)
@@ -148,7 +148,7 @@ def test_chat_completion_end_to_end() -> None:
     not the llama Model. Proves a completion serves over HTTP."""
     from fastapi.testclient import TestClient
 
-    from freetoken_mac.server.app import build_app
+    from bwr.server.app import build_app
 
     app = build_app(
         None, EngineConfig(n_ctx=4096, engine="mlx"),
@@ -176,7 +176,7 @@ def test_health_geometry() -> None:
     boots (default engine) instead of 500ing."""
     from fastapi.testclient import TestClient
 
-    from freetoken_mac.server.app import build_app
+    from bwr.server.app import build_app
 
     engine = MLXEngine(MODEL_PATH, EngineConfig(n_ctx=4096))
     assert engine.ctx.n_ctx == 4096
@@ -256,7 +256,7 @@ def test_speculative_engages(spec_engine: MLXEngine) -> None:
 def test_spec_fallback_all_wrong(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every draft wrong: output still identical, recomputes ran, and the
     request fell back to plain single-token evals."""
-    from freetoken_mac.engine import mlx_engine as engine_module
+    from bwr.engine import mlx_engine as engine_module
 
     probe = MLXEngine(MODEL_PATH, EngineConfig(n_ctx=4096))
     probe_id = _run(probe)

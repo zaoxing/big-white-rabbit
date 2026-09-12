@@ -1,7 +1,7 @@
 # Spec: prefix-cache TTFT (T8)
 
 Status: APPROVED 2026-09-10 (human: auto-pin, save spec OK).
-Phase: implementation on branch `feat/prefix-cache` (worktree `../FreeToken-Mac-wt-prefix`).
+Phase: implementation on branch `feat/prefix-cache` (worktree `../Big White Rabbit-wt-prefix`).
 
 ## Objective
 

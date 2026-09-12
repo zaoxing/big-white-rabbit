@@ -31,7 +31,7 @@ same system prompt + history repeats.
   `kv_restore(seq_id, snapshot)` via `llama_memory` helpers (already
   exposed as `memory_seq_*`). No new `C++`.
 
-- **T12b — store + CLI**: `ftm save` / `ftm load` subcommands, `Engine`
+- **T12b — store + CLI**: `bwr save` / `bwr load` subcommands, `Engine`
   integration, `health` snapshot count.
 
 - **Gate**: `n_seq_max==1` like `record_experts`; `KV` size check before

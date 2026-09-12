@@ -17,7 +17,7 @@
 
 #include "llama.h"
 
-namespace ftm {
+namespace bwr {
 
 class Batch {
 public:
@@ -65,4 +65,4 @@ private:
     llama_pos    max_pos_              = -1;
 };
 
-} // namespace ftm
+} // namespace bwr

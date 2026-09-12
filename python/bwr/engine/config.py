@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
-from .._freetoken_metal import ContextParams, SamplerParams
+from .._bwr_metal import ContextParams, SamplerParams
 
 
 @dataclass

@@ -11,14 +11,14 @@ import pytest
 
 
 def test_empty_table_predicts_nothing() -> None:
-    from freetoken_mac.engine.ngram import NgramTable
+    from bwr.engine.ngram import NgramTable
 
     assert NgramTable().predict([1, 2, 3], 4) == []
     assert len(NgramTable()) == 0
 
 
 def test_single_observation_then_predict() -> None:
-    from freetoken_mac.engine.ngram import NgramTable
+    from bwr.engine.ngram import NgramTable
 
     t = NgramTable(order=3)
     t.add([10, 20], 30)
@@ -31,7 +31,7 @@ def test_single_observation_then_predict() -> None:
 
 
 def test_draft_walk_chains_through_table() -> None:
-    from freetoken_mac.engine.ngram import NgramTable
+    from bwr.engine.ngram import NgramTable
 
     t = NgramTable(order=3)
     t.update_stream([1, 2, 3, 4, 1, 2])
@@ -42,7 +42,7 @@ def test_draft_walk_chains_through_table() -> None:
 
 
 def test_walk_respects_max_tokens() -> None:
-    from freetoken_mac.engine.ngram import NgramTable
+    from bwr.engine.ngram import NgramTable
 
     t = NgramTable(order=2)
     t.update_stream([5, 6, 5, 6, 5, 6])
@@ -53,7 +53,7 @@ def test_walk_respects_max_tokens() -> None:
 
 
 def test_most_recent_continuation_wins() -> None:
-    from freetoken_mac.engine.ngram import NgramTable
+    from bwr.engine.ngram import NgramTable
 
     t = NgramTable(order=3)
     t.add([1, 2], 3)
@@ -63,7 +63,7 @@ def test_most_recent_continuation_wins() -> None:
 
 
 def test_eviction_drops_oldest_entry() -> None:
-    from freetoken_mac.engine.ngram import NgramTable
+    from bwr.engine.ngram import NgramTable
 
     t = NgramTable(order=2, max_entries=2)
     t.add([1], 10)
@@ -76,7 +76,7 @@ def test_eviction_drops_oldest_entry() -> None:
 
 
 def test_reobserved_context_survives_eviction() -> None:
-    from freetoken_mac.engine.ngram import NgramTable
+    from bwr.engine.ngram import NgramTable
 
     t = NgramTable(order=2, max_entries=2)
     t.add([1], 10)
@@ -89,7 +89,7 @@ def test_reobserved_context_survives_eviction() -> None:
 
 
 def test_order_one_predicts_last_seen() -> None:
-    from freetoken_mac.engine.ngram import NgramTable
+    from bwr.engine.ngram import NgramTable
 
     t = NgramTable(order=1)
     t.update_stream([4, 9, 4])
@@ -99,7 +99,7 @@ def test_order_one_predicts_last_seen() -> None:
 
 
 def test_clear_forgets_everything() -> None:
-    from freetoken_mac.engine.ngram import NgramTable
+    from bwr.engine.ngram import NgramTable
 
     t = NgramTable()
     t.update_stream([1, 2, 3])
@@ -110,7 +110,7 @@ def test_clear_forgets_everything() -> None:
 
 
 def test_constructor_guards() -> None:
-    from freetoken_mac.engine.ngram import NgramTable
+    from bwr.engine.ngram import NgramTable
 
     with pytest.raises(ValueError):
         NgramTable(order=0)
@@ -120,7 +120,7 @@ def test_constructor_guards() -> None:
 
 def test_context_params_rs_default_zero() -> None:
     """Rollback snapshots stay off unless the engine asks (T5a)."""
-    from freetoken_mac import ContextParams
+    from bwr import ContextParams
 
     params = ContextParams()
     assert params.n_rs_seq == 0
@@ -131,7 +131,7 @@ def test_context_params_rs_default_zero() -> None:
 def test_spec_arch_gate_rejects_hybrids_without_rollback() -> None:
     """Known hybrids with zero snapshots in effect must fail loud (their
     partial rewinds cannot work): T4 blocker regression test."""
-    from freetoken_mac.engine.metal_engine import check_speculative_arch
+    from bwr.engine.metal_engine import check_speculative_arch
 
     for arch in ("qwen35", "qwen35moe", "lfm2", "deepseek4"):
         with pytest.raises(ValueError, match="hybrid"):
@@ -141,7 +141,7 @@ def test_spec_arch_gate_rejects_hybrids_without_rollback() -> None:
 def test_spec_arch_gate_allows_supported_and_unknown() -> None:
     """Hybrids WITH snapshots pass (capability, not denylist, gates), as do
     attention architectures and missing / future arch strings."""
-    from freetoken_mac.engine.metal_engine import check_speculative_arch
+    from bwr.engine.metal_engine import check_speculative_arch
 
     check_speculative_arch("qwen35", 5)
     for arch in ("qwen2", "qwen3", "llama", None, "", "something-new"):

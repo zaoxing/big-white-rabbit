@@ -1,7 +1,7 @@
 # Spec: expert placement plumbing (T9)
 
 Status: APPROVED 2026-09-10 (human: --n-cpu-moe form deferred).
-Phase: implementation on branch `feat/expert-placement` (worktree `../FreeToken-Mac-wt-place`).
+Phase: implementation on branch `feat/expert-placement` (worktree `../Big White Rabbit-wt-place`).
 
 ## Objective
 
@@ -29,7 +29,7 @@ just the knob + proof it works.
 
 - Unit (suite): default loads unchanged; invalid value rejected with a named
   error before load.
-- Correctness proof (30B, FTM_MOE_MODEL): same prompt, all-Metal vs
+- Correctness proof (30B, BWR_MOE_MODEL): same prompt, all-Metal vs
   experts-CPU -> **byte-identical tokens** (placement must never change
   numerics; CPU compute is only slower).
 - Efficacy baseline: wall time + tok/s both ways. Expect CPU-experts much

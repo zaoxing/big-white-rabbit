@@ -14,7 +14,7 @@ import pytest
 
 
 def test_block_text_matches_text_from_blocks() -> None:
-    from freetoken_mac.server.common import block_text, text_from_blocks
+    from bwr.server.common import block_text, text_from_blocks
 
     cases = [
         ({"text": "hi"}, "hi"),
@@ -37,7 +37,7 @@ def test_block_text_matches_text_from_blocks() -> None:
 
 
 def test_sse_response_headers() -> None:
-    from freetoken_mac.server.common import SSE_HEADERS, SSE_MEDIA_TYPE, sse_response
+    from bwr.server.common import SSE_HEADERS, SSE_MEDIA_TYPE, sse_response
 
     async def empty():
         if False:
@@ -51,7 +51,7 @@ def test_sse_response_headers() -> None:
 
 
 def test_count_tokens_uses_special_flags() -> None:
-    from freetoken_mac.server.common import count_tokens
+    from bwr.server.common import count_tokens
 
     seen: dict = {}
 
@@ -70,7 +70,7 @@ def test_submit_request_maps_errors() -> None:
 
     from fastapi import HTTPException
 
-    from freetoken_mac.server.common import submit_request
+    from bwr.server.common import submit_request
 
     class OkEngine:
         async def submit(self, prompt, params):

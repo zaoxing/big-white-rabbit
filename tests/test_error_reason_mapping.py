@@ -28,7 +28,7 @@ def _engine_reasons_from_source() -> set[str]:
     must be reflected in the tables, and a test that compares the two maps to
     each other cannot enforce that.
     """
-    src = pathlib.Path("python/freetoken_mac/engine/metal_engine.py").read_text()
+    src = pathlib.Path("python/bwr/engine/metal_engine.py").read_text()
     # matches: self._retire(req, "reason"  or  self._retire(req, 'reason'
     return set(re.findall(r'self\._retire\(req,\s*["\']([^"\']+)["\']', src))
 
@@ -40,8 +40,8 @@ def test_engine_vocabulary_is_six_reasons() -> None:
 
 
 def test_both_protocol_tables_cover_every_engine_reason() -> None:
-    from freetoken_mac.server.anthropic_api import _STOP_REASONS
-    from freetoken_mac.server.app import _FINISH_REASONS
+    from bwr.server.anthropic_api import _STOP_REASONS
+    from bwr.server.app import _FINISH_REASONS
 
     engine_reasons = _engine_reasons_from_source()
     assert engine_reasons <= set(_FINISH_REASONS), (
@@ -56,8 +56,8 @@ def test_both_protocol_tables_cover_every_engine_reason() -> None:
 
 
 def test_error_maps_to_generic_termination() -> None:
-    from freetoken_mac.server.anthropic_api import _STOP_REASONS
-    from freetoken_mac.server.app import _FINISH_REASONS, _openai_finish_reason
+    from bwr.server.anthropic_api import _STOP_REASONS
+    from bwr.server.app import _FINISH_REASONS, _openai_finish_reason
 
     # Error is an internal failure; the wire should not pretend it was a
     # successful stop with content, but there is no protocol-level "error"
@@ -74,7 +74,7 @@ def test_wire_reports_error_as_generic_via_canned_engine() -> None:
     Currently error is unreachable (re-raised), so we use canned engine to
     prove the mapping is wired through.
     """
-    from freetoken_mac.engine.metal_engine import StepOutput
+    from bwr.engine.metal_engine import StepOutput
 
     async def canned_error(request_id: int):
         # Simulate a request that retires for error with empty piece
@@ -82,18 +82,18 @@ def test_wire_reports_error_as_generic_via_canned_engine() -> None:
 
     import os
 
-    import freetoken_mac as ftm
+    import bwr as bwr
     import pytest
 
-    path = os.environ.get("FTM_TEST_MODEL")
+    path = os.environ.get("BWR_TEST_MODEL")
     if not path:
-        pytest.skip("FTM_TEST_MODEL not set")
+        pytest.skip("BWR_TEST_MODEL not set")
     tc = pytest.importorskip("fastapi.testclient")
-    from freetoken_mac.server.app import build_app
+    from bwr.server.app import build_app
 
-    m = ftm.Model(path, ftm.ModelParams())
+    m = bwr.Model(path, bwr.ModelParams())
     try:
-        app = build_app(m, ftm.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=2, engine="metal"))
+        app = build_app(m, bwr.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=2, engine="metal"))
         with tc.TestClient(app) as client:
             # monkeypatch stream to canned error
             old = app.state.engine.stream

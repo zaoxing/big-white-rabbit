@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from .._freetoken_metal import Batch, Context, ContextParams, Model, SamplerParams
+from .._bwr_metal import Batch, Context, ContextParams, Model, SamplerParams
 
 
 class DraftEngine:

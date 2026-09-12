@@ -8,7 +8,7 @@ down because every one of these cost real debugging time.
 
 `GGML_ASSERT` expands to `GGML_ABORT` — it is **not** `NDEBUG`-gated
 (`ggml/include/ggml.h:288`). A bad argument does not throw; it kills the process. Under
-the planned single-process server (see the FreeToken-Mac design) that means one malformed
+the planned single-process server (see the Big White Rabbit design) that means one malformed
 request takes down the API server along with the engine.
 
 **Rule: every Python-reachable binding bounds-checks its own arguments and raises.** Three

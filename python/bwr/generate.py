@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Iterator
 
-from ._freetoken_metal import Context, Model
+from ._bwr_metal import Context, Model
 
 
 def generate(

@@ -75,7 +75,7 @@ class AsyncEngine:
         self._loop = asyncio.get_running_loop()
         self._stopping.clear()
         self._thread = threading.Thread(
-            target=self._run, name="freetoken-mac-engine", daemon=True
+            target=self._run, name="big-white-rabbit-engine", daemon=True
         )
         self._thread.start()
 

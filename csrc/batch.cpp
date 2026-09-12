@@ -3,7 +3,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace ftm {
+namespace bwr {
 
 Batch::Batch(int32_t capacity, int32_t n_seq_max_per_token) {
     if (capacity <= 0) {
@@ -90,4 +90,4 @@ int32_t Batch::add_shared(llama_token token, llama_pos pos,
     return i;
 }
 
-} // namespace ftm
+} // namespace bwr

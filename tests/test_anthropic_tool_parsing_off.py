@@ -29,13 +29,13 @@ import os
 
 import pytest
 
-import freetoken_mac as ftm
+import bwr as bwr
 
-MODEL_PATH = os.environ.get("FTM_TEST_MODEL")
+MODEL_PATH = os.environ.get("BWR_TEST_MODEL")
 
 pytestmark = pytest.mark.skipif(
     not MODEL_PATH or not os.path.exists(MODEL_PATH),
-    reason="set FTM_TEST_MODEL to a .gguf path to run these",
+    reason="set BWR_TEST_MODEL to a .gguf path to run these",
 )
 
 WEATHER_TOOL = {
@@ -61,7 +61,7 @@ def _canned_stream(text: str, *, chunk: int = 7):
     Pieces deliberately do not respect the tag boundaries, so the parser is exercised the
     way real token pieces exercise it (`<tool`, `_call`, `>`).
     """
-    from freetoken_mac.engine.metal_engine import StepOutput
+    from bwr.engine.metal_engine import StepOutput
 
     pieces = [text[i : i + chunk] for i in range(0, len(text), chunk)] or [""]
 
@@ -74,8 +74,8 @@ def _canned_stream(text: str, *, chunk: int = 7):
 
 
 @pytest.fixture(scope="module")
-def model() -> ftm.Model:
-    m = ftm.Model(MODEL_PATH, ftm.ModelParams())
+def model() -> bwr.Model:
+    m = bwr.Model(MODEL_PATH, bwr.ModelParams())
     yield m
     # Release the weights before interpreter exit or ggml's Metal device destructor
     # aborts the process (exit 134). See docs/llamacpp-notes.md.
@@ -83,12 +83,12 @@ def model() -> ftm.Model:
 
 
 @pytest.fixture(scope="module")
-def served(model: ftm.Model):
+def served(model: bwr.Model):
     tc = pytest.importorskip("fastapi.testclient")
-    from freetoken_mac.server.app import build_app
+    from bwr.server.app import build_app
 
     app = build_app(
-        model, ftm.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=2, engine="metal")
+        model, bwr.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=2, engine="metal")
     )
     with tc.TestClient(app) as c:
         yield app, c
@@ -144,7 +144,7 @@ def _streamed_text(datas: list[dict]) -> str:
 
 def test_parser_off_state_has_exactly_one_meaning() -> None:
     """`known_names=None` is "off", and off means pass-through -- not "accept anything"."""
-    from freetoken_mac.server.tools import ToolCallStreamParser, parse_tool_calls
+    from bwr.server.tools import ToolCallStreamParser, parse_tool_calls
 
     off = parse_tool_calls(CALL_TEXT, None)
     assert off.tool_calls == [], "parsing is off, so nothing may be extracted"
@@ -166,7 +166,7 @@ def test_parser_off_state_has_exactly_one_meaning() -> None:
 
 
 def test_route_derives_the_off_state_for_both_no_tools_and_choice_none() -> None:
-    from freetoken_mac.server.anthropic_api import _openai_tool_choice, _parsing_names
+    from bwr.server.anthropic_api import _openai_tool_choice, _parsing_names
 
     tools = [
         {

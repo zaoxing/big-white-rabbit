@@ -1,7 +1,7 @@
 // Context handle: owns a llama_context (KV cache + compute) and its sampler chains.
 //
 // Phase 0 brought up a single-sequence path (decode_seq0, one shared sampler). Phase 1
-// adds the real batched path: decode() takes a prepared ftm::Batch carrying tokens for
+// adds the real batched path: decode() takes a prepared bwr::Batch carrying tokens for
 // many sequences at many positions, and sampling moves to PER-SEQUENCE chains, because
 // once requests carry their own temperature/seed and their own accepted-token history a
 // single shared chain samples the wrong distribution for all but one of them.
@@ -19,7 +19,7 @@
 #include "llama.h"
 #include "model.h"
 
-namespace ftm {
+namespace bwr {
 
 struct ContextParams {
     uint32_t n_ctx           = 4096;
@@ -238,4 +238,4 @@ private:
     static bool expert_cb(struct ggml_tensor * t, bool ask, void * user_data);
 };
 
-} // namespace ftm
+} // namespace bwr

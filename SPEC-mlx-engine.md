@@ -14,11 +14,11 @@ Phase: awaiting implementation approval on branch `feat/mlx-engine`.
 
 ## Design (proposed)
 
-- New `python/freetoken_mac/engine/mlx_engine.py::MLXEngine`: wraps
+- New `python/bwr/engine/mlx_engine.py::MLXEngine`: wraps
   `mlx_lm` load/stream in OUR engine interface (admit/step/stream shapes,
   request IDs, finish reasons, stop sequences) so the FastAPI routes,
   schemas, and tool-call parser survive untouched. `mlx_lm` becomes an
-  optional dependency (`pip install freetoken-mac[mlx]`), same pattern as
+  optional dependency (`pip install big-white-rabbit[mlx]`), same pattern as
   `[serve]`; import must fail with a clear message, never at module import.
 - Out of scope Phase 1: batching parity (single-stream first; mlx-lm
   `BatchGenerator` evaluated in Phase 2), n-gram/MTP speculation,
@@ -38,7 +38,7 @@ Phase: awaiting implementation approval on branch `feat/mlx-engine`.
   spike's 1.3x holding inside our harness (not just mlx-lm CLI).
 - Full suite green with BOTH backends selectable; Metal suite unchanged
   (MLX tests skip without the extra + weights, same pattern as
-  FTM_TEST_MODEL/FTM_MOE_MODEL).
+  BWR_TEST_MODEL/BWR_MOE_MODEL).
 
 ## Task breakdown
 
@@ -115,7 +115,7 @@ defines no trim/snapshot/restore (`_BaseCache.is_trimmable()` is False), so
 
 ## M11: MLX as default (approved: code + docs)
 
-`EngineConfig.engine` and `ftm serve --engine` default to `mlx`; `mlx`/`mlx-lm`
+`EngineConfig.engine` and `bwr serve --engine` default to `mlx`; `mlx`/`mlx-lm`
 moved from the `[mlx]` extra to core dependencies (extra removed); README
 rewritten MLX-first. All pre-existing server/engine tests pin
 `engine="metal"` explicitly (13 call sites + bare `build_app(model)`); the

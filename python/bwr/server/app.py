@@ -1,14 +1,14 @@
 """Single-process FastAPI app over one AsyncEngine.
 
-No ZMQ, no worker processes. FreeToken's multi-process topology exists to give each
+No ZMQ, no worker processes. Big White Rabbit's multi-process topology exists to give each
 tensor-parallel CUDA rank its own process and to keep a stream-owning scheduler off the
 event loop; on unified memory there is one GPU and one context, and the decode loop is
 already isolated on a thread (see engine/async_engine.py). So the whole server is one
 process, and the "submit to backend" step is a direct call instead of an IPC hop.
 
 Crash isolation is the tradeoff: a segfault in the engine takes the API down with it.
-That is answered at the OS level (launchd/systemd restarting `ftm serve`), not by
-rebuilding FreeToken's in-app supervisor -- which is also why every binding raises
+That is answered at the OS level (launchd/systemd restarting `bwr serve`), not by
+rebuilding Big White Rabbit's in-app supervisor -- which is also why every binding raises
 instead of aborting (see docs/llamacpp-notes.md).
 """
 
@@ -24,7 +24,7 @@ from .anthropic_api import register_anthropic_routes
 from .common import count_tokens, sse_response, submit_request, text_from_blocks
 from .params import build_params
 
-from .._freetoken_metal import Model
+from .._bwr_metal import Model
 from ..engine.async_engine import AsyncEngine
 from ..engine.config import (
     EngineConfig,
@@ -273,7 +273,7 @@ def build_app(
         finally:
             await async_engine.stop()
 
-    app = FastAPI(title="FreeToken-Mac", lifespan=lifespan)
+    app = FastAPI(title="Big White Rabbit", lifespan=lifespan)
     app.state.engine = async_engine
 
     @app.get("/health")

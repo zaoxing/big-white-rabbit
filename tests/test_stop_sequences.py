@@ -40,19 +40,19 @@ import os
 
 import pytest
 
-import freetoken_mac as ftm
-from freetoken_mac.engine.config import (
+import bwr as bwr
+from bwr.engine.config import (
     StopSequenceFilter,
     first_stop_match,
     normalize_stops,
     partial_stop_len,
 )
 
-MODEL_PATH = os.environ.get("FTM_TEST_MODEL")
+MODEL_PATH = os.environ.get("BWR_TEST_MODEL")
 
 pytestmark = pytest.mark.skipif(
     not MODEL_PATH or not os.path.exists(MODEL_PATH),
-    reason="set FTM_TEST_MODEL to a .gguf path to run these",
+    reason="set BWR_TEST_MODEL to a .gguf path to run these",
 )
 
 # The engine's own retirement reason for "the client's delimiter arrived". Named once
@@ -154,8 +154,8 @@ def test_filter_without_stops_is_a_byte_for_byte_pass_through() -> None:
 
 def test_both_protocol_maps_learned_the_new_engine_reason() -> None:
     """A new engine reason mapped on one surface only is a silent protocol divergence."""
-    from freetoken_mac.server.anthropic_api import _STOP_REASONS
-    from freetoken_mac.server.app import _FINISH_REASONS
+    from bwr.server.anthropic_api import _STOP_REASONS
+    from bwr.server.app import _FINISH_REASONS
 
     assert _FINISH_REASONS[ENGINE_REASON] == "stop"
     assert _STOP_REASONS[ENGINE_REASON] == "stop_sequence"
@@ -165,8 +165,8 @@ def test_both_protocol_maps_learned_the_new_engine_reason() -> None:
 
 
 @pytest.fixture(scope="module")
-def model() -> ftm.Model:
-    m = ftm.Model(MODEL_PATH, ftm.ModelParams())
+def model() -> bwr.Model:
+    m = bwr.Model(MODEL_PATH, bwr.ModelParams())
     yield m
     # Release the weights before interpreter exit or ggml's Metal device destructor
     # aborts the process (exit 134). See docs/llamacpp-notes.md.
@@ -174,12 +174,12 @@ def model() -> ftm.Model:
 
 
 @pytest.fixture(scope="module")
-def served(model: ftm.Model):
+def served(model: bwr.Model):
     tc = pytest.importorskip("fastapi.testclient")
-    from freetoken_mac.server.app import build_app
+    from bwr.server.app import build_app
 
     app = build_app(
-        model, ftm.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=2, engine="metal")
+        model, bwr.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=2, engine="metal")
     )
     with tc.TestClient(app) as c:
         yield app, c
@@ -192,7 +192,7 @@ def _canned_stream(text: str, *, chunk: int = 3):
     `chunk=3` cuts the 13-character delimiter into five pieces at offsets nothing in the
     server can predict, which is how a real tokeniser delivers it.
     """
-    from freetoken_mac.engine.metal_engine import StepOutput
+    from bwr.engine.metal_engine import StepOutput
 
     pieces = [text[i : i + chunk] for i in range(0, len(text), chunk)] or [""]
 
@@ -476,8 +476,8 @@ ENGINE_PROMPT = "Write a numbered list of five fruits:\n1."
 ENGINE_MAX_TOKENS = 40
 
 
-def _fresh_engine(model: ftm.Model) -> ftm.MetalEngine:
-    return ftm.MetalEngine(model, ftm.EngineConfig(n_ctx=1024, n_seq_max=1))
+def _fresh_engine(model: bwr.Model) -> bwr.MetalEngine:
+    return bwr.MetalEngine(model, bwr.EngineConfig(n_ctx=1024, n_seq_max=1))
 
 
 def _pick_delimiter(text: str, size: int = 5) -> tuple[str, int]:
@@ -499,7 +499,7 @@ def _pick_delimiter(text: str, size: int = 5) -> tuple[str, int]:
     pytest.fail(f"no usable delimiter inside the model's output: {text!r}")
 
 
-def test_engine_stops_decoding_at_a_stop_sequence(model: ftm.Model) -> None:
+def test_engine_stops_decoding_at_a_stop_sequence(model: bwr.Model) -> None:
     """The proof that this is a stop, not a truncation.
 
     `stop_at_eog=False` and a fixed cap make the unconstrained run exactly
@@ -512,7 +512,7 @@ def test_engine_stops_decoding_at_a_stop_sequence(model: ftm.Model) -> None:
 
     engine = _fresh_engine(model)
     try:
-        rid = engine.add_request(ENGINE_PROMPT, ftm.RequestParams(**params))
+        rid = engine.add_request(ENGINE_PROMPT, bwr.RequestParams(**params))
         baseline = "".join(o.piece for o in engine.drain())
         assert engine.state(rid).n_generated == ENGINE_MAX_TOKENS
         assert engine.state(rid).finish_reason == "length"
@@ -525,7 +525,7 @@ def test_engine_stops_decoding_at_a_stop_sequence(model: ftm.Model) -> None:
     engine = _fresh_engine(model)
     try:
         rid = engine.add_request(
-            ENGINE_PROMPT, ftm.RequestParams(stop=(delimiter,), **params)
+            ENGINE_PROMPT, bwr.RequestParams(stop=(delimiter,), **params)
         )
         pieces = [o.piece for o in engine.drain()]
         state = engine.state(rid)
@@ -557,9 +557,9 @@ def test_engine_stops_decoding_at_a_stop_sequence(model: ftm.Model) -> None:
     assert stopper.matched == delimiter
 
 
-def test_async_engine_reports_the_stop_reason_through_its_stream(model: ftm.Model) -> None:
+def test_async_engine_reports_the_stop_reason_through_its_stream(model: bwr.Model) -> None:
     """The reason has to survive the asyncio hop, since that is what the routes read."""
-    from freetoken_mac.engine.async_engine import AsyncEngine
+    from bwr.engine.async_engine import AsyncEngine
 
     async def run(stop: tuple[str, ...]) -> tuple[list[str], str | None]:
         eng = AsyncEngine(_fresh_engine(model))
@@ -567,7 +567,7 @@ def test_async_engine_reports_the_stop_reason_through_its_stream(model: ftm.Mode
         try:
             rid = await eng.submit(
                 ENGINE_PROMPT,
-                ftm.RequestParams(
+                bwr.RequestParams(
                     temp=0.0, max_tokens=ENGINE_MAX_TOKENS, stop_at_eog=False, stop=stop
                 ),
             )

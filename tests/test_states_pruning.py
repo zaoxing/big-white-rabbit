@@ -30,13 +30,13 @@ import os
 
 import pytest
 
-import freetoken_mac as ftm
+import bwr as bwr
 
-MODEL_PATH = os.environ.get("FTM_TEST_MODEL")
+MODEL_PATH = os.environ.get("BWR_TEST_MODEL")
 
 pytestmark = pytest.mark.skipif(
     not MODEL_PATH or not os.path.exists(MODEL_PATH),
-    reason="set FTM_TEST_MODEL to a .gguf path to run these",
+    reason="set BWR_TEST_MODEL to a .gguf path to run these",
 )
 
 # Enough requests that a per-request leak is unmistakable: any bound this file asserts
@@ -45,29 +45,29 @@ MANY = 40
 
 
 @pytest.fixture(scope="module")
-def model() -> ftm.Model:
-    m = ftm.Model(MODEL_PATH, ftm.ModelParams())
+def model() -> bwr.Model:
+    m = bwr.Model(MODEL_PATH, bwr.ModelParams())
     yield m
     # Release the weights before interpreter exit or ggml's Metal device destructor
     # aborts the process (exit 134). See docs/llamacpp-notes.md.
     m.close()
 
 
-def _fresh_engine(model: ftm.Model, n_seq_max: int = 2) -> ftm.MetalEngine:
-    return ftm.MetalEngine(
+def _fresh_engine(model: bwr.Model, n_seq_max: int = 2) -> bwr.MetalEngine:
+    return bwr.MetalEngine(
         model,
-        ftm.EngineConfig(n_ctx=1024, n_batch=256, n_ubatch=256, n_seq_max=n_seq_max),
+        bwr.EngineConfig(n_ctx=1024, n_batch=256, n_ubatch=256, n_seq_max=n_seq_max),
     )
 
 
-def _greedy(max_tokens: int = 2) -> ftm.RequestParams:
-    return ftm.RequestParams(temp=0.0, max_tokens=max_tokens)
+def _greedy(max_tokens: int = 2) -> bwr.RequestParams:
+    return bwr.RequestParams(temp=0.0, max_tokens=max_tokens)
 
 
 # --- the regression guard: post-completion reads must keep working -------------------
 
 
-def test_accessors_still_work_for_a_just_finished_request(model: ftm.Model) -> None:
+def test_accessors_still_work_for_a_just_finished_request(model: bwr.Model) -> None:
     """Written first because it is the way a "fix" would break the product.
 
     Pruning on retire is the cheapest possible answer and it is wrong: the engine's read
@@ -95,7 +95,7 @@ def test_accessors_still_work_for_a_just_finished_request(model: ftm.Model) -> N
         engine.ctx.close()
 
 
-def test_accessors_still_work_for_every_request_of_a_full_batch(model: ftm.Model) -> None:
+def test_accessors_still_work_for_every_request_of_a_full_batch(model: bwr.Model) -> None:
     """The concurrent shape of the same guard: when several requests share the decodes,
     each one is read after it ends while its peers may still be running, so the window
     must cover a whole batch's worth of retirements, not just the last one."""
@@ -114,7 +114,7 @@ def test_accessors_still_work_for_every_request_of_a_full_batch(model: ftm.Model
         engine.ctx.close()
 
 
-def test_the_retention_window_covers_at_least_a_full_batch(model: ftm.Model) -> None:
+def test_the_retention_window_covers_at_least_a_full_batch(model: bwr.Model) -> None:
     """The window is a promise, not an accident: it must be at least as wide as the
     number of requests that can be in flight at once, or the guard above only passes by
     luck of the default."""
@@ -130,7 +130,7 @@ def test_the_retention_window_covers_at_least_a_full_batch(model: ftm.Model) -> 
 # --- the leak itself ----------------------------------------------------------------
 
 
-def test_serving_many_requests_does_not_leave_one_state_each(model: ftm.Model) -> None:
+def test_serving_many_requests_does_not_leave_one_state_each(model: bwr.Model) -> None:
     """The statement of the bug. 40 served requests, and the engine must not be holding
     40 states -- neither on the hot path nor in the archive."""
     engine = _fresh_engine(model)
@@ -156,7 +156,7 @@ def test_serving_many_requests_does_not_leave_one_state_each(model: ftm.Model) -
         engine.ctx.close()
 
 
-def test_a_pruned_request_raises_keyerror_and_says_so(model: ftm.Model) -> None:
+def test_a_pruned_request_raises_keyerror_and_says_so(model: bwr.Model) -> None:
     """The other end of the policy, stated so it cannot drift: once a request has fallen
     out of the window it is GONE, and asking about it raises KeyError -- the same failure
     an id that never existed gets, since a caller cannot act on either. Silently
@@ -185,7 +185,7 @@ def test_a_pruned_request_raises_keyerror_and_says_so(model: ftm.Model) -> None:
         engine.ctx.close()
 
 
-def test_per_decode_scan_cost_is_independent_of_requests_served(model: ftm.Model) -> None:
+def test_per_decode_scan_cost_is_independent_of_requests_served(model: bwr.Model) -> None:
     """The CPU half of the bug, asserted structurally rather than on the clock.
 
     `step()` scans the hot-path map twice and `has_work` once, so what has to be bounded
@@ -243,7 +243,7 @@ class _FailingSampleCtx:
         raise RuntimeError("injected sample_seq failure")
 
 
-def test_a_failed_advance_retains_no_stop_filter(model: ftm.Model) -> None:
+def test_a_failed_advance_retains_no_stop_filter(model: bwr.Model) -> None:
     """An exception inside `_advance` used to land BEFORE `_retire`, leaving the
     request's `StopSequenceFilter` in `_stop_filters` (verified: `_states=1
     _stop_filters=1 finished=False`, cleared only by a later `cancel()`). The filter's
@@ -255,7 +255,7 @@ def test_a_failed_advance_retains_no_stop_filter(model: ftm.Model) -> None:
     try:
         engine.ctx = _FailingSampleCtx(real_ctx)
         rid = engine.add_request(
-            "Count: 1 2", ftm.RequestParams(temp=0.0, max_tokens=8, stop=("STOP",))
+            "Count: 1 2", bwr.RequestParams(temp=0.0, max_tokens=8, stop=("STOP",))
         )
         assert engine._stop_filters.get(rid) is not None, "precondition: a filter exists"
         free_before = engine.n_free_seq_slots
@@ -283,12 +283,12 @@ def test_a_failed_advance_retains_no_stop_filter(model: ftm.Model) -> None:
         real_ctx.close()
 
 
-def test_a_normal_stop_sequence_request_retains_no_filter(model: ftm.Model) -> None:
+def test_a_normal_stop_sequence_request_retains_no_filter(model: bwr.Model) -> None:
     """The non-failure half: the map that holds the scanners is in-flight-only too."""
     engine = _fresh_engine(model)
     try:
         rid = engine.add_request(
-            "Count: 1 2", ftm.RequestParams(temp=0.0, max_tokens=3, stop=("ZZZZ",))
+            "Count: 1 2", bwr.RequestParams(temp=0.0, max_tokens=3, stop=("ZZZZ",))
         )
         assert rid in engine._stop_filters
         list(engine.drain())
@@ -303,7 +303,7 @@ def test_stop_filter_treats_a_bare_string_as_one_sequence() -> None:
     engine caller passing a bare string got a per-CHARACTER stop set and a turn that
     ended at the first 'a'. Unreachable from the wire (both routes call
     `normalize_stops` first), which is exactly why it needed pinning here."""
-    from freetoken_mac.engine.config import StopSequenceFilter
+    from bwr.engine.config import StopSequenceFilter
 
     f = StopSequenceFilter("abc")
     assert f.enabled is True
@@ -328,12 +328,12 @@ def test_stop_filter_treats_a_bare_string_as_one_sequence() -> None:
 
 
 @pytest.fixture(scope="module")
-def served(model: ftm.Model):
+def served(model: bwr.Model):
     tc = pytest.importorskip("fastapi.testclient")
-    from freetoken_mac.server.app import build_app
+    from bwr.server.app import build_app
 
     app = build_app(
-        model, ftm.EngineConfig(n_ctx=2048, n_batch=256, n_ubatch=256, n_seq_max=4, engine="metal")
+        model, bwr.EngineConfig(n_ctx=2048, n_batch=256, n_ubatch=256, n_seq_max=4, engine="metal")
     )
     with tc.TestClient(app) as c:
         yield app, c

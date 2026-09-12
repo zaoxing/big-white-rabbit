@@ -1,6 +1,6 @@
 """Hotlist tracker — LRU hit-rate validation (SPEC-ssd-hotlist.md, T11a).
 
-Unit tests are pure (no model). Integration uses FTM_MOE_MODEL-gated live
+Unit tests are pure (no model). Integration uses BWR_MOE_MODEL-gated live
 expert_activations() to prove determinism + LRU hit rates matching the
 probe's 0.76 @ K=32 / 0.91 @ K=64 on real traffic before any I/O.
 """
@@ -11,15 +11,15 @@ import os
 
 import pytest
 
-import freetoken_mac as ftm
-from freetoken_mac.engine import EngineConfig, MetalEngine
-from freetoken_mac.engine.hotlist import ExpertHotlist
+import bwr as bwr
+from bwr.engine import EngineConfig, MetalEngine
+from bwr.engine.hotlist import ExpertHotlist
 
-MODEL_PATH = os.environ.get("FTM_MOE_MODEL")
+MODEL_PATH = os.environ.get("BWR_MOE_MODEL")
 
 pytestmark_moe = pytest.mark.skipif(
     not MODEL_PATH or not os.path.exists(MODEL_PATH),
-    reason="set FTM_MOE_MODEL to a MoE .gguf path to run hotlist integration",
+    reason="set BWR_MOE_MODEL to a MoE .gguf path to run hotlist integration",
 )
 
 
@@ -80,10 +80,10 @@ def test_engine_hotlist_wiring() -> None:
         n_ctx=512, n_seq_max=1, record_experts=True,
         ssd_hotlist=True, ssd_hotlist_k=32, ssd_hotlist_top_k=8,
     )
-    model = ftm.Model(MODEL_PATH, ftm.ModelParams())
+    model = bwr.Model(MODEL_PATH, bwr.ModelParams())
     engine = MetalEngine(model, cfg)
     assert engine._hotlist is not None
-    rid = engine.add_request("Count: 1 2 3", ftm.RequestParams(max_tokens=8, stop_at_eog=False, temp=0.0))
+    rid = engine.add_request("Count: 1 2 3", bwr.RequestParams(max_tokens=8, stop_at_eog=False, temp=0.0))
     list(engine.drain())
     # Hotlist auto-fed: should have hits/misses, manual drain now empty
     assert engine._hotlist.hits + engine._hotlist.misses > 0
@@ -97,7 +97,7 @@ def test_hotlist_needs_recording() -> None:
         EngineConfig(n_ctx=512, n_seq_max=1, ssd_hotlist=True, record_experts=False).validate_hotlist()
     # Engine should also refuse at construction
     cfg = EngineConfig(n_ctx=512, n_seq_max=1, ssd_hotlist=True, record_experts=False)
-    model = ftm.Model(MODEL_PATH, ftm.ModelParams())
+    model = bwr.Model(MODEL_PATH, bwr.ModelParams())
     with pytest.raises(ValueError, match="record_experts"):
         MetalEngine(model, cfg)
     model.close()
@@ -105,17 +105,17 @@ def test_hotlist_needs_recording() -> None:
 
 @pytest.mark.skipif(
     not MODEL_PATH or not os.path.exists(MODEL_PATH),
-    reason="set FTM_MOE_MODEL to a MoE .gguf path to run hotlist integration",
+    reason="set BWR_MOE_MODEL to a MoE .gguf path to run hotlist integration",
 )
 def test_live_determinism() -> None:
     """Same prompt -> same routing -> same hotlist sequence."""
     cfg = EngineConfig(n_ctx=512, n_seq_max=1, record_experts=True)
 
     def run() -> ExpertHotlist:
-        model = ftm.Model(MODEL_PATH, ftm.ModelParams())
+        model = bwr.Model(MODEL_PATH, bwr.ModelParams())
         engine = MetalEngine(model, cfg)
         hl = ExpertHotlist(k_per_layer=32, top_k=8)
-        rid = engine.add_request("Count: 1 2 3", ftm.RequestParams(max_tokens=16, stop_at_eog=False, temp=0.0))
+        rid = engine.add_request("Count: 1 2 3", bwr.RequestParams(max_tokens=16, stop_at_eog=False, temp=0.0))
         # Drain in steps so we interleave hotlist updates with decodes (real usage)
         while engine._states:
             for out in engine.step():
@@ -135,16 +135,16 @@ def test_live_determinism() -> None:
 
 @pytest.mark.skipif(
     not MODEL_PATH or not os.path.exists(MODEL_PATH),
-    reason="set FTM_MOE_MODEL to a MoE .gguf path to run hotlist integration",
+    reason="set BWR_MOE_MODEL to a MoE .gguf path to run hotlist integration",
 )
 def test_live_hit_rate_bands() -> None:
     """Reproduce probe's LRU hit rates on live traffic (the streaming gate)."""
-    model = ftm.Model(MODEL_PATH, ftm.ModelParams())
+    model = bwr.Model(MODEL_PATH, bwr.ModelParams())
     cfg = EngineConfig(n_ctx=512, n_seq_max=1, record_experts=True)
     engine = MetalEngine(model, cfg)
     rid = engine.add_request(
         "Explain what a mixture-of-experts model is, briefly.",
-        ftm.RequestParams(max_tokens=100, stop_at_eog=False, temp=0.0),
+        bwr.RequestParams(max_tokens=100, stop_at_eog=False, temp=0.0),
     )
     # Per-step drain: Context clears frames each decode, so collecting once
     # at the end would see only the last token's 48 frames.

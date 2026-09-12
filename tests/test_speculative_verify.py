@@ -1,6 +1,6 @@
 """Speculative verify path (SPEC-speculative-ngram.md, T3).
 
-Needs FTM_TEST_MODEL like the other engine tests; skips without it.
+Needs BWR_TEST_MODEL like the other engine tests; skips without it.
 
 The prompt is a long periodic digit run: its bigrams/trigrams seed the draft
 table at admission, and a greedy continuation of a counting run repeats them,
@@ -15,14 +15,14 @@ import os
 
 import pytest
 
-import freetoken_mac as ftm
-from freetoken_mac.engine import EngineConfig, MetalEngine, RequestParams
+import bwr as bwr
+from bwr.engine import EngineConfig, MetalEngine, RequestParams
 
-MODEL_PATH = os.environ.get("FTM_TEST_MODEL")
+MODEL_PATH = os.environ.get("BWR_TEST_MODEL")
 
 pytestmark = pytest.mark.skipif(
     not MODEL_PATH or not os.path.exists(MODEL_PATH),
-    reason="set FTM_TEST_MODEL to a .gguf path to run speculation tests",
+    reason="set BWR_TEST_MODEL to a .gguf path to run speculation tests",
 )
 
 # Periodic at the token level (single digits tokenise singly): the table seeded
@@ -37,11 +37,11 @@ def greedy(max_tokens: int = N_TOKENS) -> RequestParams:
 
 
 @pytest.fixture(scope="module")
-def model() -> ftm.Model:
-    return ftm.Model(MODEL_PATH, ftm.ModelParams())
+def model() -> bwr.Model:
+    return bwr.Model(MODEL_PATH, bwr.ModelParams())
 
 
-def run(model: ftm.Model, speculative: bool) -> MetalEngine:
+def run(model: bwr.Model, speculative: bool) -> MetalEngine:
     config = EngineConfig(n_ctx=512, n_seq_max=1, speculative=speculative)
     engine = MetalEngine(model, config)
     engine.add_request(PROMPT, greedy())
@@ -49,7 +49,7 @@ def run(model: ftm.Model, speculative: bool) -> MetalEngine:
     return engine
 
 
-def test_spec_on_off_byte_identical(model: ftm.Model) -> None:
+def test_spec_on_off_byte_identical(model: bwr.Model) -> None:
     """The invariant: speculation must be byte-identical to the plain path."""
     plain = run(model, False)
     spec = run(model, True)
@@ -59,7 +59,7 @@ def test_spec_on_off_byte_identical(model: ftm.Model) -> None:
     assert spec.state(spec_id).finish_reason == plain.state(plain_id).finish_reason
 
 
-def test_speculative_never_uses_more_decodes(model: ftm.Model) -> None:
+def test_speculative_never_uses_more_decodes(model: bwr.Model) -> None:
     """Every verify step accepts >= 1 new token (a mismatch still yields the
     sampled token), so speculation cannot need more decodes for the same
     tokens. ``spec_drafted > 0`` proves drafts actually packed -- without it
@@ -72,7 +72,7 @@ def test_speculative_never_uses_more_decodes(model: ftm.Model) -> None:
     assert rate is not None and 0.0 <= rate <= 1.0
 
 
-def test_nongreedy_request_ignores_speculation(model: ftm.Model) -> None:
+def test_nongreedy_request_ignores_speculation(model: bwr.Model) -> None:
     """temp > 0 takes the plain path even with the flag on: no drafts packed,
     request still completes normally."""
     config = EngineConfig(n_ctx=512, n_seq_max=1, speculative=True)
@@ -87,7 +87,7 @@ def test_nongreedy_request_ignores_speculation(model: ftm.Model) -> None:
     assert engine.state(rid).finish_reason == "length"
 
 
-def test_speculation_defaults_off(model: ftm.Model) -> None:
+def test_speculation_defaults_off(model: bwr.Model) -> None:
     """A default engine never drafts and reports no acceptance rate."""
     assert EngineConfig().speculative is False
     assert EngineConfig().spec_max_drafts == 4
@@ -98,7 +98,7 @@ def test_speculation_defaults_off(model: ftm.Model) -> None:
     assert engine.spec_acceptance_rate is None
 
 
-def test_negative_spec_max_drafts_rejected(model: ftm.Model) -> None:
+def test_negative_spec_max_drafts_rejected(model: bwr.Model) -> None:
     """Fail fast at construction, before allocating a context."""
     with pytest.raises(ValueError, match="spec_max_drafts"):
         MetalEngine(model, EngineConfig(spec_max_drafts=-1))
@@ -128,7 +128,7 @@ class _WrongTable:
 
 
 def test_all_wrong_drafts_still_identical(
-    model: ftm.Model, monkeypatch: pytest.MonkeyPatch
+    model: bwr.Model, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Maximum adversity: drafts packed every step, zero accepted. Output must
     still equal the plain run, decode-for-decode (each step accepts exactly the
@@ -146,7 +146,7 @@ def test_all_wrong_drafts_still_identical(
         for i, tok in enumerate(hist)
     }
 
-    from freetoken_mac.engine import metal_engine as engine_module
+    from bwr.engine import metal_engine as engine_module
 
     monkeypatch.setattr(
         engine_module, "NgramTable", lambda *args, **kwargs: _WrongTable(wrong)
@@ -167,7 +167,7 @@ def test_all_wrong_drafts_still_identical(
 
 
 def test_speculative_engine_on_attention_needs_no_snapshots(
-    model: ftm.Model,
+    model: bwr.Model,
 ) -> None:
     """The attention test model passes the capability gate either way, and its
     readback is 0: llama.cpp clamps n_rs_seq on architectures without

@@ -1,13 +1,13 @@
 ---
 name: Bug report
-about: Report a bug in FreeToken-Mac
+about: Report a bug in Big White Rabbit
 ---
 
 ## Expected
 
 ## Actual
 
-## Reproduce (`FTM_TEST_MODEL=... pytest ...`)
+## Reproduce (`BWR_TEST_MODEL=... pytest ...`)
 
 ## Impact
 

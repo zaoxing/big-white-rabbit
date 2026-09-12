@@ -1,6 +1,6 @@
 """MoE router recording (SPEC-residency.md, T10b).
 
-Needs FTM_MOE_MODEL pointing at a GGUF with expert tensors; skips without
+Needs BWR_MOE_MODEL pointing at a GGUF with expert tensors; skips without
 it. What is asserted: flag-off default, frame shape + softmax exactness
 (rows sum to 1 -- proving the callback reads real distributions, not
 garbage), determinism across runs, consume-on-read, identical outputs with
@@ -15,14 +15,14 @@ import os
 
 import pytest
 
-import freetoken_mac as ftm
-from freetoken_mac.engine import EngineConfig, MetalEngine, RequestParams
+import bwr as bwr
+from bwr.engine import EngineConfig, MetalEngine, RequestParams
 
-MODEL_PATH = os.environ.get("FTM_MOE_MODEL")
+MODEL_PATH = os.environ.get("BWR_MOE_MODEL")
 
 pytestmark = pytest.mark.skipif(
     not MODEL_PATH or not os.path.exists(MODEL_PATH),
-    reason="set FTM_MOE_MODEL to a MoE .gguf path to run residency tests",
+    reason="set BWR_MOE_MODEL to a MoE .gguf path to run residency tests",
 )
 
 PROMPT = "Count: 1 2 3"
@@ -46,8 +46,8 @@ def greedy(max_tokens: int = N_TOKENS) -> RequestParams:
 
 
 @pytest.fixture(scope="module")
-def model() -> ftm.Model:
-    return ftm.Model(MODEL_PATH, ftm.ModelParams())
+def model() -> bwr.Model:
+    return bwr.Model(MODEL_PATH, bwr.ModelParams())
 
 
 def run(engine: MetalEngine, prompt: str = PROMPT) -> int:
@@ -65,16 +65,16 @@ def top1_per_layer(frames: list[dict]) -> dict[int, list[int]]:
     return out
 
 
-def test_recording_defaults_off(model: ftm.Model) -> None:
+def test_recording_defaults_off(model: bwr.Model) -> None:
     assert EngineConfig().record_experts is False
-    assert ftm.ContextParams().record_experts is False
+    assert bwr.ContextParams().record_experts is False
     engine = MetalEngine(model, plain_config())
     rid = run(engine)
     assert engine.tokens_of(rid) is not None
     assert engine.expert_activations(rid) == []
 
 
-def test_frames_shape_and_softmax(model: ftm.Model) -> None:
+def test_frames_shape_and_softmax(model: bwr.Model) -> None:
     engine = MetalEngine(model, recording_config())
     rid = run(engine)
     frames = engine.expert_activations(rid)
@@ -92,7 +92,7 @@ def test_frames_shape_and_softmax(model: ftm.Model) -> None:
     assert len(widths) == 1, "one shared expert count"
 
 
-def test_deterministic_routing(model: ftm.Model) -> None:
+def test_deterministic_routing(model: bwr.Model) -> None:
     first = MetalEngine(model, recording_config())
     rid_first = run(first, PROMPT)
     second = MetalEngine(model, recording_config())
@@ -102,14 +102,14 @@ def test_deterministic_routing(model: ftm.Model) -> None:
     )
 
 
-def test_consume_semantics(model: ftm.Model) -> None:
+def test_consume_semantics(model: bwr.Model) -> None:
     engine = MetalEngine(model, recording_config())
     rid = run(engine)
     assert engine.expert_activations(rid) != []
     assert engine.expert_activations(rid) == []
 
 
-def test_recording_preserves_outputs(model: ftm.Model) -> None:
+def test_recording_preserves_outputs(model: bwr.Model) -> None:
     """The callback splits every MoE layer's batch: prove the split changes
     nothing observable (identical tokens + reason vs a silent engine)."""
     rec = MetalEngine(model, recording_config())
@@ -120,12 +120,12 @@ def test_recording_preserves_outputs(model: ftm.Model) -> None:
     assert rec.state(rid_rec).finish_reason == plain.state(rid_plain).finish_reason
 
 
-def test_multi_seq_refused(model: ftm.Model) -> None:
+def test_multi_seq_refused(model: bwr.Model) -> None:
     with pytest.raises(ValueError, match="n_seq_max"):
         MetalEngine(model, recording_config(n_seq_max=2))
 
 
-def test_unknown_request_rejected(model: ftm.Model) -> None:
+def test_unknown_request_rejected(model: bwr.Model) -> None:
     engine = MetalEngine(model, recording_config())
     with pytest.raises(KeyError):
         engine.expert_activations(999)

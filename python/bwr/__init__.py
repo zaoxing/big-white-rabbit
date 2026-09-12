@@ -1,14 +1,14 @@
-"""FreeToken-Mac: edge-native MoE serving on Apple Silicon.
+"""Big White Rabbit: edge-native MoE serving on Apple Silicon.
 
 Phase 0 surface: load a GGUF model onto the Metal backend and generate from it.
-Phase 1 adds ``freetoken_mac.engine``: N requests interleaved through one
+Phase 1 adds ``bwr.engine``: N requests interleaved through one
 ``llama_decode`` per step behind a pluggable ``AdmissionPolicy``. The
-control-plane layer (``freetoken_mac.server``) arrives in Phase 2.
+control-plane layer (``bwr.server``) arrives in Phase 2.
 """
 
 from __future__ import annotations
 
-from ._freetoken_metal import (  # noqa: F401
+from ._bwr_metal import (  # noqa: F401
     Batch,
     Context,
     ContextParams,

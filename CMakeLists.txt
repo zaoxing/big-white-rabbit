@@ -1,16 +1,16 @@
 cmake_minimum_required(VERSION 3.21)
-project(freetoken_mac LANGUAGES C CXX)
+project(big_white_rabbit LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 if (NOT APPLE)
-    message(FATAL_ERROR "FreeToken-Mac targets Apple Silicon; build llama.cpp directly on other platforms.")
+    message(FATAL_ERROR "Big White Rabbit targets Apple Silicon; build llama.cpp directly on other platforms.")
 endif()
 
 # --- llama.cpp / ggml with the Metal backend ------------------------------------------
-# Static link llama/ggml straight into _freetoken_metal.so. A shared build leaves the
+# Static link llama/ggml straight into _bwr_metal.so. A shared build leaves the
 # extension chasing @rpath/libllama.0.dylib, which the wheel does not ship -- and on a
 # machine with conda on PATH that rpath resolves into the conda prefix and fails to load.
 # One self-contained .so avoids shipping dylibs and rewriting install_name entirely.
@@ -39,14 +39,14 @@ add_subdirectory(third_party/llama.cpp EXCLUDE_FROM_ALL)
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(pybind11 CONFIG REQUIRED)
 
-pybind11_add_module(_freetoken_metal
+pybind11_add_module(_bwr_metal
     csrc/module.cpp
     csrc/model.cpp
     csrc/context.cpp
     csrc/batch.cpp
 )
 
-target_link_libraries(_freetoken_metal PRIVATE llama ggml)
-target_compile_options(_freetoken_metal PRIVATE -Wall -Wextra)
+target_link_libraries(_bwr_metal PRIVATE llama ggml)
+target_compile_options(_bwr_metal PRIVATE -Wall -Wextra)
 
-install(TARGETS _freetoken_metal DESTINATION freetoken_mac)
+install(TARGETS _bwr_metal DESTINATION bwr)

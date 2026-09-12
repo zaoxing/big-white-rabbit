@@ -25,13 +25,13 @@ import os
 
 import pytest
 
-import freetoken_mac as ftm
+import bwr as bwr
 
-MODEL_PATH = os.environ.get("FTM_TEST_MODEL")
+MODEL_PATH = os.environ.get("BWR_TEST_MODEL")
 
 pytestmark = pytest.mark.skipif(
     not MODEL_PATH or not os.path.exists(MODEL_PATH),
-    reason="set FTM_TEST_MODEL to a .gguf path to run these",
+    reason="set BWR_TEST_MODEL to a .gguf path to run these",
 )
 
 # Two slots is enough to prove the DoS: with a leak, three bad requests exhaust the pool.
@@ -39,8 +39,8 @@ N_SEQ_MAX = 2
 
 
 @pytest.fixture(scope="module")
-def model() -> ftm.Model:
-    m = ftm.Model(MODEL_PATH, ftm.ModelParams())
+def model() -> bwr.Model:
+    m = bwr.Model(MODEL_PATH, bwr.ModelParams())
     yield m
     # Release the weights before interpreter exit or ggml's Metal device destructor
     # aborts the process (exit 134). See docs/llamacpp-notes.md.
@@ -48,13 +48,13 @@ def model() -> ftm.Model:
 
 
 @pytest.fixture(scope="module")
-def client(model: ftm.Model):
+def client(model: bwr.Model):
     tc = pytest.importorskip("fastapi.testclient")
-    from freetoken_mac.server.app import build_app
+    from bwr.server.app import build_app
 
     app = build_app(
         model,
-        ftm.EngineConfig(n_ctx=1024, n_batch=256, n_ubatch=256, n_seq_max=N_SEQ_MAX, engine="metal"),
+        bwr.EngineConfig(n_ctx=1024, n_batch=256, n_ubatch=256, n_seq_max=N_SEQ_MAX, engine="metal"),
     )
     with tc.TestClient(app) as c:
         yield c
@@ -186,7 +186,7 @@ class _Boom(Exception):
     pass
 
 
-class _ExplodingParams(ftm.RequestParams):
+class _ExplodingParams(bwr.RequestParams):
     """Stands in for any future line added between popping the seq_id and registering
     the RequestState: the slot must come back whatever the exception is."""
 
@@ -197,14 +197,14 @@ class _ExplodingParams(ftm.RequestParams):
 @pytest.mark.parametrize(
     "params_factory, expected",
     [
-        (lambda: ftm.RequestParams(seed=-1, max_tokens=4), TypeError),
-        (lambda: ftm.RequestParams(top_k=2**40, max_tokens=4), TypeError),
+        (lambda: bwr.RequestParams(seed=-1, max_tokens=4), TypeError),
+        (lambda: bwr.RequestParams(top_k=2**40, max_tokens=4), TypeError),
         (lambda: _ExplodingParams(max_tokens=4), _Boom),
     ],
 )
-def test_add_request_is_atomic_on_failure(model: ftm.Model, params_factory, expected) -> None:
-    eng = ftm.MetalEngine(
-        model, ftm.EngineConfig(n_ctx=512, n_batch=256, n_ubatch=256, n_seq_max=N_SEQ_MAX)
+def test_add_request_is_atomic_on_failure(model: bwr.Model, params_factory, expected) -> None:
+    eng = bwr.MetalEngine(
+        model, bwr.EngineConfig(n_ctx=512, n_batch=256, n_ubatch=256, n_seq_max=N_SEQ_MAX)
     )
     try:
         before = eng.n_free_seq_slots
@@ -215,7 +215,7 @@ def test_add_request_is_atomic_on_failure(model: ftm.Model, params_factory, expe
                 eng.add_request("Hi", params_factory())
             assert eng.n_free_seq_slots == before, "add_request leaked a seq_id"
         # The pool is still usable afterwards.
-        eng.add_request("Hi", ftm.RequestParams(max_tokens=4))
+        eng.add_request("Hi", bwr.RequestParams(max_tokens=4))
         assert eng.n_free_seq_slots == before - 1
     finally:
         eng.ctx.close()

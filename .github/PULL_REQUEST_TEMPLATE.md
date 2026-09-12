@@ -6,7 +6,7 @@
 
 ## Tests
 
-- [ ] `FTM_TEST_MODEL=models/qwen2.5-0.5b-instruct-q4_k_m.gguf ./.venv/bin/python -m pytest tests/ -q` green (add `FTM_MLX_MODEL=<dir>` / `FTM_MOE_MODEL=<file>` to cover those paths)
+- [ ] `BWR_TEST_MODEL=models/qwen2.5-0.5b-instruct-q4_k_m.gguf ./.venv/bin/python -m pytest tests/ -q` green (add `BWR_MLX_MODEL=<dir>` / `BWR_MOE_MODEL=<file>` to cover those paths)
 
 ## Safety
 

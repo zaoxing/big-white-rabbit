@@ -57,7 +57,7 @@ no distribution.
 ## Testing strategy
 
 - Unit: `LRU(K)` eviction, `byte->K` conversion, `hit_rate` empty.
-- Integration (30B, `FTM_MOE_MODEL`-gated): deterministic routing ->
+- Integration (30B, `BWR_MOE_MODEL`-gated): deterministic routing ->
   deterministic hotlist, `K=64` hit `>0.85` on 100-token run, miss count
   matches `L1` reuse distance.
 

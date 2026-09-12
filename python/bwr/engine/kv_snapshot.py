@@ -4,7 +4,7 @@ In-memory uses `memory_seq_cp` / `memory_seq_rm` to snapshot a seq's KV
 to a reserved snapshot seq, and restore by copying back. No new C++,
 single-seq only (like record_experts), `n_seq_max >= 2` required.
 Disk persistence (T12b) saves the stashed prompt/output/n_pos to
-`~/.freetoken-metal/kv/` as JSON; on load after restart the KV is rebuilt
+`~/.big-white-rabbit/kv/` as JSON; on load after restart the KV is rebuilt
 via re-prefill (slow but correct). T12c adds true KV serialization via
 `llama_state_seq_get_data` / `set_data` to `kv_dir/<name>.bin` for
 `O(ms)` restore without re-prefill.
@@ -36,7 +36,7 @@ class KVSnapStore:
     `n_seq_max >= 2`). `save` copies `seq 0`'s KV there and stashes
     prompt/output/n_pos; `load` copies back and returns the stashed
     state for the caller to rehydrate a RequestState. Disk files live in
-    `~/.freetoken-metal/kv/` as `<name>.json` + `<name>.bin` (T12c binary)
+    `~/.big-white-rabbit/kv/` as `<name>.json` + `<name>.bin` (T12c binary)
     and survive restarts — `bin` restores via `state_seq_set_data` in
     `O(ms)` without re-prefill, otherwise falls back to re-prefill.
     """
@@ -51,7 +51,7 @@ class KVSnapStore:
                 f"snapshot_seq {snapshot_seq} >= n_seq_max {self.engine.ctx.n_seq_max}; "
                 f"need n_seq_max >= 2 for KV snapshots"
             )
-        self.kv_dir = Path(kv_dir) if kv_dir else Path.home() / ".freetoken-metal" / "kv"
+        self.kv_dir = Path(kv_dir) if kv_dir else Path.home() / ".big-white-rabbit" / "kv"
         self.kv_dir.mkdir(parents=True, exist_ok=True)
         self._snaps: dict[str, _Snap] = {}
         # Reserve snapshot seq: remove from free list so normal admissions

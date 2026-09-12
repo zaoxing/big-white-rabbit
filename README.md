@@ -1,4 +1,4 @@
-# FreeToken-Metal
+# Big White Rabbit
 
 The whole motivation is to explore the optimizations of model serving engine for Apple Silicon.
 
@@ -68,7 +68,7 @@ metadata reading, and the radix prefix-cache bookkeeping behind semantic-anchor 
 
 ```bash
 # 1. Clone (submodules carry llama.cpp for the metal backend)
-git clone --recurse-submodules <this repo> && cd FreeToken-Mac
+git clone --recurse-submodules <this repo> && cd big-white-rabbit
 
 # 2. Fresh venv with a new pip (system pip is routinely too old)
 python3.11 -m venv .venv && source .venv/bin/activate
@@ -86,8 +86,8 @@ curl -L -o models/qwen3-30b.gguf \
   https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF/resolve/main/Qwen3-30B-A3B-Q4_K_M.gguf
 
 # 4. Serve (default port 1919)
-ftm serve -m qwen38-mlx-4bit --ctx-size 8192
-# metal instead: ftm serve -m models/qwen3-30b.gguf --engine metal --n-seq-max 8
+bwr serve -m qwen38-mlx-4bit --ctx-size 8192
+# metal instead: bwr serve -m models/qwen3-30b.gguf --engine metal --n-seq-max 8
 
 # 5. Check it answers
 curl http://127.0.0.1:1919/health
@@ -95,7 +95,7 @@ curl http://127.0.0.1:1919/v1/chat/completions \
   -H 'Content-Type: application/json' -d \
   '{"model":"local","messages":[{"role":"user","content":"hi"}],"max_tokens":64}'
 ```
-ftm info     -m /path/to/model.gguf
+bwr info     -m /path/to/model.gguf
 ```
 
 Point either an OpenAI or an Anthropic client at it — one server, one loaded model,

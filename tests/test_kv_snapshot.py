@@ -1,6 +1,6 @@
 """KV snapshot primitive — in-memory + disk (T12a/b/c).
 
-Needs FTM_MOE_MODEL or any model; uses n_seq_max=2 so a snapshot seq exists.
+Needs BWR_MOE_MODEL or any model; uses n_seq_max=2 so a snapshot seq exists.
 What is asserted: save while in-flight preserves KV, load restores and
 generates identical continuation vs plain re-prefill, list/delete, and
 T12c binary KV restores across engine restart without re-prefill.
@@ -12,15 +12,15 @@ import os
 
 import pytest
 
-import freetoken_mac as ftm
-from freetoken_mac.engine import EngineConfig, MetalEngine
-from freetoken_mac.engine.kv_snapshot import KVSnapStore
+import bwr as bwr
+from bwr.engine import EngineConfig, MetalEngine
+from bwr.engine.kv_snapshot import KVSnapStore
 
-MODEL_PATH = os.environ.get("FTM_MOE_MODEL") or os.environ.get("FTM_TEST_MODEL")
+MODEL_PATH = os.environ.get("BWR_MOE_MODEL") or os.environ.get("BWR_TEST_MODEL")
 
 pytestmark = pytest.mark.skipif(
     not MODEL_PATH or not os.path.exists(MODEL_PATH),
-    reason="set FTM_MOE_MODEL or FTM_TEST_MODEL to a .gguf path",
+    reason="set BWR_MOE_MODEL or BWR_TEST_MODEL to a .gguf path",
 )
 
 PROMPT = "Count: 1 2 3"
@@ -30,11 +30,11 @@ N_TOKENS = 8
 def test_snapshot_save_load_identical(tmp_path) -> None:
     """Save prompt KV after prefill, restore into new request, identical output."""
     cfg = EngineConfig(n_ctx=512, n_seq_max=2, record_experts=False)
-    engine = MetalEngine(ftm.Model(MODEL_PATH, ftm.ModelParams()), cfg)
+    engine = MetalEngine(bwr.Model(MODEL_PATH, bwr.ModelParams()), cfg)
     store = KVSnapStore(engine, kv_dir=tmp_path)
 
     # First request: prefill one step, snapshot, then drain to get reference output
-    rid = engine.add_request(PROMPT, ftm.RequestParams(max_tokens=N_TOKENS, stop_at_eog=False, temp=0.0))
+    rid = engine.add_request(PROMPT, bwr.RequestParams(max_tokens=N_TOKENS, stop_at_eog=False, temp=0.0))
     engine.step()  # prefill
     store.save("snap", rid)
     ref_out = list(engine.drain())
@@ -52,9 +52,9 @@ def test_snapshot_save_load_identical(tmp_path) -> None:
 
 def test_snapshot_list_delete(tmp_path) -> None:
     cfg = EngineConfig(n_ctx=512, n_seq_max=2)
-    engine = MetalEngine(ftm.Model(MODEL_PATH, ftm.ModelParams()), cfg)
+    engine = MetalEngine(bwr.Model(MODEL_PATH, bwr.ModelParams()), cfg)
     store = KVSnapStore(engine, kv_dir=tmp_path)
-    rid = engine.add_request(PROMPT, ftm.RequestParams(max_tokens=4, stop_at_eog=False, temp=0.0))
+    rid = engine.add_request(PROMPT, bwr.RequestParams(max_tokens=4, stop_at_eog=False, temp=0.0))
     engine.step()
     store.save("a", rid)
     assert "a" in store.list()
@@ -67,7 +67,7 @@ def test_snapshot_list_delete(tmp_path) -> None:
 
 def test_snapshot_needs_spare_seq() -> None:
     cfg = EngineConfig(n_ctx=512, n_seq_max=1)
-    engine = MetalEngine(ftm.Model(MODEL_PATH, ftm.ModelParams()), cfg)
+    engine = MetalEngine(bwr.Model(MODEL_PATH, bwr.ModelParams()), cfg)
     with pytest.raises(ValueError, match="n_seq_max"):
         KVSnapStore(engine)
 
@@ -75,13 +75,13 @@ def test_snapshot_needs_spare_seq() -> None:
 def test_snapshot_disk_roundtrip(tmp_path) -> None:
     """Disk persistence survives engine restart (T12b re-prefill or T12c binary)."""
     cfg = EngineConfig(n_ctx=512, n_seq_max=2)
-    engine = MetalEngine(ftm.Model(MODEL_PATH, ftm.ModelParams()), cfg)
+    engine = MetalEngine(bwr.Model(MODEL_PATH, bwr.ModelParams()), cfg)
     store = KVSnapStore(engine, kv_dir=tmp_path)
-    rid = engine.add_request(PROMPT, ftm.RequestParams(max_tokens=4, stop_at_eog=False, temp=0.0))
+    rid = engine.add_request(PROMPT, bwr.RequestParams(max_tokens=4, stop_at_eog=False, temp=0.0))
     engine.step()
     store.save("disk", rid)
     # New engine, same dir, no in-memory snapshot
-    engine2 = MetalEngine(ftm.Model(MODEL_PATH, ftm.ModelParams()), cfg)
+    engine2 = MetalEngine(bwr.Model(MODEL_PATH, bwr.ModelParams()), cfg)
     store2 = KVSnapStore(engine2, kv_dir=tmp_path)
     assert "disk" in store2.list()
     rid2 = store2.load("disk")
@@ -94,11 +94,11 @@ def test_snapshot_disk_roundtrip(tmp_path) -> None:
 def test_snapshot_binary_roundtrip_identical(tmp_path) -> None:
     """T12c: binary KV restores identical tokens across restart without re-prefill."""
     cfg = EngineConfig(n_ctx=512, n_seq_max=2, record_experts=False)
-    engine = MetalEngine(ftm.Model(MODEL_PATH, ftm.ModelParams()), cfg)
+    engine = MetalEngine(bwr.Model(MODEL_PATH, bwr.ModelParams()), cfg)
     store = KVSnapStore(engine, kv_dir=tmp_path)
 
     # Reference: prefill + snapshot + drain
-    rid = engine.add_request(PROMPT, ftm.RequestParams(max_tokens=N_TOKENS, stop_at_eog=False, temp=0.0))
+    rid = engine.add_request(PROMPT, bwr.RequestParams(max_tokens=N_TOKENS, stop_at_eog=False, temp=0.0))
     engine.step()
     store.save("snap_bin", rid)
     # bin should exist (T12c)
@@ -108,7 +108,7 @@ def test_snapshot_binary_roundtrip_identical(tmp_path) -> None:
     ref_tokens = engine.tokens_of(rid)
 
     # New engine, same dir — load via binary
-    engine2 = MetalEngine(ftm.Model(MODEL_PATH, ftm.ModelParams()), cfg)
+    engine2 = MetalEngine(bwr.Model(MODEL_PATH, bwr.ModelParams()), cfg)
     store2 = KVSnapStore(engine2, kv_dir=tmp_path)
     assert "snap_bin" in store2.list()
     rid2 = store2.load("snap_bin")

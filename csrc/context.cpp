@@ -9,7 +9,7 @@
 #include <time.h>
 #include <unistd.h>
 
-namespace ftm {
+namespace bwr {
 
 Context::Context(std::shared_ptr<Model> model, const ContextParams & cp, const SamplerParams & sp)
     : model_(std::move(model)) {
@@ -550,4 +550,4 @@ bool Context::fetch_expert(int layer, int expert_idx) {
     return n == (ssize_t) slab;
 }
 
-} // namespace ftm
+} // namespace bwr

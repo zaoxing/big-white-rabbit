@@ -20,15 +20,15 @@ import os
 
 import pytest
 
-import freetoken_mac as ftm
+import bwr as bwr
 
-MODEL_PATH = os.environ.get("FTM_TEST_MODEL")
-pytestmark = pytest.mark.skipif(not MODEL_PATH or not os.path.exists(MODEL_PATH), reason="FTM_TEST_MODEL required")
+MODEL_PATH = os.environ.get("BWR_TEST_MODEL")
+pytestmark = pytest.mark.skipif(not MODEL_PATH or not os.path.exists(MODEL_PATH), reason="BWR_TEST_MODEL required")
 
 
 @pytest.fixture(scope="module")
 def model():
-    m = ftm.Model(MODEL_PATH, ftm.ModelParams())
+    m = bwr.Model(MODEL_PATH, bwr.ModelParams())
     yield m
     m.close()
 
@@ -36,9 +36,9 @@ def model():
 @pytest.fixture(scope="module")
 def served(model):
     tc = pytest.importorskip("fastapi.testclient")
-    from freetoken_mac.server.app import build_app
+    from bwr.server.app import build_app
 
-    app = build_app(model, ftm.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=2, engine="metal"))
+    app = build_app(model, bwr.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=2, engine="metal"))
     with tc.TestClient(app) as c:
         yield app, c
     assert app.state.engine.engine.ctx.closed
@@ -105,7 +105,7 @@ def test_sampling_params_are_accepted(client) -> None:
 
 def test_anthropic_streaming_tool_use_path(served, monkeypatch) -> None:
     """Anthropic streaming must emit tool_use blocks (emit_call path)."""
-    from freetoken_mac.engine.metal_engine import StepOutput
+    from bwr.engine.metal_engine import StepOutput
 
     app, client = served
 
@@ -148,10 +148,10 @@ def test_anthropic_streaming_tool_use_path(served, monkeypatch) -> None:
 def test_503_at_capacity_via_http_concurrency(model) -> None:
     """Engine at capacity must 503, not 500, and concurrent HTTP must be handled."""
     tc = pytest.importorskip("fastapi.testclient")
-    from freetoken_mac.server.app import build_app
+    from bwr.server.app import build_app
 
     # n_seq_max=1 so second concurrent admission exhausts slots
-    app = build_app(model, ftm.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=1, engine="metal"))
+    app = build_app(model, bwr.EngineConfig(n_ctx=4096, n_batch=512, n_ubatch=512, n_seq_max=1, engine="metal"))
     with tc.TestClient(app) as client:
         # Occupy the single slot with a long generation that won't finish instantly
         # Use a direct engine submit to hold the slot, then hit HTTP.
@@ -206,7 +206,7 @@ def test_tool_history_without_tools_declaration(client) -> None:
 
 def test_openai_content_parts_image_dropped(client) -> None:
     """image_url parts must be dropped, not stringified into the prompt."""
-    from freetoken_mac.server.common import text_from_blocks
+    from bwr.server.common import text_from_blocks
 
     # Unit level: the shared helper is the single source for dropping.
     assert text_from_blocks([{"type": "text", "text": "Count "}, {"type": "text", "text": "to 3"}]) == "Count to 3"
