@@ -50,7 +50,8 @@ def test_top_k_routing() -> None:
     assert set(hl.resident(0)) == {0, 2}
     # Next token routes [1,2] -> 2 is hit, 1 is miss
     result = hl.update([{"layer": 0, "tokens": [[0.1, 0.4, 0.3]]}])
-    assert result == {"hits": 1, "misses": 1}
+    assert result["hits"] == 1 and result["misses"] == 1
+    assert (0, 1) in result["missed"]  # type: ignore[index]
 
 
 def test_clear_and_validation() -> None:
