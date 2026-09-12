@@ -288,8 +288,9 @@ class MetalEngine:
         self._hotlist: ExpertHotlist | None = None
         if self.config.ssd_hotlist:
             self.config.validate_hotlist()
+            k = self.config.effective_hotlist_k(self.model.n_layer)
             self._hotlist = ExpertHotlist(
-                k_per_layer=self.config.ssd_hotlist_k,
+                k_per_layer=k,
                 top_k=self.config.ssd_hotlist_top_k,
             )
         self._next_request_id = 0

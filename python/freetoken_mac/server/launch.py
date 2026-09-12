@@ -28,6 +28,7 @@ def serve(
     record_experts: bool = False,
     ssd_hotlist: bool = False,
     ssd_hotlist_k: int = 32,
+    ssd_hotlist_bytes: int | None = None,
     engine: str = "metal",
 ) -> None:
     import uvicorn
@@ -44,6 +45,7 @@ def serve(
         record_experts=record_experts,
         ssd_hotlist=ssd_hotlist,
         ssd_hotlist_k=ssd_hotlist_k,
+        ssd_hotlist_bytes=ssd_hotlist_bytes,
         engine=engine,
     )
     if engine == "mlx":
