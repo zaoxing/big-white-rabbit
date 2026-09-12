@@ -117,7 +117,7 @@ backend serves requests from independent generators (batching parity is follow-u
 
 | Recipe | Model | Engine | `n_ctx` | `tok/s` | Notes |
 |---|---|---|---|---|---|
-| `bwr serve --recipe 27b` | `Qwen3.8-27B-MLX-4bit` `qwen35` hybrid 64L `248320` | `mlx` | `8192` | `13.2` | `4bit 15G` fallback `Q4_K_M` `9.85` `metal`; `spec`/`prefix-cache` off (hybrid) |
+| `bwr serve --recipe 27b` | `Qwen3.8-27B-MLX-4bit` `qwen35` hybrid 64L `248320` | `mlx` | `8192` | `13.2` | `4bit 15G` fallback `Q4_K_M` `9.85` `metal`; `spec` off (hybrid); `mlx_prefix_cache` on (repeat 2K TTFT 28s→0.07s, parity exact) |
 | `bwr serve --recipe 30b` | `Qwen3-30B-A3B-Q4_K_M.gguf` `qwen3moe` 48L `151936` | `metal` | `8192` `n_seq_max=2 kv_unified` | `57.15` | `vs MLX 15.97` `3.5×`; `spec +5%` rep (`38.12 vs 36.35`), `prefix-cache 123.22s→0.62s 200×` on `21k`, `MLX fallback` `models/Qwen3-30B-A3B-4bit` |
 
 Recipes are `models/recipes/27b.json` / `30b.json` (JSON `EngineConfig` + `model` + `bench`); `bwr serve --recipe 27b --port 1919` or `bwr serve --recipe models/recipes/30b.json` (explicit `CLI` wins; `--receipt` is a deprecated alias).
