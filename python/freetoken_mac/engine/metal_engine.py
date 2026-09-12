@@ -635,7 +635,9 @@ class MetalEngine:
             if spare <= 0:
                 break
             req = self._states.get(request_id)
-            if req is None or req.finished or req.params.temp > 0:
+            if req is None or req.finished:
+                continue
+            if req.params.temp > 0 and not self.config.speculative_opportunistic:
                 continue
             table = self._spec_tables.get(request_id)
             if table is None:
@@ -667,7 +669,9 @@ class MetalEngine:
             if spare <= 0:
                 break
             req = self._states.get(request_id)
-            if req is None or req.finished or req.params.temp > 0:
+            if req is None or req.finished:
+                continue
+            if req.params.temp > 0 and not self.config.speculative_opportunistic:
                 continue
             assert self.draft is not None
             room = self.ctx.n_ctx_seq - req.n_pos - 1
