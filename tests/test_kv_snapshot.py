@@ -26,11 +26,11 @@ PROMPT = "Count: 1 2 3"
 N_TOKENS = 8
 
 
-def test_snapshot_save_load_identical() -> None:
+def test_snapshot_save_load_identical(tmp_path) -> None:
     """Save prompt KV after prefill, restore into new request, identical output."""
     cfg = EngineConfig(n_ctx=512, n_seq_max=2, record_experts=False)
     engine = MetalEngine(ftm.Model(MODEL_PATH, ftm.ModelParams()), cfg)
-    store = KVSnapStore(engine)
+    store = KVSnapStore(engine, kv_dir=tmp_path)
 
     # First request: prefill one step, snapshot, then drain to get reference output
     rid = engine.add_request(PROMPT, ftm.RequestParams(max_tokens=N_TOKENS, stop_at_eog=False, temp=0.0))
@@ -49,10 +49,10 @@ def test_snapshot_save_load_identical() -> None:
     assert engine.state(rid2).finish_reason == engine.state(rid).finish_reason
 
 
-def test_snapshot_list_delete() -> None:
+def test_snapshot_list_delete(tmp_path) -> None:
     cfg = EngineConfig(n_ctx=512, n_seq_max=2)
     engine = MetalEngine(ftm.Model(MODEL_PATH, ftm.ModelParams()), cfg)
-    store = KVSnapStore(engine)
+    store = KVSnapStore(engine, kv_dir=tmp_path)
     rid = engine.add_request(PROMPT, ftm.RequestParams(max_tokens=4, stop_at_eog=False, temp=0.0))
     engine.step()
     store.save("a", rid)
@@ -69,3 +69,24 @@ def test_snapshot_needs_spare_seq() -> None:
     engine = MetalEngine(ftm.Model(MODEL_PATH, ftm.ModelParams()), cfg)
     with pytest.raises(ValueError, match="n_seq_max"):
         KVSnapStore(engine)
+
+
+def test_snapshot_disk_roundtrip(tmp_path) -> None:
+    """Disk persistence survives engine restart (slow path via re-prefill)."""
+    cfg = EngineConfig(n_ctx=512, n_seq_max=2)
+    engine = MetalEngine(ftm.Model(MODEL_PATH, ftm.ModelParams()), cfg)
+    store = KVSnapStore(engine, kv_dir=tmp_path)
+    rid = engine.add_request(PROMPT, ftm.RequestParams(max_tokens=4, stop_at_eog=False, temp=0.0))
+    engine.step()
+    store.save("disk", rid)
+    # New engine, same dir, no in-memory snapshot
+    engine2 = MetalEngine(ftm.Model(MODEL_PATH, ftm.ModelParams()), cfg)
+    store2 = KVSnapStore(engine2, kv_dir=tmp_path)
+    assert "disk" in store2.list()
+    rid2 = store2.load("disk")
+    list(engine2.drain())
+    # Disk load does re-prefill, but output should still be deterministic
+    # (temp=0, same prompt) — we just check it completes, not identical to
+    # in-memory fast path which would have had extra output tokens stashed
+    assert len(engine2.tokens_of(rid2)) == 4
+    assert engine2.state(rid2).finish_reason == "length"
