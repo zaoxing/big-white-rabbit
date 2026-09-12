@@ -1,0 +1,15 @@
+{
+  "comment": "27B dense qwen35 hybrid — MLX is 13.2 tok/s vs Metal 9.85; spec hurts, prefix-cache not for hybrid",
+  "model": "models/Qwen3.8-27B-MLX-4bit",
+  "engine": "mlx",
+  "n_ctx": 8192,
+  "n_batch": 512,
+  "n_seq_max": 1,
+  "speculative": false,
+  "prefix_cache": false,
+  "kv_unified": false,
+  "flash_attn": true,
+  "fallback_gguf": "models/Qwen3.8-27B-Q4_K_M.gguf",
+  "fallback_engine": "metal",
+  "bench": {"engine":"mlx","tok_s":13.2,"vs_metal":9.85,"n_ctx":8192}
+}

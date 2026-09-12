@@ -12,8 +12,8 @@ import sys
 import time
 
 
-def _add_model_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--model", "-m", required=True, help="model weights: a .gguf file for --engine metal, a directory for --engine mlx")
+def _add_model_args(p: argparse.ArgumentParser, required: bool = True) -> None:
+    p.add_argument("--model", "-m", required=required, help="model weights: a .gguf file for --engine metal, a directory for --engine mlx")
     p.add_argument("--n-gpu-layers", type=int, default=-1,
                    help="layers on the Metal backend (-1 = all, the unified-memory default)")
     p.add_argument("--ctx-size", "-c", type=int, default=4096, help="context length")
@@ -22,7 +22,7 @@ def _add_model_args(p: argparse.ArgumentParser) -> None:
 
 def _cmd_info(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="bwr info", description="Print GGUF/model metadata.")
-    _add_model_args(ap)
+    _add_model_args(ap, required=True)
     args = ap.parse_args(argv)
 
     from . import Model, ModelParams
@@ -50,7 +50,7 @@ def _cmd_info(argv: list[str]) -> int:
 
 def _cmd_generate(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="bwr generate", description="Generate from a prompt.")
-    _add_model_args(ap)
+    _add_model_args(ap, required=True)
     ap.add_argument("--prompt", "-p", default="Explain what a mixture-of-experts model is, briefly.")
     ap.add_argument("--max-tokens", "-n", type=int, default=128)
     ap.add_argument("--temp", type=float, default=0.0, help="0 = greedy")
@@ -93,7 +93,9 @@ def _cmd_serve(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(
         prog="bwr serve", description="Serve an OpenAI-compatible API over a GGUF model."
     )
-    _add_model_args(ap)
+    _add_model_args(ap, required=False)
+    ap.add_argument("--receipt", default=None, metavar="PATH|27b|30b",
+                    help="ready-to-use receipt: path to JSON or shorthand '27b' (MLX 13.2 tok/s) / '30b' (Metal 57 tok/s, prefix-cache 200× on 21k); see models/receipts/")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=1919)
     ap.add_argument("--n-batch", type=int, default=512)
@@ -123,6 +125,41 @@ def _cmd_serve(argv: list[str]) -> int:
                     help="inference backend (default mlx; 'metal' serves a GGUF via llama.cpp)")
     ap.add_argument("--log-level", default="info")
     args = ap.parse_args(argv)
+
+    # --receipt shorthand: 27b → models/receipts/27b.json, 30b → 30b.json
+    if args.receipt is not None:
+        import json, pathlib
+        receipt_path = args.receipt
+        if receipt_path in ("27b", "27B", "qwen27b", "27"):
+            receipt_path = "models/receipts/27b.json"
+        elif receipt_path in ("30b", "30B", "qwen30b", "30", "moe"):
+            receipt_path = "models/receipts/30b.json"
+        p = pathlib.Path(receipt_path)
+        if not p.exists():
+            print(f"bwr: receipt {args.receipt!r} not found at {p}", file=sys.stderr)
+            return 2
+        data = json.loads(p.read_text())
+        def _set_if_default(name, receipt_key=None):
+            rk = receipt_key or name
+            if rk in data:
+                setattr(args, name, data[rk])
+        for k in ("model", "engine", "ctx_size", "n_ctx"):
+            if k in data:
+                if k == "n_ctx":
+                    args.ctx_size = data[k]
+                else:
+                    setattr(args, k if k != "model" else "model", data[k])
+        if "n_ctx" in data:
+            args.ctx_size = data["n_ctx"]
+        for k in ("n_batch", "n_seq_max", "kv_unified", "speculative", "spec_max_drafts", "prefix_cache", "prefix_cache_pins", "prefix_cache_min_tokens"):
+            if k in data:
+                setattr(args, k, data[k])
+        if "n_batch" in data:
+            args.n_batch = data["n_batch"]
+
+    if args.model is None:
+        print("bwr serve: --model is required unless --receipt is given", file=sys.stderr)
+        return 2
 
     try:
         from .server.launch import serve

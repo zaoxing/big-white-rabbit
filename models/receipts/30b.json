@@ -1,0 +1,18 @@
+{
+  "comment": "30B-A3B MoE qwen3moe 48L 128 experts — Metal 57.15 tok/s vs MLX 15.97; spec +5% on rep, prefix-cache 200x on 21k",
+  "model": "models/Qwen3-30B-A3B-Q4_K_M.gguf",
+  "engine": "metal",
+  "n_ctx": 8192,
+  "n_batch": 512,
+  "n_seq_max": 2,
+  "kv_unified": true,
+  "speculative": true,
+  "spec_max_drafts": 4,
+  "prefix_cache": true,
+  "prefix_cache_pins": 2,
+  "prefix_cache_min_tokens": 256,
+  "flash_attn": true,
+  "mlx_fallback": "models/Qwen3-30B-A3B-4bit",
+  "mlx_engine": "mlx",
+  "bench": {"engine":"metal","tok_s":57.15,"vs_mlx":15.97,"prefix_cache_first":"123.22s","prefix_cache_hit":"0.62s","spec_rep":"38.12 vs 36.35"}
+}
