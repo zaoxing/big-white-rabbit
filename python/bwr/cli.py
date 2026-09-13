@@ -20,6 +20,72 @@ def _add_model_args(p: argparse.ArgumentParser, required: bool = True) -> None:
     p.add_argument("--no-flash-attn", action="store_true", help="disable flash attention")
 
 
+def _add_adapt_arg(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--no-adapt", action="store_true",
+                   help="disable host memory-fit adaptation of --ctx-size "
+                        "(see bwr host)")
+
+
+def _ctx_explicit(argv: list[str]) -> bool:
+    """Was --ctx-size/-c passed on this command line (explicit wins over adapt)?"""
+    return any(t == "-c" or t == "--ctx-size" or t.startswith("--ctx-size=")
+               for t in argv)
+
+
+def _adapt_ctx_or_die(args, explicit_ctx: bool, prog: str) -> int | None:
+    """Clamp args.ctx_size to host RAM. None = proceed, int = exit code."""
+    if getattr(args, "no_adapt", False):
+        return None
+    from .host import HostFitError, adapt_ctx, model_bytes, probe
+
+    size = model_bytes(args.model)
+    if not size:
+        return None  # missing weights: the load step reports that itself
+    try:
+        res = adapt_ctx(args.ctx_size, size, probe(), explicit=explicit_ctx)
+    except HostFitError as exc:
+        print(f"bwr {prog}: {exc}", file=sys.stderr)
+        return 2
+    args.ctx_size = res.n_ctx
+    for note in res.notes:
+        print(f"bwr {prog}: {note}", file=sys.stderr)
+    return None
+
+
+def _cmd_host(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(
+        prog="bwr host",
+        description="Show detected Mac model/chip/GPU/RAM and the ctx fit "
+                    "for a model (what --no-adapt disables).",
+    )
+    ap.add_argument("--model", "-m", default=None,
+                    help="weights to check fit for (.gguf file or MLX dir)")
+    ap.add_argument("--ctx-size", "-c", type=int, default=4096,
+                    help="context length to check (default 4096)")
+    args = ap.parse_args(argv)
+
+    from .host import HostFitError, adapt_ctx, describe, model_bytes, probe
+
+    caps = probe()
+    print(describe(caps))
+    if args.model is None:
+        return 0
+    size = model_bytes(args.model)
+    print(f"model         : {args.model} ({size / 1024**3:.2f} GiB)")
+    try:
+        res = adapt_ctx(args.ctx_size, size, caps)
+    except HostFitError as exc:
+        print(f"fit           : NO — {exc}")
+        return 2
+    if res.n_ctx == args.ctx_size:
+        print(f"fit           : yes at n_ctx {args.ctx_size}")
+    else:
+        print(f"fit           : n_ctx {args.ctx_size}->{res.n_ctx} recommended")
+        for note in res.notes:
+            print(f"                  {note}")
+    return 0
+
+
 def _cmd_info(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="bwr info", description="Print GGUF/model metadata.")
     _add_model_args(ap, required=True)
@@ -54,7 +120,12 @@ def _cmd_generate(argv: list[str]) -> int:
     ap.add_argument("--prompt", "-p", default="Explain what a mixture-of-experts model is, briefly.")
     ap.add_argument("--max-tokens", "-n", type=int, default=128)
     ap.add_argument("--temp", type=float, default=0.0, help="0 = greedy")
+    _add_adapt_arg(ap)
     args = ap.parse_args(argv)
+
+    rc = _adapt_ctx_or_die(args, _ctx_explicit(argv), "generate")
+    if rc is not None:
+        return rc
 
     from . import Context, ContextParams, Model, ModelParams, SamplerParams, generate
 
@@ -141,6 +212,7 @@ def _cmd_serve(argv: list[str]) -> int:
     ap.add_argument("--engine", default="mlx", choices=("metal", "mlx"),
                     help="inference backend (default mlx; 'metal' serves a GGUF via llama.cpp)")
     ap.add_argument("--log-level", default="info")
+    _add_adapt_arg(ap)
     args = ap.parse_args(argv)
 
     # Explicitly-passed flags beat recipe values (fix: recipe used to
@@ -202,6 +274,10 @@ def _cmd_serve(argv: list[str]) -> int:
     if args.model is None:
         print("bwr serve: --model is required unless --recipe/--receipt is given", file=sys.stderr)
         return 2
+
+    adapt_rc = _adapt_ctx_or_die(args, "ctx_size" in explicit, "serve")
+    if adapt_rc is not None:
+        return adapt_rc
 
     # Draft-model speculation and n-gram speculation are mutually exclusive
     # (MetalEngine refuses both). An explicitly passed --draft-model is the
@@ -293,6 +369,7 @@ def _cmd_tune(argv: list[str]) -> int:
     ap.add_argument("--prompt", default=None,
                     help="probe prompt (default: repetitive loop text; n-gram needs repeats)")
     ap.add_argument("--n-batch", type=int, default=512)
+    _add_adapt_arg(ap)
     args = ap.parse_args(argv)
 
     from .tune import DEFAULT_PROMPT, bench_one, parse_depths, pick_winner, render
@@ -305,6 +382,10 @@ def _cmd_tune(argv: list[str]) -> int:
     if args.reps < 1 or args.max_tokens < 1:
         print("bwr tune: --reps and --max-tokens must be >= 1", file=sys.stderr)
         return 2
+
+    adapt_rc = _adapt_ctx_or_die(args, _ctx_explicit(argv), "tune")
+    if adapt_rc is not None:
+        return adapt_rc
 
     if args.engine == "mlx":
         import pathlib
@@ -337,6 +418,7 @@ def _cmd_tune(argv: list[str]) -> int:
 
 _COMMANDS = {
     "info": _cmd_info,
+    "host": _cmd_host,
     "generate": _cmd_generate,
     "serve": _cmd_serve,
     "tune": _cmd_tune,

@@ -79,6 +79,7 @@ curl http://127.0.0.1:1919/v1/chat/completions \
   '{"model":"local","messages":[{"role":"user","content":"hi"}],"max_tokens":64}'
 ```
 bwr info     -m /path/to/model.gguf
+bwr host     -m /path/to/model.gguf -c 8192   # Mac/chip/GPU/RAM probe + ctx fit (serve/generate/tune auto-adapt this; --no-adapt disables)
 ```
 
 Point either an OpenAI or an Anthropic client at it — one server, one loaded model,
