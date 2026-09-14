@@ -96,6 +96,9 @@ class _MLXContext:
         eng._spec_tables.clear()
         eng._spec_ok.clear()
         eng._spec_stats.clear()
+        eng._mtp_caches.clear()
+        eng._mtp_hidden.clear()
+        eng._mtp = None
         eng._prefix.clear()
         eng._model = None
         eng._tokenizer = None
@@ -142,9 +145,37 @@ class MLXEngine:
         config: EngineConfig | None = None,
     ) -> None:
         self.config = config or EngineConfig()
+        # MTP-head speculation (SPEC-mlx-mtp-draft.md). Mutually exclusive
+        # with n-gram: both feed the one verify path, so allowing both would
+        # silently pick a winner. Validated BEFORE load() so a misconfigured
+        # run fails in milliseconds instead of after pulling in ~19 GB of
+        # weights (and with an error naming the real problem, not a missing
+        # config.json).
+        self._mtp = None
+        self._mtp_caches: dict[int, list] = {}
+        self._mtp_hidden: dict[int, object] = {}
+        if self.config.mlx_mtp:
+            from . import mtp as _mtp_mod
+
+            if self.config.speculative:
+                raise ValueError(
+                    "mlx_mtp and speculative are mutually exclusive "
+                    "(both source drafts for the same verify path)"
+                )
+            if not _mtp_mod.available(model_path):
+                raise ValueError(
+                    f"mlx_mtp needs an {_mtp_mod.SIDECAR} sidecar next to the "
+                    f"weights; {model_path} has none"
+                )
         load, _ = _require_mlx()
         self._model, self._tokenizer = load(model_path)
         self.model_path = model_path
+        if self.config.mlx_mtp:
+            from . import mtp as _mtp_mod
+
+            depth = self.config.mlx_mtp_depth or _mtp_mod.default_depth(model_path)
+            target = getattr(self._model, "language_model", self._model)
+            self._mtp = _mtp_mod.MTPDraft(target, model_path, depth)
         self.ctx = _MLXContext(self)
         self._streams: dict[int, Iterator] = {}
         self._stop_filters: dict[int, StopSequenceFilter] = {}
@@ -233,6 +264,8 @@ class MLXEngine:
         self._caches.pop(req.request_id, None)
         self._spec_ok.pop(req.request_id, None)
         self._spec_stats.pop(req.request_id, None)
+        self._mtp_caches.pop(req.request_id, None)
+        self._mtp_hidden.pop(req.request_id, None)
         self._states.pop(req.request_id, None)
         self._retired[req.request_id] = req
         while len(self._retired) > self._retired_limit:
@@ -337,12 +370,16 @@ class MLXEngine:
             self.config.speculative
             or self.config.mlx_kv_bits is not None
             or self.config.mlx_prefix_cache
+            or self._mtp is not None
         ):
             # Seed with the prompt (same rule as MetalEngine); the cache
-            # itself is built lazily on the first spec step.
-            table = NgramTable()
-            table.update_stream(tokens)
-            self._spec_tables[request_id] = table
+            # itself is built lazily on the first spec step. The MTP head
+            # sources its own drafts, so it allocates no table -- only the
+            # per-request counters the verify path shares.
+            if self._mtp is None:
+                table = NgramTable()
+                table.update_stream(tokens)
+                self._spec_tables[request_id] = table
             self._spec_ok[request_id] = True
             self._spec_stats[request_id] = [0, 0, 0]
         return request_id
@@ -407,6 +444,8 @@ class MLXEngine:
             return True
         if self.config.mlx_prefix_cache:
             return True
+        if self._mtp is not None and req.params.temp <= 0:
+            return True
         return bool(self.config.speculative and req.params.temp <= 0)
 
     def _prefix_hit(self, req: RequestState) -> list[StepOutput] | None:
@@ -425,6 +464,13 @@ class MLXEngine:
         cache, base = deepcopy(entry[0]), entry[1]
         self.prefix_hits += 1
         self._caches[req.request_id] = cache
+        if self._mtp is not None:
+            # The head cache is part of the snapshot: restoring only the trunk
+            # would leave the head cold and silently halve draft quality
+            # (0.906 -> 0.479 at depth 1). hidden rows are immutable mx
+            # arrays, so only the cache needs copying.
+            self._mtp_caches[req.request_id] = deepcopy(entry[2])
+            self._mtp_hidden[req.request_id] = entry[3]
         req.next_token = base
         return [self._feed(req, base, self._tokenizer.decode([base]))]
 
@@ -435,9 +481,85 @@ class MLXEngine:
         key = tuple(req.prompt)
         if key in self._prefix:
             return
-        self._prefix[key] = (deepcopy(cache), base)
+        mcache = self._mtp_caches.get(req.request_id)
+        self._prefix[key] = (
+            deepcopy(cache),
+            base,
+            deepcopy(mcache) if mcache is not None else None,
+            self._mtp_hidden.get(req.request_id),
+        )
         while len(self._prefix) > max(1, self.config.mlx_prefix_cache_size):
             self._prefix.popitem(last=False)
+
+    def _snapshot_cache(self, cache: list) -> list:
+        """A rewind point for one verify round, at effectively zero cost.
+
+        mlx arrays are immutable and `ArraysCache.__setitem__` REPLACES the
+        entry rather than writing through it, so copying the list of
+        references captures the recurrent state without copying the 154 MB
+        behind it. `KVCache`/`QuantizedKVCache` append into a preallocated
+        buffer, so their rewind is just the offset -- anything past it is
+        overwritten on the next write.
+
+        This is what makes the hybrid trunk rewindable after all: the module
+        docstring's "no hybrid rewind" held for a full re-prefill, not for a
+        snapshot/restore. Rejection costs O(matched) re-fed tokens instead of
+        O(prompt + output).
+        """
+        from mlx_lm.models.cache import ArraysCache
+
+        return [
+            ("arrays", list(c.cache)) if isinstance(c, ArraysCache)
+            else ("offset", c.offset)
+            for c in cache
+        ]
+
+    def _restore_cache(self, cache: list, snap: list) -> None:
+        """Undo one verify round's writes. Exact: same arrays, same offsets."""
+        from mlx_lm.models.cache import ArraysCache
+
+        for c, (kind, val) in zip(cache, snap):
+            if kind == "arrays":
+                c.cache = list(val)
+            else:
+                c.offset = val
+
+    def _prefill_owned(self, rid: int, tokens: Sequence[int]) -> object:
+        """Prefill `tokens` into a fresh owned cache; return the last logits.
+
+        Shared by `_start_spec` and `_refill` so the trunk cache and the MTP
+        head cache can never drift apart -- every rebuild of one rebuilds the
+        other, chunked identically.
+
+        Position convention the head depends on: after this returns, the head
+        cache holds pairs `(hidden[p], tokens[p+1])` for `p` in
+        `0..len(tokens)-2`, and `_mtp_hidden[rid]` is the hidden row at
+        `len(tokens)-1` -- exactly the row that pairs with the token the
+        caller is about to make `next_token`. `propose` then appends that
+        pair as position `len(tokens)-1` and trims it back.
+        """
+        mx = _mx()
+        cache = self._make_cache()
+        mtp = self._mtp
+        mcache = mtp.make_cache() if mtp is not None else None
+        logits = hidden = None
+        for i in range(0, len(tokens), _PREFILL_CHUNK):
+            chunk = list(tokens[i : i + _PREFILL_CHUNK])
+            if mtp is None:
+                logits = self._model(mx.array(chunk)[None], cache=cache)
+                continue
+            logits, hidden = mtp.trunk_forward(mx.array(chunk)[None], cache)
+            # Pairs for this chunk's positions; the final position of the
+            # whole sequence has no successor yet, so it is left for propose.
+            nxt = list(tokens[i + 1 : i + len(chunk) + 1])
+            if nxt:
+                mtp.accept(mcache, hidden[:, : len(nxt), :], nxt)
+        mx.eval(logits)
+        self._caches[rid] = cache
+        if mtp is not None:
+            self._mtp_caches[rid] = mcache
+            self._mtp_hidden[rid] = hidden[:, -1:, :]
+        return logits
 
     def _start_spec(self, req: RequestState) -> list[StepOutput]:
         """Prefill the prompt into an owned cache and emit the continuation.
@@ -455,14 +577,8 @@ class MLXEngine:
                 if hit is not None:
                     return hit
             mx = _mx()
-            cache = self._make_cache()
-            tokens = req.prompt
-            logits = None
-            for i in range(0, len(tokens), _PREFILL_CHUNK):
-                chunk = tokens[i : i + _PREFILL_CHUNK]
-                logits = self._model(mx.array(chunk)[None], cache=cache)
-            mx.eval(logits)
-            self._caches[req.request_id] = cache
+            logits = self._prefill_owned(req.request_id, req.prompt)
+            cache = self._caches[req.request_id]
             base = int(mx.argmax(logits[0, -1]).item())
             req.next_token = base
             out = [self._feed(req, base, self._tokenizer.decode([base]))]
@@ -476,22 +592,25 @@ class MLXEngine:
                 pass
             raise
 
-    def _refill(self, req: RequestState) -> None:
+    def _refill(self, req: RequestState, extra: Sequence[int] = ()) -> None:
         """Rebuild the cache exactly: re-feed prompt + accepted tokens.
 
         The mismatch path: the evaluated batch advanced the cache past the
         accepted prefix and ArraysCache cannot rewind, so replay from scratch.
         Exact by construction -- same tokens, same order, same positions.
+
+        `extra` is the tokens this verify round accepted but has not fed yet.
+        The caller runs `_feed` AFTER this, so `req.output_tokens` still lags
+        by exactly those; without them the rebuilt cache is short by `matched`
+        and every later step decodes against a truncated history (greedy
+        speculative output then diverges from greedy AR -- the invariant the
+        whole verify path exists to preserve). The engine-wide invariant is
+        `cache == prompt + output_tokens[:-1]`, `next_token == output[-1]`;
+        passing `accepted[:-1]` here is what keeps it true once `_feed` runs.
         """
         mx = _mx()
-        cache = self._make_cache()
-        tokens = req.prompt + req.output_tokens
-        logits = None
-        for i in range(0, len(tokens), _PREFILL_CHUNK):
-            chunk = tokens[i : i + _PREFILL_CHUNK]
-            logits = self._model(mx.array(chunk)[None], cache=cache)
-        mx.eval(logits)
-        self._caches[req.request_id] = cache
+        tokens = req.prompt + req.output_tokens + list(extra)
+        logits = self._prefill_owned(req.request_id, tokens)
         req.next_token = int(mx.argmax(logits[0, -1]).item())
 
     def _verify(self, req: RequestState) -> list[StepOutput]:
@@ -508,7 +627,7 @@ class MLXEngine:
 
     def _verify_rows(self, req: RequestState) -> list[StepOutput]:
         mx = _mx()
-        table = self._spec_tables[req.request_id]
+        table = self._spec_tables.get(req.request_id)
         remaining = req.params.max_tokens - req.n_generated
         # Drafting only when speculation is on; mlx_kv_bits alone rides the
         # manual loop with zero drafts (single-row forward, same as plain
@@ -519,15 +638,41 @@ class MLXEngine:
             else 0
         )
         allow = max(0, min(max_drafts, remaining - 1))
-        history = req.prompt + req.output_tokens
-        context = history[-(table.order - 1) :] if table.order > 1 else []
-        drafts = table.predict(context, allow)
         base = req.next_token
         assert base is not None
+        rid = req.request_id
+        mtp = self._mtp
+        if mtp is not None:
+            # The head drafts from the trunk hidden row that pairs with
+            # `base`; propose() trims its own speculative entries, so the
+            # head cache still mirrors only confirmed tokens on return.
+            allow = max(0, min(mtp.depth, remaining - 1))
+            h_prev = self._mtp_hidden[rid]
+            drafts = mtp.propose(self._mtp_caches[rid], h_prev, base, allow)
+        elif table is None or allow == 0:
+            # kv-bits-only manual loop: no drafting, single-row forward.
+            drafts = []
+        else:
+            history = req.prompt + req.output_tokens
+            context = history[-(table.order - 1) :] if table.order > 1 else []
+            drafts = table.predict(context, allow)
         rows = [base, *drafts]
-        logits = self._model(
-            mx.array(rows)[None], cache=self._caches[req.request_id]
+        # Rewind point for the mismatch path (free: see _snapshot_cache).
+        # Only worth taking when there is something to reject.
+        snap = self._snapshot_cache(self._caches[rid]) if drafts else None
+        msnap = (
+            self._mtp_caches[rid][0].offset
+            if (mtp is not None and drafts)
+            else None
         )
+        if mtp is not None:
+            logits, hidden = mtp.trunk_forward(
+                mx.array(rows)[None], self._caches[rid]
+            )
+        else:
+            logits = self._model(
+                mx.array(rows)[None], cache=self._caches[rid]
+            )
         mx.eval(logits)
         self.spec_drafted += len(drafts)
         stats = self._spec_stats[req.request_id]
@@ -551,7 +696,42 @@ class MLXEngine:
             # the cache already holds exactly the accepted stream.
             self.spec_recomputes += 1
             stats[2] += 1
-            self._refill(req)
+            # Rejection: rewind to the pre-forward state and re-feed only the
+            # accepted prefix (matched + 1 tokens), rather than re-prefilling
+            # prompt + output. accepted[:-1] are confirmed but not yet fed;
+            # accepted[-1] becomes next_token via the _feed loop below and
+            # must stay unconsumed, so it is NOT re-fed here.
+            self._restore_cache(self._caches[rid], snap)
+            keep = rows[: len(accepted)]
+            n = len(keep) - 1
+            if mtp is not None:
+                self._mtp_caches[rid][0].offset = msnap
+                logits, hidden = mtp.trunk_forward(
+                    mx.array(keep)[None], self._caches[rid]
+                )
+                mx.eval(logits)
+                h_seq = h_prev
+                if n:
+                    h_seq = mx.concatenate([h_prev, hidden[:, :n, :]], axis=1)
+                mtp.accept(self._mtp_caches[rid], h_seq, [base, *accepted[:n]])
+                self._mtp_hidden[rid] = hidden[:, -1:, :]
+            else:
+                logits = self._model(
+                    mx.array(keep)[None], cache=self._caches[rid]
+                )
+                mx.eval(logits)
+        elif mtp is not None:
+            # Full match: the trunk cache already holds the accepted stream,
+            # so advance the head by the same span. Entries run from the
+            # position of `base` through the last accepted token's
+            # predecessor -- hence h_prev prepended and accepted[:-1] paired
+            # with the rows' own hidden states.
+            n = len(drafts)
+            h_seq = h_prev
+            if n:
+                h_seq = mx.concatenate([h_prev, hidden[:, :n, :]], axis=1)
+            mtp.accept(self._mtp_caches[rid], h_seq, [base, *accepted[:n]])
+            self._mtp_hidden[rid] = hidden[:, -1:, :]
         self._feed_table(req, accepted)
         drafted, accepted_n, recomputed = stats
         if (
