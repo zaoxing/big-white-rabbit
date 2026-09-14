@@ -102,3 +102,71 @@ def test_missing_model_without_recipe_fails(monkeypatch, rootdir):
     from bwr.cli import _cmd_serve
 
     assert _cmd_serve([]) == 2
+
+
+# -- MTP-head speculation (SPEC-mlx-mtp-draft.md) ----------------------------
+#
+# Same guard as the rest of this file: a knob that never reaches the engine is
+# worse than one that fails loudly. mlx_mtp is off by default because it is
+# output-identical but SLOWER on mlx-lm 0.31.3 (the trunk forward is linear in
+# rows), so these pin reachability, not a recommendation to enable it.
+
+
+def test_mlx_mtp_defaults_off(monkeypatch, rootdir, tmp_path):
+    rc, kw = _serve_kwargs(
+        monkeypatch, ["-m", str(tmp_path), "--engine", "mlx"]
+    )
+    assert rc == 0
+    assert kw["mlx_mtp"] is False
+    assert kw["mlx_mtp_depth"] == 0
+
+
+def test_mlx_mtp_flag_reaches_serve(monkeypatch, rootdir, tmp_path):
+    rc, kw = _serve_kwargs(
+        monkeypatch,
+        ["-m", str(tmp_path), "--engine", "mlx", "--mlx-mtp", "--mlx-mtp-depth", "2"],
+    )
+    assert rc == 0
+    assert kw["mlx_mtp"] is True
+    assert kw["mlx_mtp_depth"] == 2
+
+
+def test_mlx_mtp_recipe_keys_are_accepted(monkeypatch, rootdir, tmp_path):
+    """A recipe carrying mlx_mtp must not be rejected as an unknown key."""
+    recipe = tmp_path / "mtp.json"
+    recipe.write_text(
+        json.dumps(
+            {
+                "model": str(tmp_path),
+                "engine": "mlx",
+                "n_ctx": 4096,
+                "mlx_mtp": True,
+                "mlx_mtp_depth": 3,
+            }
+        )
+    )
+    rc, kw = _serve_kwargs(monkeypatch, ["--recipe", str(recipe)])
+    assert rc == 0, "recipe with mlx_mtp was rejected"
+    assert kw["mlx_mtp"] is True
+    assert kw["mlx_mtp_depth"] == 3
+
+
+def test_serve_accepts_every_kwarg_the_cli_passes(monkeypatch, rootdir, tmp_path):
+    """The mocked-serve tests above cannot see serve()'s real signature.
+
+    Regression: --mlx-mtp reached _cmd_serve and was forwarded to serve(),
+    which did not accept it -- every mocked test passed while the real server
+    died with TypeError on startup. Compare against the true signature.
+    """
+    import inspect
+
+    import bwr.server.launch as launch
+
+    real_params = set(inspect.signature(launch.serve).parameters)
+    _rc, kw = _serve_kwargs(
+        monkeypatch,
+        ["-m", str(tmp_path), "--engine", "mlx", "--mlx-mtp", "--mlx-mtp-depth", "2"],
+    )
+    passed = set(kw) - {"model"}  # model is positional
+    missing = sorted(passed - real_params)
+    assert not missing, f"serve() would TypeError on: {missing}"

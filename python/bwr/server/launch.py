@@ -33,6 +33,9 @@ def serve(
     mlx_prefix_cache: bool = False,
     mlx_prefix_cache_size: int = 2,
     mlx_kv_bits: int | None = None,
+    model_dir: str | None = None,
+    mlx_mtp: bool = False,
+    mlx_mtp_depth: int = 0,
     prefix_cache: bool = False,
     prefix_cache_pins: int = 2,
     prefix_cache_min_tokens: int = 256,
@@ -60,6 +63,8 @@ def serve(
         mlx_prefix_cache=mlx_prefix_cache,
         mlx_prefix_cache_size=mlx_prefix_cache_size,
         mlx_kv_bits=mlx_kv_bits,
+        mlx_mtp=mlx_mtp,
+        mlx_mtp_depth=mlx_mtp_depth,
         prefix_cache=prefix_cache,
         prefix_cache_pins=prefix_cache_pins,
         prefix_cache_min_tokens=prefix_cache_min_tokens,
@@ -69,6 +74,15 @@ def serve(
         ssd_hotlist_bytes=ssd_hotlist_bytes,
         engine=engine,
     )
+    if model_dir is not None:
+        # Pool mode: nothing is loaded until a request names a model, so this
+        # returns immediately even for a directory of 27B weights.
+        app = build_app(
+            None, config, served_model_name=served_model_name, model_dir=model_dir,
+        )
+        uvicorn.run(app, host=host, port=port, log_level=log_level, workers=1)
+        return
+
     if engine == "mlx":
         # model_path names an MLX weights directory here, not a GGUF: no
         # llama Model to load (MLXEngine loads it lazily itself).

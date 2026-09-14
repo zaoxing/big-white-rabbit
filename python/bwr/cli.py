@@ -36,6 +36,10 @@ def _adapt_ctx_or_die(args, explicit_ctx: bool, prog: str) -> int | None:
     """Clamp args.ctx_size to host RAM. None = proceed, int = exit code."""
     if getattr(args, "no_adapt", False):
         return None
+    if getattr(args, "model", None) is None:
+        # Pool mode: there is no single model to size against. Each engine
+        # adapts its own ctx when the pool loads it.
+        return None
     from .host import HostFitError, adapt_ctx, model_bytes, probe
 
     size = model_bytes(args.model)
@@ -185,6 +189,18 @@ def _cmd_serve(argv: list[str]) -> int:
                     help="n-gram speculative decoding (greedy only; +5-7%% on repetitive text)")
     ap.add_argument("--spec-max-drafts", type=int, default=4,
                     help="max n-gram drafts per step (4 tuned; 8 collapses acceptance)")
+    ap.add_argument("--model-dir", default=None, metavar="DIR",
+                    help="serve every model under DIR (multi-model pool, lazy load + "
+                         "LRU eviction; see engine/pool.py). Mutually exclusive with -m")
+    ap.add_argument("--mlx-mtp", action="store_true",
+                    help="MLX MTP-head speculation (needs an mtp.safetensors sidecar; "
+                         "SPEC-mlx-mtp-draft.md). Output-identical but MEASURED SLOWER "
+                         "than plain decode on mlx-lm 0.31.3 (11.4 AR vs 10.1 d1 / 8.7 "
+                         "d3 on 27B/M1 Max): the trunk forward is linear in rows, so "
+                         "verifying D+1 rows costs D+1 steps. Off by default.")
+    ap.add_argument("--mlx-mtp-depth", type=int, default=0,
+                    help="MTP draft depth (0 = the checkpoint's own mtp_depth_default, "
+                         "clamped to mtp_depth_max)")
     ap.add_argument("--mlx-prefix-cache", action="store_true",
                     help="MLX exact-prefix prompt cache: repeat prompts skip prefill "
                          "(agent-loop TTFT; 2K 28s->~1s measured)")
@@ -254,6 +270,7 @@ def _cmd_serve(argv: list[str]) -> int:
             "mlx_prefix_cache": "mlx_prefix_cache",
             "mlx_prefix_cache_size": "mlx_prefix_cache_size",
             "mlx_kv_bits": "mlx_kv_bits",
+            "mlx_mtp": "mlx_mtp", "mlx_mtp_depth": "mlx_mtp_depth",
             "comment": "", "bench": "", "fallback_gguf": "",
             "fallback_engine": "", "mlx_fallback": "", "mlx_engine": "",
         }
@@ -271,8 +288,13 @@ def _cmd_serve(argv: list[str]) -> int:
             else:
                 setattr(args, dest, data[k])
 
-    if args.model is None:
-        print("bwr serve: --model is required unless --recipe/--receipt is given", file=sys.stderr)
+    if args.model is not None and getattr(args, "model_dir", None) is not None:
+        print("bwr serve: --model and --model-dir are mutually exclusive "
+              "(one model, or a directory of them)", file=sys.stderr)
+        return 2
+    if args.model is None and getattr(args, "model_dir", None) is None:
+        print("bwr serve: --model is required unless --recipe/--receipt or "
+              "--model-dir is given", file=sys.stderr)
         return 2
 
     adapt_rc = _adapt_ctx_or_die(args, "ctx_size" in explicit, "serve")
@@ -339,6 +361,9 @@ def _cmd_serve(argv: list[str]) -> int:
         mlx_prefix_cache=args.mlx_prefix_cache,
         mlx_prefix_cache_size=args.mlx_prefix_cache_size,
         mlx_kv_bits=getattr(args, "mlx_kv_bits", None),
+        model_dir=getattr(args, "model_dir", None),
+        mlx_mtp=getattr(args, "mlx_mtp", False),
+        mlx_mtp_depth=getattr(args, "mlx_mtp_depth", 0),
         prefix_cache=args.prefix_cache,
         prefix_cache_pins=getattr(args, "prefix_cache_pins", 2),
         prefix_cache_min_tokens=getattr(args, "prefix_cache_min_tokens", 256),

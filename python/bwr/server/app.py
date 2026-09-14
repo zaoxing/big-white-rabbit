@@ -33,6 +33,7 @@ from ..engine.config import (
     normalize_stops,
 )
 from ..engine.metal_engine import MetalEngine
+from ..engine.pool import ModelPoolError
 from ..engine.mlx_engine import MLXEngine
 from .schemas import (
     ChatCompletion,
@@ -238,13 +239,32 @@ def build_app(
     served_model_name: str | None = None,
     draft_model: Model | None = None,
     mlx_model_path: str | None = None,
+    model_dir: str | None = None,
 ) -> FastAPI:
     config = config or EngineConfig()
-    if config.engine not in ("metal", "mlx"):
+    # Pool mode: `model_dir` replaces the single model/mlx_model_path pair.
+    # Engines load lazily per request, so startup does not pay for weights
+    # nobody has asked for yet (see engine/pool.py).
+    pool = None
+    if model_dir is not None:
+        if model is not None or mlx_model_path is not None:
+            raise ValueError(
+                "model_dir is mutually exclusive with model/mlx_model_path"
+            )
+        from ..engine.pool import ModelPool
+
+        pool = ModelPool(model_dir, config)
+    if pool is None and config.engine not in ("metal", "mlx"):
         raise ValueError(
             f"engine must be 'metal' or 'mlx'; got {config.engine!r}"
         )
-    if config.engine == "mlx":
+    if pool is not None:
+        engine = None
+        async_engine = None
+        renderer = None
+        ids = [m["id"] for m in pool.list()]
+        model_name = served_model_name or (ids[0] if ids else "none")
+    elif config.engine == "mlx":
         if draft_model is not None:
             raise ValueError("draft_model is a Metal-backend option; unset it with engine='mlx'")
         if mlx_model_path is None:
@@ -258,26 +278,69 @@ def build_app(
             raise ValueError("engine='metal' needs a loaded Model")
         engine = MetalEngine(model, config, draft_model=draft_model)
         model_name = served_model_name or model.meta_val("general.name") or "local"
-    # Prompt rendering + token counting go through whichever object owns a
-    # tokenizer: the llama Model, or the MLXEngine itself (same two methods).
-    renderer = model if model is not None else engine
-    async_engine = AsyncEngine(engine)
+    if pool is None:
+        # Prompt rendering + token counting go through whichever object owns a
+        # tokenizer: the llama Model, or the MLXEngine itself (same two methods).
+        renderer = model if model is not None else engine
+        async_engine = AsyncEngine(engine)
+
+    async def resolve(requested: str | None):
+        """(model_id, engine, renderer) for one request.
+
+        Constant in single-model mode; in pool mode this is where a load can
+        happen, so it is awaited inside the handler rather than captured at
+        registration.
+        """
+        if pool is None:
+            return model_name, async_engine, renderer
+        mid, eng = await pool.acquire(requested)
+        raw = pool.engine_for(mid)
+        # MetalEngine delegates tokenization to its Model; MLXEngine owns it.
+        return mid, eng, (getattr(raw, "model", None) or raw)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # The engine thread starts here rather than in build_app so it is bound to the
         # loop that will actually serve requests.
-        await async_engine.start()
+        if async_engine is not None:
+            await async_engine.start()
         try:
             yield
         finally:
-            await async_engine.stop()
+            if pool is not None:
+                await pool.stop_all()
+            if async_engine is not None:
+                await async_engine.stop()
 
     app = FastAPI(title="Big White Rabbit", lifespan=lifespan)
     app.state.engine = async_engine
+    app.state.pool = pool
+    app.state.resolve = resolve
+
+    # Web UI at /admin (derived from oMLX, Apache-2.0 -- see
+    # bwr/server/webui/__init__.py for provenance and changes). Optional: a
+    # trimmed install without jinja2 still serves the API.
+    try:
+        from .webui.routes import mount as _mount_webui
+
+        _mount_webui(app, engine, model_name, pool)
+        app.state.webui = True
+    except ImportError:  # noqa: BLE001 - jinja2/static deps absent; API still serves
+        app.state.webui = False
 
     @app.get("/health")
     async def health() -> dict[str, object]:
+        if pool is not None:
+            # Read-only: never triggers a load, so /health stays cheap even
+            # when nothing is resident.
+            return {
+                "status": "ok",
+                "mode": "pool",
+                "models": len(pool.list()),
+                "loaded": pool.loaded_ids,
+                "resident_bytes": pool.resident_bytes,
+                "budget_bytes": pool.budget_bytes,
+            }
         body: dict[str, object] = {
             "status": "ok",
             "model": model_name,
@@ -298,6 +361,8 @@ def build_app(
 
     @app.get("/v1/models")
     async def list_models() -> ModelList:
+        if pool is not None:
+            return ModelList(data=[ModelCard(id=m["id"]) for m in pool.list()])
         return ModelList(data=[ModelCard(id=model_name)])
 
     @app.post("/v1/chat/completions")
@@ -313,18 +378,23 @@ def build_app(
         if cap_error is not None:
             raise HTTPException(status_code=400, detail=cap_error)
 
-        prompt = _render_prompt(renderer, req)
+        try:
+            served, engine_r, renderer_r = await resolve(req.model)
+        except ModelPoolError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        prompt = _render_prompt(renderer_r, req)
         params = _request_params(req)
         known_tools = _parsing_names(req)
-        n_prompt = count_tokens(renderer, prompt)
-        request_id = await submit_request(async_engine, prompt, params)
+        n_prompt = count_tokens(renderer_r, prompt)
+        request_id = await submit_request(engine_r, prompt, params)
 
         if req.stream:
             return sse_response(
                 _sse(
-                    async_engine,
+                    engine_r,
                     request_id,
-                    model_name,
+                    served,
                     http_request,
                     known_tools,
                     params.stop,
@@ -341,9 +411,9 @@ def build_app(
             parts: list[str] = []
             n_completion = 0
             finish_reason = "stop"
-            async for out in async_engine.stream(request_id):
+            async for out in engine_r.stream(request_id):
                 if await http_request.is_disconnected():
-                    await async_engine.cancel(request_id)
+                    await engine_r.cancel(request_id)
                     break
                 # The engine's natural-end retirement (eog) yields an empty
                 # piece and does not append to output_tokens / n_generated,
@@ -365,7 +435,7 @@ def build_app(
             else:
                 parts.append(stopper.flush())
         finally:
-            async_engine.release(request_id)
+            engine_r.release(request_id)
 
         text = "".join(parts)
         content: str | None = text
@@ -388,7 +458,9 @@ def build_app(
                 # exists only at the protocol boundary, so it is set here.
                 finish_reason = "tool_calls"
         return ChatCompletion(
-            model=model_name,
+            # the model actually served, which in pool mode is not the
+            # startup default
+            model=served,
             choices=[
                 Choice(
                     message=ResponseMessage(content=content, tool_calls=tool_calls),
@@ -412,6 +484,7 @@ def build_app(
         model=renderer,
         async_engine=async_engine,
         model_name=model_name,
+        resolve=resolve,
         render_prompt=lambda pairs: render_pairs(renderer, pairs),
     )
     app.include_router(anthropic_router)
