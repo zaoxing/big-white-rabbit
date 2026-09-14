@@ -58,7 +58,7 @@
    "status": "available"
   },
   {
-   "actual_size": 79220196,
+   "actual_size": null,
    "cluster": {
     "enabled": false,
     "live": null
@@ -69,13 +69,32 @@
    "id": "SmolLM-135M-Instruct-4bit",
    "is_loading": false,
    "kind": "mlx",
-   "loaded": true,
+   "loaded": false,
    "model_path": "/Users/test/src/big-white-rabbit/models/SmolLM-135M-Instruct-4bit",
+   "model_type": "llm",
+   "name": "SmolLM-135M-Instruct-4bit",
+   "size_bytes": 79220196,
+   "status": "available"
+  },
+  {
+   "actual_size": 389425104,
+   "cluster": {
+    "enabled": false,
+    "live": null
+   },
+   "display_name": "SmolLM2-360M-Instruct-Q8-mlx",
+   "estimated_size": 389425104,
+   "estimated_size_formatted": "371.4 MB",
+   "id": "SmolLM2-360M-Instruct-Q8-mlx",
+   "is_loading": false,
+   "kind": "mlx",
+   "loaded": true,
+   "model_path": "/Users/test/src/big-white-rabbit/models/SmolLM2-360M-Instruct-Q8-mlx",
    "model_type": "llm",
    "n_ctx": 4096,
    "n_ctx_seq": 4096,
-   "name": "SmolLM-135M-Instruct-4bit",
-   "size_bytes": 79220196,
+   "name": "SmolLM2-360M-Instruct-Q8-mlx",
+   "size_bytes": 389425104,
    "status": "loaded"
   }
  ]

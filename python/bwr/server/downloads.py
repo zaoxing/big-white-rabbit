@@ -21,8 +21,10 @@ percentage that rebases every file is worse than none.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+import urllib.parse
 import threading
 import time
 import uuid
@@ -118,10 +120,15 @@ class DownloadManager:
         *,
         endpoint: str | None = None,
         pool: Any = None,
+        fetcher: Any = None,
     ) -> None:
         self.model_dir = Path(model_dir) if model_dir is not None else None
         self.endpoint = endpoint or None
         self._pool = pool
+        # The fetcher is what makes this class source-agnostic: Hugging Face
+        # and ModelScope differ only in how bytes arrive, not in how a task
+        # is tracked, cancelled, retried or guarded against path traversal.
+        self._fetcher = fetcher or HFFetcher(endpoint=self.endpoint)
         self._tasks: dict[str, Task] = {}
         self._lock = threading.RLock()
         self._pool_exec = ThreadPoolExecutor(
@@ -236,17 +243,7 @@ class DownloadManager:
             task.started_at = time.time()
 
         try:
-            from huggingface_hub import snapshot_download
-
-            task.total_size = self._repo_size(task.repo_id, token)
-            snapshot_download(
-                repo_id=task.repo_id,
-                local_dir=task.local_dir,
-                token=token or None,
-                endpoint=self.endpoint,
-                ignore_patterns=list(DEFAULT_IGNORE),
-                tqdm_class=_make_tqdm(task),
-            )
+            self._fetcher.fetch(task, token)
         except _Cancelled:
             with self._lock:
                 task.status = "cancelled"
@@ -273,6 +270,29 @@ class DownloadManager:
         except Exception:  # noqa: BLE001 - reported by /admin/api/models being stale
             pass
 
+class HFFetcher:
+    """Hugging Face, via huggingface_hub.
+
+    Progress and cancellation ride `tqdm_class` because `snapshot_download`
+    exposes no other hook -- see the module docstring.
+    """
+
+    def __init__(self, endpoint: str | None = None) -> None:
+        self.endpoint = endpoint or None
+
+    def fetch(self, task: Task, token: str | None) -> None:
+        from huggingface_hub import snapshot_download
+
+        task.total_size = self._repo_size(task.repo_id, token)
+        snapshot_download(
+            repo_id=task.repo_id,
+            local_dir=task.local_dir,
+            token=token or None,
+            endpoint=self.endpoint,
+            ignore_patterns=list(DEFAULT_IGNORE),
+            tqdm_class=_make_tqdm(task),
+        )
+
     def _repo_size(self, repo_id: str, token: str | None) -> int:
         """Total bytes of the files this download will actually fetch."""
         try:
@@ -285,10 +305,186 @@ class DownloadManager:
                 for f in (getattr(info, "siblings", None) or [])
                 if not _ignored(getattr(f, "rfilename", ""))
             )
-        except Exception:  # noqa: BLE001 - the size is a nicety; a download
-            # with an unknown total still runs, it just reports 0% until it
-            # finishes rather than failing before it starts.
+        except Exception as exc:  # noqa: BLE001 - the size is a nicety; a
+            # download with an unknown total still runs, it just reports 0%
+            # until it finishes rather than failing before it starts.
+            logger.info("hub size probe for %s failed: %s", repo_id, exc)
             return 0
+
+
+# -- ModelScope --------------------------------------------------------------
+#
+# Implemented against the public REST API with urllib rather than the
+# `modelscope` SDK: the SDK is a large dependency (it pulls its own
+# datasets/训练 stack) for three GET requests, and adding it would bloat the
+# macOS bundle for a feature most users never touch.
+
+MS_BASE = "https://modelscope.cn/api/v1"
+
+
+def _ms_json(url: str, token: str | None = None, *, method: str = "GET",
+             body: bytes | None = None, timeout: int = 30) -> Any:
+    import urllib.request
+
+    headers = {"User-Agent": "bwr", "Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+def _ms_safe_relpath(path: str) -> str:
+    """A repo-relative file path that cannot escape the download directory.
+
+    The path comes from a remote index, so it is validated rather than
+    trusted: absolute paths and any `..` segment are refused outright rather
+    than normalised, because a normalised traversal is still a file the
+    caller did not ask for.
+    """
+    parts = [p for p in path.replace("\\", "/").split("/") if p not in ("", ".")]
+    if not parts or path.startswith("/") or any(p == ".." for p in parts):
+        raise DownloadError(f"unsafe path in repo listing: {path!r}")
+    return "/".join(parts)
+
+
+class MSFetcher:
+    """ModelScope, over the REST API.
+
+    Unlike the Hub path this streams each file itself, which means progress
+    is exact and a cancel takes effect within one 1 MiB chunk instead of one
+    file.
+    """
+
+    CHUNK = 1 << 20
+
+    def __init__(self, base: str | None = None) -> None:
+        self.base = (base or MS_BASE).rstrip("/")
+
+    def files(self, repo_id: str, token: str | None = None) -> list[dict[str, Any]]:
+        url = f"{self.base}/models/{repo_id}/repo/files?Revision=master"
+        data = _ms_json(url, token) or {}
+        out = []
+        for f in ((data.get("Data") or {}).get("Files") or []):
+            if f.get("Type") != "blob":
+                continue
+            path = f.get("Path") or f.get("Name") or ""
+            if not path or _ignored(path):
+                continue
+            out.append({"path": path, "size": int(f.get("Size") or 0)})
+        return out
+
+    def fetch(self, task: Task, token: str | None) -> None:
+        import urllib.request
+
+        files = self.files(task.repo_id, token)
+        if not files:
+            raise DownloadError(f"{task.repo_id} lists no downloadable files")
+        task.total_size = sum(f["size"] for f in files)
+        root = Path(task.local_dir)
+        headers = {"User-Agent": "bwr"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        for entry in files:
+            if task._cancel.is_set():
+                raise _Cancelled(task.task_id)
+            rel = _ms_safe_relpath(entry["path"])
+            dest = root / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            url = (
+                f"{self.base}/models/{task.repo_id}/repo"
+                f"?Revision=master&FilePath={urllib.parse.quote(rel)}"
+            )
+            req = urllib.request.Request(url, headers=headers)
+            # Written to a temp name and renamed, so an interrupted file is
+            # never left looking complete to the model loader.
+            part = dest.with_suffix(dest.suffix + ".part")
+            with urllib.request.urlopen(req, timeout=60) as resp, part.open("wb") as fh:
+                while True:
+                    if task._cancel.is_set():
+                        part.unlink(missing_ok=True)
+                        raise _Cancelled(task.task_id)
+                    chunk = resp.read(self.CHUNK)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    task.downloaded_size += len(chunk)
+            part.replace(dest)
+
+
+class ModelScopeIndex:
+    """Browse surfaces for ModelScope. Degrades to empty, like HubIndex."""
+
+    def __init__(self, base: str | None = None, token: str | None = None) -> None:
+        self.base = (base or MS_BASE).rstrip("/")
+        self.token = token or None
+
+    def _row(self, m: dict[str, Any]) -> dict[str, Any]:
+        repo = f"{m.get('Path', '')}/{m.get('Name', '')}".strip("/")
+        return {
+            "repo_id": repo,
+            "name": m.get("Name"),
+            "downloads": m.get("Downloads"),
+            "likes": m.get("Stars"),
+            "trending_score": None,
+            "size": None,
+            "size_formatted": None,
+            "params": None,
+            "params_formatted": None,
+        }
+
+    def _query(self, name: str, limit: int) -> list[dict[str, Any]]:
+        body = json.dumps({
+            "PageSize": limit, "PageNumber": 1, "SortBy": "Default",
+            "Target": "", "SingleCriterion": [], "Name": name,
+        }).encode()
+        data = _ms_json(f"{self.base}/dolphin/models", self.token,
+                        method="PUT", body=body) or {}
+        models = ((data.get("Data") or {}).get("Model") or {}).get("Models") or []
+        return [self._row(m) for m in models]
+
+    def search(self, query: str, limit: int = 30) -> list[dict[str, Any]]:
+        try:
+            # MLX is appended because bwr cannot serve the rest, and
+            # ModelScope has no library filter to say so structurally.
+            return self._query(f"{query} mlx".strip(), limit)
+        except Exception as exc:  # noqa: BLE001 - offline or blocked: empty,
+            # but logged, so a wrong request shape is visible rather than
+            # reading as "ModelScope returned nothing".
+            logger.warning("modelscope search failed: %s: %s", type(exc).__name__, exc)
+            return []
+
+    def recommended(self, limit: int = 20) -> dict[str, list[dict[str, Any]]]:
+        try:
+            popular = self._query("mlx", limit)
+        except Exception as exc:  # noqa: BLE001 - see search()
+            logger.warning("modelscope recommended failed: %s", exc)
+            popular = []
+        # The API exposes no trending ranking, so that list stays empty
+        # rather than being filled with the popular one relabelled.
+        return {"trending": [], "popular": popular}
+
+    def model_info(self, repo_id: str) -> dict[str, Any] | None:
+        try:
+            data = _ms_json(f"{self.base}/models/{repo_id}", self.token) or {}
+            info = data.get("Data") or {}
+            files = MSFetcher(self.base).files(repo_id, self.token)
+        except Exception as exc:  # noqa: BLE001 - unknown repo reads as absent
+            logger.info("modelscope model_info(%s) failed: %s", repo_id, exc)
+            return None
+        total = sum(f["size"] for f in files)
+        return {
+            "repo_id": repo_id,
+            "name": info.get("Name") or repo_id.split("/")[-1],
+            "downloads": info.get("Downloads"),
+            "likes": info.get("Stars"),
+            "size": total,
+            "size_formatted": _human(total),
+            "files": [{"name": f["path"], "size": f["size"]} for f in files],
+            "gated": False,
+            "tags": list(info.get("Tags") or []),
+        }
 
 
 def _ignored(filename: str) -> bool:

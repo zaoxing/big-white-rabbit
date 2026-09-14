@@ -8,21 +8,21 @@
    "cache_efficiency": 0.0,
    "cached_tokens": 0,
    "completion_tokens": 12,
-   "generation_tps": 361.11811225015293,
-   "model_id": "SmolLM-135M-Instruct-4bit",
-   "prompt_tokens": 10,
+   "generation_tps": 255.00626683414745,
+   "model_id": "SmolLM2-360M-Instruct-Q8-mlx",
+   "prompt_tokens": 33,
    "requests": 1,
-   "total_tokens": 22
+   "total_tokens": 45
   }
  ],
  "totals": {
   "cache_efficiency": 0.0,
   "cached_tokens": 0,
   "completion_tokens": 12,
-  "generation_tps": 361.11811225015293,
+  "generation_tps": 255.00626683414745,
   "model_id": null,
-  "prompt_tokens": 10,
+  "prompt_tokens": 33,
   "requests": 1,
-  "total_tokens": 22
+  "total_tokens": 45
  }
 }

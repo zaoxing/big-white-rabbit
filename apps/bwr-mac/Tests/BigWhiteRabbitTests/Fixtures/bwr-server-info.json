@@ -7,11 +7,11 @@
  "backend": "bwr",
  "host": "127.0.0.1",
  "loaded": [
-  "SmolLM-135M-Instruct-4bit"
+  "SmolLM2-360M-Instruct-Q8-mlx"
  ],
- "model_count": 4,
+ "model_count": 5,
  "name": "Big White Rabbit",
  "port": 1919,
- "uptime_s": 305.4515142440796,
+ "uptime_s": 759.0481281280518,
  "version": "1.0.0"
 }

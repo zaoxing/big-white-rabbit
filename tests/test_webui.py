@@ -277,7 +277,9 @@ def test_model_settings_are_marked_read_only(client):
 
 @pytest.mark.parametrize(
     "path",
-    ["hf/models", "bench/active", "grammar/parsers", "ms/recommended"],
+    # Families with no real handler. `ms/recommended` used to be here and
+    # has one now, so it moved out -- see the ModelScope tests below.
+    ["hf/models", "bench/active", "grammar/parsers", "oq/models"],
 )
 def test_unsupported_families_answer_empty_not_404(client, path):
     """The vendored dashboard polls ~40 oMLX endpoints. 404-ing them all
@@ -746,3 +748,51 @@ def test_bench_surfaces_refuse_clearly_without_a_runner(client):
     assert client.post("/admin/api/bench/start", json={}).status_code == 400
     assert client.get("/admin/api/bench/nope/results").status_code == 404
     assert client.post("/admin/api/bench/nope/cancel").json()["status"] == "not_running"
+
+
+# -- ModelScope + ANE routes --------------------------------------------------
+
+
+def test_ms_surfaces_are_empty_not_broken_without_a_manager(client):
+    assert client.get("/admin/api/ms/tasks").json()["tasks"] == []
+    assert client.get("/admin/api/ms/status").json()["available"] is False
+    assert client.get("/admin/api/ms/search?q=x").json()["models"] == []
+    assert client.post("/admin/api/ms/download", json={"repo_id": "a/b"}).status_code == 400
+
+
+def test_ms_routes_mirror_the_hf_surface(tmp_path):
+    """Same task machinery, different fetcher -- the shapes must match, or
+    the Downloads screen needs two code paths for one concept."""
+    from bwr.server.downloads import DownloadManager, MSFetcher
+
+    app = FastAPI()
+    mount(app, _StubEngine(), "a", _PoolStub(),
+          ms_downloads=DownloadManager(tmp_path, fetcher=MSFetcher()))
+    c = TestClient(app)
+    assert c.get("/admin/api/ms/tasks").json() == {"tasks": []}
+    assert c.get("/admin/api/ms/status").json()["available"] is True
+    assert c.get("/admin/api/ms/task/nope").status_code == 404
+    assert c.post("/admin/api/ms/cancel/nope").json()["status"] == "not_running"
+
+
+def test_ane_tuning_explains_itself_instead_of_a_bare_501(client):
+    """The screen needs to say WHY, not just fail."""
+    r = client.post("/admin/api/bench/ane-tune/start")
+    assert r.status_code == 501
+    body = r.json()
+    assert body["available"] is False
+    assert "MLX" in body["detail"]
+    assert body["candidates"] == []
+
+
+def test_ane_results_answer_200_with_a_status_rather_than_404(client):
+    """Nothing is wrong with the request; a 404 would read as "that run
+    expired" instead of "this cannot run here"."""
+    body = client.get("/admin/api/bench/ane-tune/anything/results").json()
+    assert body["status"] == "unavailable"
+    assert body["checks"]
+
+
+def test_ane_capability_is_readable_on_its_own(client):
+    body = client.get("/admin/api/bench/ane-tune/capability").json()
+    assert set(body) >= {"available", "reason", "checks", "candidates"}

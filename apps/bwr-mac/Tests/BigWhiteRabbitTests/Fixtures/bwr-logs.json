@@ -1,6 +1,6 @@
 {
  "available_files": [],
  "log_file": "<in-process buffer>",
- "logs": "2026-09-14 11:11:05,527 INFO     bwr.engine.pool: pool: loading SmolLM-135M-Instruct-4bit (mlx)",
+ "logs": "2026-09-14 11:44:26,974 INFO     bwr.engine.pool: pool: loading SmolLM2-360M-Instruct-Q8-mlx (mlx)",
  "total_lines": 1
 }

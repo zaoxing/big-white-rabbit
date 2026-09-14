@@ -46,6 +46,7 @@ from jinja2 import ChainableUndefined, Undefined
 from starlette.requests import Request
 
 from . import PACKAGE_DIR, STATIC_DIR, TEMPLATES_DIR
+from ..ane import probe as ane_probe
 from ..bench import BenchError
 from ..downloads import DownloadError
 from ..profiles import ProfileError
@@ -188,7 +189,7 @@ def install_log_buffer() -> None:
 def build_router(
     engine: Any, model_name: str, pool: Any = None, stats: Any = None,
     profiles: Any = None, downloads: Any = None, hub: Any = None,
-    bench: Any = None,
+    bench: Any = None, ms_downloads: Any = None, ms_index: Any = None,
 ) -> APIRouter:
     """Router for /admin.
 
@@ -759,6 +760,133 @@ def build_router(
             return JSONResponse({"detail": "unknown repo"}, status_code=404)
         return JSONResponse(info)
 
+    # -- ANE tuning: a capability report, not a stub -----------------------
+    #
+    # bwr executes through MLX, which targets CPU and GPU only; reaching the
+    # ANE needs a CoreML path this build does not have, so the candidate set
+    # is empty. See server/ane.py -- every check is probed at call time, so
+    # this answer corrects itself if that ever changes.
+
+    @router.get("/api/bench/ane-tune/capability")
+    async def api_ane_capability() -> JSONResponse:
+        return JSONResponse(ane_probe())
+
+    @router.post("/api/bench/ane-tune/start")
+    async def api_ane_start() -> JSONResponse:
+        report = ane_probe()
+        if report["available"]:
+            # Reachable only once a CoreML backend exists; refusing loudly
+            # beats silently pretending a tuning run started.
+            return JSONResponse(
+                {"detail": "ANE tuning is not implemented yet", **report},
+                status_code=501,
+            )
+        return JSONResponse({"detail": report["reason"], **report}, status_code=501)
+
+    @router.get("/api/bench/ane-tune/{tuning_id}/results")
+    async def api_ane_results(tuning_id: str) -> JSONResponse:
+        """The capability report, so the screen can explain itself.
+
+        Answering 200 with `status: unavailable` rather than 404: there is
+        nothing wrong with the request, and a 404 would read as "that run
+        expired" instead of "this cannot run here".
+        """
+        report = ane_probe()
+        return JSONResponse({
+            "tuning_id": tuning_id, "status": "unavailable",
+            "candidates": [], "recommendation": None, **report,
+        })
+
+    @router.post("/api/bench/ane-tune/{tuning_id}/cancel")
+    async def api_ane_cancel(tuning_id: str) -> JSONResponse:
+        return JSONResponse({"status": "not_running", "tuning_id": tuning_id})
+
+    # -- ModelScope -------------------------------------------------------
+    #
+    # Same task machinery as /hf, a different fetcher (server/downloads.py).
+    # ModelScope has no trending ranking, so /ms/recommended returns popular
+    # only rather than relabelling one list as the other.
+
+    @router.get("/api/ms/status")
+    async def api_ms_status() -> JSONResponse:
+        return JSONResponse({
+            "available": ms_downloads is not None,
+            "endpoint": getattr(ms_index, "base", None),
+        })
+
+    @router.get("/api/ms/tasks")
+    async def api_ms_tasks() -> JSONResponse:
+        if ms_downloads is None:
+            return JSONResponse({"tasks": []})
+        return JSONResponse({"tasks": ms_downloads.list()})
+
+    @router.post("/api/ms/download")
+    async def api_ms_download(request: Request) -> JSONResponse:
+        body = await _json_body(request)
+        if ms_downloads is None:
+            return JSONResponse(
+                {"success": False, "detail": "no model directory to download into"},
+                status_code=400,
+            )
+        try:
+            task = ms_downloads.start(
+                body.get("repo_id") or body.get("repoId") or "",
+                token=body.get("ms_token") or body.get("msToken") or None,
+            )
+        except DownloadError as exc:
+            return JSONResponse({"success": False, "detail": str(exc)}, status_code=400)
+        return JSONResponse({"success": True, "task": task})
+
+    @router.post("/api/ms/cancel/{task_id}")
+    async def api_ms_cancel(task_id: str) -> JSONResponse:
+        ok = ms_downloads.cancel(task_id) if ms_downloads is not None else False
+        return JSONResponse({"status": "cancelled" if ok else "not_running"})
+
+    @router.post("/api/ms/retry/{task_id}")
+    async def api_ms_retry(task_id: str) -> JSONResponse:
+        if ms_downloads is None:
+            return JSONResponse({"success": False}, status_code=404)
+        try:
+            return JSONResponse({"success": True, "task": ms_downloads.retry(task_id)})
+        except DownloadError as exc:
+            return JSONResponse({"success": False, "detail": str(exc)}, status_code=400)
+
+    @router.get("/api/ms/task/{task_id}")
+    async def api_ms_task(task_id: str) -> JSONResponse:
+        task = ms_downloads.get(task_id) if ms_downloads is not None else None
+        if task is None:
+            return JSONResponse({"detail": "unknown task"}, status_code=404)
+        return JSONResponse({"task": task})
+
+    @router.delete("/api/ms/task/{task_id}")
+    async def api_ms_forget(task_id: str) -> JSONResponse:
+        if ms_downloads is None:
+            return JSONResponse({"deleted": False}, status_code=404)
+        try:
+            return JSONResponse({"deleted": ms_downloads.forget(task_id)})
+        except DownloadError as exc:
+            return JSONResponse({"deleted": False, "detail": str(exc)}, status_code=400)
+
+    @router.get("/api/ms/search")
+    async def api_ms_search(q: str = "", limit: int = 30) -> JSONResponse:
+        if ms_index is None:
+            return JSONResponse({"models": [], "total": 0})
+        models = ms_index.search(q, limit=limit)
+        return JSONResponse({"models": models, "total": len(models)})
+
+    @router.get("/api/ms/recommended")
+    async def api_ms_recommended(limit: int = 20) -> JSONResponse:
+        if ms_index is None:
+            return JSONResponse({"trending": [], "popular": []})
+        return JSONResponse(ms_index.recommended(limit=limit))
+
+    @router.get("/api/ms/model-info")
+    async def api_ms_model_info(repo_id: str = "") -> JSONResponse:
+        info = ms_index.model_info(repo_id) if (ms_index and repo_id) else None
+        if info is None:
+            return JSONResponse({"detail": "unknown repo"}, status_code=404)
+        return JSONResponse(info)
+
     # -- profiles and templates -------------------------------------------
     #
     # Two collections: global templates (some built in and read-only) and
@@ -1042,13 +1170,14 @@ def build_router(
 def mount(
     app: Any, engine: Any, model_name: str, pool: Any = None, *,
     stats: Any = None, profiles: Any = None, downloads: Any = None,
-    hub: Any = None, bench: Any = None,
+    hub: Any = None, bench: Any = None, ms_downloads: Any = None,
+    ms_index: Any = None,
 ) -> None:
     """Attach the UI at /admin plus the two /v1 helpers the page polls."""
     install_log_buffer()
     app.include_router(
         build_router(engine, model_name, pool, stats, profiles, downloads, hub,
-                     bench),
+                     bench, ms_downloads, ms_index),
         prefix="/admin"
     )
     app.mount(

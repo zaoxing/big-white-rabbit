@@ -2,15 +2,15 @@
  "active_models": {
   "models": [
    {
-    "decode_calls": 332,
-    "id": "SmolLM-135M-Instruct-4bit",
+    "decode_calls": 12,
+    "id": "SmolLM2-360M-Instruct-Q8-mlx",
     "in_flight": 0,
     "loaded": true
    }
   ]
  },
  "loaded": [
-  "SmolLM-135M-Instruct-4bit"
+  "SmolLM2-360M-Instruct-Q8-mlx"
  ],
  "status": "ok"
 }

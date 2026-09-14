@@ -38,7 +38,7 @@ from ..engine.metal_engine import MetalEngine
 from ..engine.pool import ModelPoolError
 from ..engine.mlx_engine import MLXEngine
 from .bench import BenchRunner
-from .downloads import DownloadManager, HubIndex
+from .downloads import DownloadManager, HubIndex, MSFetcher, ModelScopeIndex
 from .profiles import ProfileStore
 from .stats import ServerStats
 from .schemas import (
@@ -291,6 +291,13 @@ def build_app(
         DownloadManager(model_dir, pool=pool) if model_dir is not None else None
     )
     hub = HubIndex()
+    # A second manager, same machinery, different fetcher. Both write into
+    # the same model directory and rescan the same pool.
+    ms_downloads = (
+        DownloadManager(model_dir, pool=pool, fetcher=MSFetcher())
+        if model_dir is not None else None
+    )
+    ms_index = ModelScopeIndex()
     if pool is None and config.engine not in ("metal", "mlx"):
         raise ValueError(
             f"engine must be 'metal' or 'mlx'; got {config.engine!r}"
@@ -405,7 +412,7 @@ def build_app(
 
         _mount_webui(app, engine, model_name, pool, stats=stats,
                      profiles=profile_store, downloads=downloads, hub=hub,
-                     bench=bench)
+                     bench=bench, ms_downloads=ms_downloads, ms_index=ms_index)
         app.state.webui = True
     except ImportError:  # noqa: BLE001 - jinja2/static deps absent; API still serves
         app.state.webui = False

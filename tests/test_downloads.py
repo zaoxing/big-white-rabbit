@@ -1,8 +1,12 @@
-"""Hugging Face download tasks: lifecycle, progress, and path safety.
+"""Model downloads: lifecycle, progress, and path safety.
 
-No network: `snapshot_download` and the Hub API are stubbed. What is under
-test is the task bookkeeping the UI polls and the guards around writing into
-the user's model directory -- not huggingface_hub itself.
+No network: `snapshot_download`, the Hub API and the ModelScope REST calls
+are all stubbed. What is under test is the task bookkeeping the UI polls and
+the guards around writing into the user's model directory -- not
+huggingface_hub, and not ModelScope.
+
+The task machinery is shared: Hugging Face and ModelScope differ only in the
+fetcher that moves the bytes, so everything below the fetcher is tested once.
 """
 
 from __future__ import annotations
@@ -13,7 +17,13 @@ import time
 import pytest
 
 from bwr.server import downloads as dl
-from bwr.server.downloads import DownloadError, DownloadManager, Task, _safe_dirname
+from bwr.server.downloads import (
+    DownloadError,
+    DownloadManager,
+    HFFetcher,
+    Task,
+    _safe_dirname,
+)
 
 
 def _wait(predicate, timeout: float = 5.0) -> bool:
@@ -90,7 +100,7 @@ def test_a_download_runs_and_completes(manager, monkeypatch, tmp_path):
         return kwargs["local_dir"]
 
     monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot)
-    monkeypatch.setattr(DownloadManager, "_repo_size", lambda self, r, t: 1000)
+    monkeypatch.setattr(HFFetcher, "_repo_size", lambda self, r, t: 1000)
 
     task = manager.start("org/model")
     assert task["status"] in ("pending", "downloading")
@@ -106,7 +116,7 @@ def test_a_failed_download_reports_the_error_verbatim(manager, monkeypatch):
         raise RuntimeError("401 unauthorized")
 
     monkeypatch.setattr("huggingface_hub.snapshot_download", boom)
-    monkeypatch.setattr(DownloadManager, "_repo_size", lambda self, r, t: 0)
+    monkeypatch.setattr(HFFetcher, "_repo_size", lambda self, r, t: 0)
 
     task = manager.start("org/model")
     assert _wait(lambda: manager.get(task["task_id"])["status"] == "failed")
@@ -116,7 +126,7 @@ def test_a_failed_download_reports_the_error_verbatim(manager, monkeypatch):
 def test_a_failure_does_not_take_down_the_manager(manager, monkeypatch):
     monkeypatch.setattr("huggingface_hub.snapshot_download",
                         lambda **k: (_ for _ in ()).throw(OSError("disk full")))
-    monkeypatch.setattr(DownloadManager, "_repo_size", lambda self, r, t: 0)
+    monkeypatch.setattr(HFFetcher, "_repo_size", lambda self, r, t: 0)
     t1 = manager.start("org/a")
     assert _wait(lambda: manager.get(t1["task_id"])["status"] == "failed")
     # Still usable afterwards.
@@ -129,7 +139,7 @@ def test_the_same_repo_cannot_be_queued_twice(manager, monkeypatch):
     gate = threading.Event()
     monkeypatch.setattr("huggingface_hub.snapshot_download",
                         lambda **k: gate.wait(5) or k["local_dir"])
-    monkeypatch.setattr(DownloadManager, "_repo_size", lambda self, r, t: 0)
+    monkeypatch.setattr(HFFetcher, "_repo_size", lambda self, r, t: 0)
     manager.start("org/model")
     with pytest.raises(DownloadError):
         manager.start("org/model")
@@ -142,7 +152,7 @@ def test_cancelling_a_queued_task_takes_effect(manager, monkeypatch):
     gate = threading.Event()
     monkeypatch.setattr("huggingface_hub.snapshot_download",
                         lambda **k: gate.wait(5) or k["local_dir"])
-    monkeypatch.setattr(DownloadManager, "_repo_size", lambda self, r, t: 0)
+    monkeypatch.setattr(HFFetcher, "_repo_size", lambda self, r, t: 0)
     task = manager.start("org/model")
     assert manager.cancel(task["task_id"]) is True
     assert manager.get(task["task_id"])["status"] == "cancelled"
@@ -151,7 +161,7 @@ def test_cancelling_a_queued_task_takes_effect(manager, monkeypatch):
 
 def test_cancelling_a_finished_task_is_a_no_op(manager, monkeypatch):
     monkeypatch.setattr("huggingface_hub.snapshot_download", lambda **k: k["local_dir"])
-    monkeypatch.setattr(DownloadManager, "_repo_size", lambda self, r, t: 0)
+    monkeypatch.setattr(HFFetcher, "_repo_size", lambda self, r, t: 0)
     task = manager.start("org/model")
     assert _wait(lambda: manager.get(task["task_id"])["status"] == "completed")
     assert manager.cancel(task["task_id"]) is False
@@ -160,7 +170,7 @@ def test_cancelling_a_finished_task_is_a_no_op(manager, monkeypatch):
 def test_retry_resets_progress_and_counts(manager, monkeypatch):
     monkeypatch.setattr("huggingface_hub.snapshot_download",
                         lambda **k: (_ for _ in ()).throw(RuntimeError("nope")))
-    monkeypatch.setattr(DownloadManager, "_repo_size", lambda self, r, t: 0)
+    monkeypatch.setattr(HFFetcher, "_repo_size", lambda self, r, t: 0)
     task = manager.start("org/model")
     assert _wait(lambda: manager.get(task["task_id"])["status"] == "failed")
 
@@ -176,7 +186,7 @@ def test_retrying_a_running_task_is_refused(manager, monkeypatch):
     gate = threading.Event()
     monkeypatch.setattr("huggingface_hub.snapshot_download",
                         lambda **k: gate.wait(5) or k["local_dir"])
-    monkeypatch.setattr(DownloadManager, "_repo_size", lambda self, r, t: 0)
+    monkeypatch.setattr(HFFetcher, "_repo_size", lambda self, r, t: 0)
     task = manager.start("org/model")
     assert _wait(lambda: manager.get(task["task_id"])["status"] == "downloading")
     with pytest.raises(DownloadError):
@@ -186,7 +196,7 @@ def test_retrying_a_running_task_is_refused(manager, monkeypatch):
 
 def test_forget_drops_the_row_but_never_the_files(manager, monkeypatch, tmp_path):
     monkeypatch.setattr("huggingface_hub.snapshot_download", lambda **k: k["local_dir"])
-    monkeypatch.setattr(DownloadManager, "_repo_size", lambda self, r, t: 0)
+    monkeypatch.setattr(HFFetcher, "_repo_size", lambda self, r, t: 0)
     task = manager.start("org/model")
     assert _wait(lambda: manager.get(task["task_id"])["status"] == "completed")
     (tmp_path / "model").mkdir(exist_ok=True)
@@ -200,7 +210,7 @@ def test_forgetting_a_running_task_is_refused(manager, monkeypatch):
     gate = threading.Event()
     monkeypatch.setattr("huggingface_hub.snapshot_download",
                         lambda **k: gate.wait(5) or k["local_dir"])
-    monkeypatch.setattr(DownloadManager, "_repo_size", lambda self, r, t: 0)
+    monkeypatch.setattr(HFFetcher, "_repo_size", lambda self, r, t: 0)
     task = manager.start("org/model")
     with pytest.raises(DownloadError):
         manager.forget(task["task_id"])
@@ -217,7 +227,7 @@ def test_a_finished_download_rescans_the_pool(tmp_path, monkeypatch):
             type(self).rescans += 1
 
     monkeypatch.setattr("huggingface_hub.snapshot_download", lambda **k: k["local_dir"])
-    monkeypatch.setattr(DownloadManager, "_repo_size", lambda self, r, t: 0)
+    monkeypatch.setattr(HFFetcher, "_repo_size", lambda self, r, t: 0)
     m = DownloadManager(tmp_path, pool=_Pool())
     task = m.start("org/model")
     assert _wait(lambda: m.get(task["task_id"])["status"] == "completed")
@@ -230,7 +240,7 @@ def test_a_rescan_failure_does_not_fail_the_download(tmp_path, monkeypatch):
             raise OSError("model dir vanished")
 
     monkeypatch.setattr("huggingface_hub.snapshot_download", lambda **k: k["local_dir"])
-    monkeypatch.setattr(DownloadManager, "_repo_size", lambda self, r, t: 0)
+    monkeypatch.setattr(HFFetcher, "_repo_size", lambda self, r, t: 0)
     m = DownloadManager(tmp_path, pool=_Pool())
     task = m.start("org/model")
     assert _wait(lambda: m.get(task["task_id"])["status"] == "completed")
@@ -289,3 +299,100 @@ def test_hub_queries_return_empty_when_the_hub_is_unreachable(monkeypatch):
     assert hub.search("qwen") == []
     assert hub.recommended() == {"trending": [], "popular": []}
     assert hub.model_info("org/model") is None
+
+
+# -- ModelScope --------------------------------------------------------------
+#
+# Implemented over the public REST API with urllib rather than the
+# `modelscope` SDK. The network is stubbed here; what is under test is the
+# listing/streaming logic and the path guard.
+
+
+def test_ms_rejects_paths_that_escape_the_download_directory():
+    """File paths come from a remote index, so they are validated rather than
+    normalised -- a normalised traversal is still a file nobody asked for."""
+    from bwr.server.downloads import _ms_safe_relpath
+
+    assert _ms_safe_relpath("model.safetensors") == "model.safetensors"
+    assert _ms_safe_relpath("4-bit/model.safetensors") == "4-bit/model.safetensors"
+    assert _ms_safe_relpath("./a/b.json") == "a/b.json"
+    for bad in ("../escape", "a/../../escape", "/etc/passwd", "", ".."):
+        with pytest.raises(DownloadError):
+            _ms_safe_relpath(bad)
+
+
+def test_ms_file_listing_keeps_blobs_and_drops_ignored_formats(monkeypatch):
+    from bwr.server.downloads import MSFetcher
+
+    monkeypatch.setattr("bwr.server.downloads._ms_json", lambda *a, **k: {
+        "Data": {"Files": [
+            {"Type": "blob", "Path": "model.safetensors", "Size": 100},
+            {"Type": "blob", "Path": "model.gguf", "Size": 999},
+            {"Type": "tree", "Path": "subdir", "Size": 0},
+            {"Type": "blob", "Path": "config.json", "Size": 7},
+        ]}
+    })
+    files = MSFetcher().files("org/model")
+    assert [f["path"] for f in files] == ["model.safetensors", "config.json"]
+
+
+def test_ms_download_streams_files_and_reports_progress(monkeypatch, tmp_path):
+    import io
+    from bwr.server.downloads import DownloadManager, MSFetcher
+
+    monkeypatch.setattr("bwr.server.downloads._ms_json", lambda *a, **k: {
+        "Data": {"Files": [
+            {"Type": "blob", "Path": "config.json", "Size": 4},
+            {"Type": "blob", "Path": "4-bit/weights.safetensors", "Size": 6},
+        ]}
+    })
+
+    class _Resp(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    payloads = {"config.json": b"{ok}", "4-bit/weights.safetensors": b"WEIGHT"}
+
+    def fake_open(req, timeout=60):
+        path = req.full_url.split("FilePath=")[1]
+        import urllib.parse
+        return _Resp(payloads[urllib.parse.unquote(path)])
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_open)
+
+    m = DownloadManager(tmp_path, fetcher=MSFetcher())
+    task = m.start("org/model")
+    assert _wait(lambda: m.get(task["task_id"])["status"] == "completed"), m.get(task["task_id"])
+    done = m.get(task["task_id"])
+    assert done["total_size"] == 10
+    assert done["downloaded_size"] == 10
+    # Nested paths are preserved, so a `4-bit/` layout stays servable.
+    assert (tmp_path / "model" / "4-bit" / "weights.safetensors").read_bytes() == b"WEIGHT"
+    # No .part files survive a successful run.
+    assert not list((tmp_path / "model").rglob("*.part"))
+
+
+def test_ms_index_degrades_to_empty_when_unreachable(monkeypatch):
+    from bwr.server.downloads import ModelScopeIndex
+
+    def boom(*a, **k):
+        raise OSError("blocked")
+
+    monkeypatch.setattr("bwr.server.downloads._ms_json", boom)
+    idx = ModelScopeIndex()
+    assert idx.search("qwen") == []
+    assert idx.recommended() == {"trending": [], "popular": []}
+    assert idx.model_info("org/model") is None
+
+
+def test_ms_recommended_does_not_relabel_popular_as_trending(monkeypatch):
+    """ModelScope exposes no trending ranking. An empty list is honest; the
+    popular list under a second name is not."""
+    from bwr.server.downloads import ModelScopeIndex
+
+    monkeypatch.setattr("bwr.server.downloads._ms_json", lambda *a, **k: {
+        "Data": {"Model": {"Models": [{"Path": "org", "Name": "m", "Downloads": 5}]}}
+    })
+    rec = ModelScopeIndex().recommended()
+    assert rec["trending"] == []
+    assert [m["repo_id"] for m in rec["popular"]] == ["org/m"]
