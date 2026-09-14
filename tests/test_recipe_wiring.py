@@ -219,3 +219,48 @@ def test_recipe_help_does_not_quote_the_retired_27b_figure():
     """13.2 was the censored Qwen3.8-27B-MLX-4bit, which is not on disk any
     more and was never comparable to the build the recipe now points at."""
     assert "13.2" not in _serve_help()
+
+
+def test_serve_accepts_every_flag_the_macos_app_passes(monkeypatch, rootdir, tmp_path):
+    """The menubar app spawns `bwr serve` with a fixed argv (ServerProcess
+    .makeArguments). A flag it passes that argparse rejects exits 2 and the
+    app can never start a server -- that is exactly how --base-path shipped
+    broken. Parse the app's argv here so the two cannot drift apart.
+    """
+    argv = ["--model-dir", str(tmp_path), "--host", "127.0.0.1",
+            "--port", "1919", "--preload", "first"]
+    rc, kw = _serve_kwargs(monkeypatch, argv)
+    assert rc == 0, f"bwr serve rejected the app's argv: {argv}"
+    assert kw["preload"] == "first"
+    assert kw["model_dir"] == str(tmp_path)
+
+
+# -- bwr's own log output -----------------------------------------------------
+
+
+def test_bwr_loggers_reach_a_handler_under_serve():
+    """bwr's INFO records must actually be emitted.
+
+    uvicorn configures only its own logger namespace and leaves the root
+    logger without a handler, so `logging.lastResort` dropped everything bwr
+    logged below WARNING. The packaged app's server.log therefore never said
+    whether `--preload` warmed a model -- the one place a user would look.
+    """
+    import logging
+
+    from bwr.server.launch import _configure_bwr_logging
+
+    bwr_logger = logging.getLogger("bwr")
+    saved = (list(bwr_logger.handlers), bwr_logger.level, bwr_logger.propagate)
+    try:
+        bwr_logger.handlers.clear()
+        _configure_bwr_logging("info")
+        assert bwr_logger.handlers, "bwr records would go to lastResort"
+        assert bwr_logger.isEnabledFor(logging.INFO)
+        # Scoped to bwr: turning our own logging on must not also switch on
+        # INFO chatter from transformers / httpx / mlx.
+        assert not logging.getLogger().handlers or bwr_logger.propagate is False
+    finally:
+        bwr_logger.handlers[:] = saved[0]
+        bwr_logger.setLevel(saved[1])
+        bwr_logger.propagate = saved[2]

@@ -15,6 +15,7 @@ instead of aborting (see docs/llamacpp-notes.md).
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -63,6 +64,8 @@ from .tools import (
     resolve_tool_choice,
     tool_names,
 )
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_TOKENS = 512
 
@@ -240,6 +243,7 @@ def build_app(
     draft_model: Model | None = None,
     mlx_model_path: str | None = None,
     model_dir: str | None = None,
+    preload: str | None = None,
 ) -> FastAPI:
     config = config or EngineConfig()
     # Pool mode: `model_dir` replaces the single model/mlx_model_path pair.
@@ -304,6 +308,30 @@ def build_app(
         # loop that will actually serve requests.
         if async_engine is not None:
             await async_engine.start()
+        if preload and pool is not None:
+            # Pool mode loads lazily, so the FIRST request pays the whole
+            # 15-19 GiB weight load. Preloading moves that cost to startup,
+            # which is what a desktop app wants: the server reports healthy
+            # only once it can actually answer quickly.
+            #
+            # A failure here must NOT abort startup -- a bad --preload name
+            # or a model too large for the host would otherwise leave the
+            # user with no server at all rather than a working one missing a
+            # warm model.
+            target = preload
+            if preload == "first":
+                # NOT None: resolve(None) only succeeds when the pool holds
+                # exactly one model, so passing None here failed with
+                # "unknown model None" on any real multi-model directory.
+                listed = pool.list()
+                target = listed[0]["id"] if listed else None
+            try:
+                if target is None:
+                    raise ValueError(f"no models found under {model_dir}")
+                mid, _engine = await pool.acquire(target)
+                logger.info("preloaded %s", mid)
+            except Exception as exc:  # noqa: BLE001 - reported; must not kill the server
+                logger.warning("preload of %r failed: %s", preload, exc)
         try:
             yield
         finally:

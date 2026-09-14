@@ -192,8 +192,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             bootstrapServer(config: config)
             scheduleAccessoryPolicyFlip()
         } else {
-            // First run: show the wizard only. Do not create the menubar or
-            // persist settings until the user clicks Start Server.
+            // First run. CHANGED FROM UPSTREAM: also bootstrap with defaults
+            // instead of showing the wizard alone.
+            //
+            // Upstream deliberately started nothing until the user clicked
+            // "Start Server", which means a freshly installed app does
+            // nothing on launch -- no menubar server, no models, and a
+            // dashboard that cannot connect. Everything the wizard collects
+            // already has a working default (bind 127.0.0.1, port 1919,
+            // model dir <basePath>/models, which may be empty -- bwr serves
+            // zero models and the dashboard shows an empty list).
+            //
+            // The wizard is still presented so the user can change any of
+            // it; its Start Server button is idempotent because
+            // bootstrapServer() treats .alreadyRunning as success.
+            bootstrapServer(config: config)
+            scheduleAccessoryPolicyFlip()
             NSApp.activate(ignoringOtherApps: true)
             presentWelcome()
         }

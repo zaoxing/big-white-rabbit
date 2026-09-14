@@ -192,6 +192,11 @@ def _cmd_serve(argv: list[str]) -> int:
     ap.add_argument("--model-dir", default=None, metavar="DIR",
                     help="serve every model under DIR (multi-model pool, lazy load + "
                          "LRU eviction; see engine/pool.py). Mutually exclusive with -m")
+    ap.add_argument("--preload", default=None, metavar="MODEL",
+                    help="load a model at startup instead of on first request "
+                         "(pool mode only). Pass a model id, or 'first' for whichever "
+                         "the pool lists first. Moves the 15-19 GiB weight load off the "
+                         "first request; a failure is logged, not fatal")
     ap.add_argument("--mlx-batch", action="store_true",
                     help="continuous batching on the MLX backend: concurrent requests "
                          "decode in one batched step instead of one after another. "
@@ -279,7 +284,7 @@ def _cmd_serve(argv: list[str]) -> int:
             "mlx_prefix_cache_size": "mlx_prefix_cache_size",
             "mlx_kv_bits": "mlx_kv_bits",
             "mlx_mtp": "mlx_mtp", "mlx_mtp_depth": "mlx_mtp_depth",
-            "mlx_batch": "mlx_batch",
+            "mlx_batch": "mlx_batch", "preload": "preload",
             # Without this a nested layout like `<repo>/4-bit` would serve
             # under the name "4-bit", which is what clients would see in
             # /v1/models.
@@ -375,6 +380,7 @@ def _cmd_serve(argv: list[str]) -> int:
         mlx_prefix_cache_size=args.mlx_prefix_cache_size,
         mlx_kv_bits=getattr(args, "mlx_kv_bits", None),
         model_dir=getattr(args, "model_dir", None),
+        preload=getattr(args, "preload", None),
         mlx_batch=getattr(args, "mlx_batch", False),
         mlx_mtp=getattr(args, "mlx_mtp", False),
         mlx_mtp_depth=getattr(args, "mlx_mtp_depth", 0),

@@ -500,6 +500,40 @@ def mount(app: Any, engine: Any, model_name: str, pool: Any = None) -> None:
             {"models": [{"id": model_name, "model_type": "llm", "loaded": True}]}
         )
 
+    @app.get("/api/status")
+    async def api_status() -> JSONResponse:
+        """Liveness + live activity for the macOS menubar poller.
+
+        Root-level, not under /admin: MenubarStatsPoller polls `/api/status`
+        every few seconds and decodes the same shape as /admin/api/stats.
+        Without it the menubar logged a 404 on every tick and showed no
+        activity. Its Stats fields are all optional, so the counters bwr does
+        not keep are simply absent rather than faked.
+        """
+        body: dict[str, Any] = {"status": "ok"}
+        if pool is None:
+            entry = {
+                "id": model_name,
+                "loaded": True,
+                "in_flight": engine.n_in_flight,
+                "decode_calls": engine.ctx.decode_calls,
+            }
+            body["active_models"] = {"models": [entry]}
+            return JSONResponse(body)
+        active = []
+        for m in pool.list():
+            if not m["loaded"]:
+                continue
+            raw = pool.engine_for(m["id"])
+            e = {"id": m["id"], "loaded": True}
+            if raw is not None:
+                e["in_flight"] = raw.n_in_flight
+                e["decode_calls"] = raw.ctx.decode_calls
+            active.append(e)
+        body["active_models"] = {"models": active}
+        body["loaded"] = pool.loaded_ids
+        return JSONResponse(body)
+
     @app.get("/v1/mcp/tools")
     async def mcp_tools() -> JSONResponse:
         return JSONResponse({"tools": []})

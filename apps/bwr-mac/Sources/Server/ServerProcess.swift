@@ -534,6 +534,13 @@ final class ServerProcess: @unchecked Sendable {
             "--model-dir", modelDir,
             "--host", bindAddress,
             "--port", String(port),
+            // Warm the first model at startup rather than on the first
+            // request. Without it the app looks healthy while the first
+            // prompt silently pays a 15-19 GiB weight load. "first" means
+            // whichever model the pool lists first; with an empty model
+            // directory bwr logs that preload found nothing and serves
+            // anyway, so this is safe on a fresh install.
+            "--preload", "first",
         ]
     }
 

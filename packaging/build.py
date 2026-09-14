@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -37,18 +38,34 @@ EXPORT_DIR = PACKAGING / "_export"
 
 # Inputs whose contents decide whether the export is stale. build.sh compares
 # this against packaging/_export/.fingerprint before deciding to rebuild.
-FINGERPRINT_INPUTS = (
+FINGERPRINT_FILES = (
     REPO_ROOT / "pyproject.toml",
     SPEC_TEMPLATE,
     REPO_ROOT / "uv.lock",
+)
+# bwr's own sources MUST be in here. They were not at first, and the result
+# was a bundle that built happily around a stale wheel: the app spawned
+# `bwr serve --preload first` and the embedded (older) bwr answered
+# "unrecognized arguments: --preload first". Dependency metadata alone does
+# not change when the code does.
+FINGERPRINT_TREES = (
+    (REPO_ROOT / "python" / "bwr", ("*.py",)),
+    (REPO_ROOT / "csrc", ("*.cpp", "*.h", "*.metal", "*.mm")),
 )
 
 
 def fingerprint() -> str:
     h = hashlib.sha256()
-    for path in FINGERPRINT_INPUTS:
+    for path in FINGERPRINT_FILES:
         h.update(path.name.encode())
         h.update(path.read_bytes() if path.is_file() else b"<missing>")
+    for root, patterns in FINGERPRINT_TREES:
+        for pattern in patterns:
+            for src in sorted(root.rglob(pattern)):
+                if "__pycache__" in src.parts:
+                    continue
+                h.update(str(src.relative_to(REPO_ROOT)).encode())
+                h.update(src.read_bytes())
     return h.hexdigest()
 
 
@@ -56,28 +73,102 @@ WHEELHOUSE = PACKAGING / "_build" / "wheels"
 
 
 def build_wheel() -> Path:
-    """Build a bwr wheel and return its path.
+    """Build a bwr wheel and return its path, under a content-addressed dir.
 
     venvstacks installs with `--only-binary :all:` and locks with hashes, so
     the layer cannot reference this checkout as a directory -- pip refuses
     ("Can't verify hashes for these file:// requirements because they point
     to directories"). Building the wheel up front satisfies both, and pins
     the compiled `_bwr_metal` extension to a single deterministic build.
+
+    Why the wheel lives in `wheels/<sha256[:12]>/` instead of `wheels/`:
+    the project version does not move between builds, so a rebuilt wheel has
+    a byte-identical FILENAME. The locked requirement string was therefore
+    identical too, `--lock-if-needed` saw nothing to redo, and the install
+    then died with "THESE PACKAGES DO NOT MATCH THE HASHES FROM THE
+    REQUIREMENTS FILE" -- the lock still carried the previous wheel's hash.
+    Hashing the content into the directory makes the requirement change
+    exactly when the code does, so the lock goes stale on its own.
+
+    This does NOT make pip reinstall the wheel; see purge_installed_bwr().
     """
-    WHEELHOUSE.mkdir(parents=True, exist_ok=True)
-    for stale in WHEELHOUSE.glob("big_white_rabbit-*.whl"):
-        stale.unlink()
+    staging = WHEELHOUSE / "_staging"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
     # Prefer the development venv: it already has the scikit-build-core /
     # cmake / pybind11 toolchain this project needs to compile csrc/.
     venv_python = REPO_ROOT / ".venv" / "bin" / "python"
     python = str(venv_python) if venv_python.exists() else sys.executable
     print(f"  building bwr wheel with {python}", flush=True)
     subprocess.run([python, "-m", "pip", "wheel", ".", "--no-deps",
-                    "--wheel-dir", str(WHEELHOUSE)], cwd=REPO_ROOT, check=True)
-    wheels = sorted(WHEELHOUSE.glob("big_white_rabbit-*.whl"))
-    if not wheels:
-        raise SystemExit(f"no bwr wheel produced in {WHEELHOUSE}")
-    return wheels[-1]
+                    "--wheel-dir", str(staging)], cwd=REPO_ROOT, check=True)
+    built = sorted(staging.glob("big_white_rabbit-*.whl"))
+    if not built:
+        raise SystemExit(f"no bwr wheel produced in {staging}")
+    wheel = built[-1]
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()[:12]
+    final_dir = WHEELHOUSE / digest
+    final = final_dir / wheel.name
+    if not final.exists():
+        final_dir.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(wheel), str(final))
+    shutil.rmtree(staging)
+    # Keep only this build's wheel; the others can never be referenced again.
+    for other in WHEELHOUSE.iterdir():
+        if other != final_dir:
+            shutil.rmtree(other) if other.is_dir() else other.unlink()
+    return final
+
+
+LAYER_ROOT = PACKAGING / "_build" / "framework-mlx-base"
+LAYER_SITE = LAYER_ROOT / "lib" / "python3.11" / "site-packages"
+
+
+def purge_installed_bwr() -> None:
+    """Delete bwr from the framework layer so pip installs the new wheel.
+
+    pip decides a wheel is redundant by VERSION alone:
+
+        big-white-rabbit is already installed with the same version as the
+        provided wheel. Use --force-reinstall to force an installation.
+
+    bwr's version does not move between builds and venvstacks exposes no
+    --force-reinstall, so an unchanged version number was enough to make the
+    layer keep whatever bwr it had. That is how the bundle came to ship a
+    `bwr` that answered `unrecognized arguments: --preload first` while the
+    freshly built wheel sitting beside it had the flag. Removing the install
+    first is the only lever this side of the venvstacks CLI. It costs one
+    small reinstall per export; the export itself is already gated on the
+    fingerprint, so this runs only when something actually changed.
+    """
+    if not LAYER_SITE.is_dir():
+        return
+    purged = False
+    for dist_info in LAYER_SITE.glob("big_white_rabbit-*.dist-info"):
+        record = dist_info / "RECORD"
+        if record.is_file():
+            for line in record.read_text().splitlines():
+                rel = line.split(",", 1)[0].strip()
+                if not rel:
+                    continue
+                target = LAYER_SITE / rel
+                # RECORD reaches outside site-packages for console scripts
+                # (`../../../bin/bwr`). Follow those, but never outside the
+                # layer -- a malformed RECORD must not delete anything else.
+                try:
+                    resolved = target.resolve()
+                    resolved.relative_to(LAYER_ROOT.resolve())
+                except (OSError, ValueError):
+                    continue
+                if resolved.is_file() or resolved.is_symlink():
+                    resolved.unlink()
+        shutil.rmtree(dist_info, ignore_errors=True)
+        purged = True
+    shutil.rmtree(LAYER_SITE / "bwr", ignore_errors=True)
+    if purged:
+        print("  purged the previously installed bwr from framework-mlx-base",
+              flush=True)
 
 
 def render_spec() -> Path:
@@ -107,6 +198,12 @@ def build_export() -> None:
     # lock + build + export in one pass. --clean would discard the layer
     # caches that make an incremental rebuild bearable; the fingerprint above
     # is what decides when a rebuild is needed at all.
+    # --lock-if-needed suffices because build_wheel() puts the wheel behind a
+    # content-addressed path: when bwr changes, the requirement string in the
+    # spec changes with it, so the lock is genuinely outdated and gets redone.
+    # Third-party versions in the layer therefore only move when their own
+    # constraints do, not on every bwr edit.
+    purge_installed_bwr()
     venvstacks("build", str(spec), "--lock-if-needed",
                "--build-dir", str(PACKAGING / "_build"),
                "--output-dir", str(PACKAGING / "_artifacts"))

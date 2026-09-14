@@ -7,8 +7,33 @@ model, and the engine thread is started by the app's lifespan hook.
 
 from __future__ import annotations
 
+import logging
+
 from .._bwr_metal import Model, ModelParams
 from ..engine.config import EngineConfig
+
+
+def _configure_bwr_logging(log_level: str) -> None:
+    """Give bwr's own loggers a handler, at uvicorn's level.
+
+    uvicorn configures only its own logger namespace, and the root logger it
+    leaves alone has no handler -- so everything bwr logs below WARNING goes
+    nowhere and `logging.lastResort` swallows it. The preload message was
+    invisible in the packaged app's server.log for exactly that reason, which
+    is the one place a user would look to find out whether the model warmed.
+
+    Scoped to the "bwr" logger rather than configuring the root, so enabling
+    it does not also turn on INFO chatter from transformers, httpx and mlx.
+    """
+    bwr_logger = logging.getLogger("bwr")
+    bwr_logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+    if not bwr_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s:     %(message)s"))
+        bwr_logger.addHandler(handler)
+        # uvicorn's own records already reach stderr; propagating would print
+        # every bwr line a second time once the root logger gains a handler.
+        bwr_logger.propagate = False
 
 
 def serve(
@@ -34,6 +59,7 @@ def serve(
     mlx_prefix_cache_size: int = 2,
     mlx_kv_bits: int | None = None,
     model_dir: str | None = None,
+    preload: str | None = None,
     mlx_batch: bool = False,
     mlx_mtp: bool = False,
     mlx_mtp_depth: int = 0,
@@ -49,6 +75,8 @@ def serve(
     import uvicorn
 
     from .app import build_app
+
+    _configure_bwr_logging(log_level)
 
     config = EngineConfig(
         n_ctx=n_ctx,
@@ -81,6 +109,7 @@ def serve(
         # returns immediately even for a directory of 27B weights.
         app = build_app(
             None, config, served_model_name=served_model_name, model_dir=model_dir,
+            preload=preload,
         )
         uvicorn.run(app, host=host, port=port, log_level=log_level, workers=1)
         return

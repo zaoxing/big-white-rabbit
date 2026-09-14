@@ -424,6 +424,16 @@ final class ServerProcessArgumentsTests: XCTestCase {
                        "Spawn must invoke bwr's own CLI module.")
     }
 
+    func testArgvAsksTheServerToPreload() throws {
+        try requireProductionBranch()
+        let argv = makeProcess().makeArguments()
+        guard let i = argv.firstIndex(of: "--preload") else {
+            return XCTFail("Spawn dropped --preload, so the first prompt pays "
+                           + "the whole weight load instead of startup.")
+        }
+        XCTAssertEqual(argv[argv.index(after: i)], "first")
+    }
+
     func testArgvDoesNotPassBasePath() throws {
         try requireProductionBranch()
         let argv = makeProcess().makeArguments()

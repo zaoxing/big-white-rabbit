@@ -251,3 +251,24 @@ def test_rescan_picks_up_new_models_without_dropping_loaded(pool_factory, tmp_pa
     p.rescan()
     assert {m["id"] for m in p.list()} == {"a", "later"}
     assert p.loaded_ids == ["a"]
+
+
+# -- preload -----------------------------------------------------------------
+
+
+def test_preload_first_resolves_to_a_concrete_id(pool_factory):
+    """`--preload first` must pick the first LISTED model, not pass None.
+
+    Regression: None was passed to acquire(), and resolve(None) only
+    succeeds when the pool holds exactly one model -- so preloading failed
+    with "unknown model None" on any real multi-model directory.
+    """
+    p = pool_factory({"a": 4, "b": 4}, budget_gib=32)
+    listed = p.list()
+    first = listed[0]["id"]
+    mid, _engine = asyncio.run(p.acquire(first))
+    assert mid == first
+    assert p.loaded_ids == [first]
+
+    with pytest.raises(ModelPoolError):
+        p.resolve(None)      # the bug: None is not a valid multi-model target

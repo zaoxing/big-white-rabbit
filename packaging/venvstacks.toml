@@ -35,13 +35,17 @@ name = "mlx-base"
 runtime = "cpython-3.11"
 platforms = ["macosx_arm64"]
 # bwr[serve] pulls mlx, mlx-lm and the control-plane stack (fastapi,
-# uvicorn, pydantic, transformers). The local project is referenced by path
-# so the extension is built from this worktree, not fetched from an index --
-# bwr is not published. @BWR_WHEEL@ is substituted by packaging/build.py,
-# which builds the wheel first: venvstacks locks with hashes and a
-# file:// URL pointing at a DIRECTORY cannot be hashed, so a source
-# checkout is rejected outright. A wheel also pins the compiled
-# extension to one deterministic build.
+# uvicorn, pydantic, transformers). bwr itself is not published to an index,
+# so the requirement below points at a wheel built from this worktree --
+# which is also what makes pip compile `_bwr_metal` against the interpreter
+# that will load it.
+#
+# packaging/build.py builds that wheel and substitutes its path for the
+# placeholder in the requirement. The substitution is a plain string
+# replace, so the placeholder must not appear anywhere else in this file,
+# prose included. Why a wheel and not this directory: venvstacks locks with
+# hashes and installs with `--only-binary :all:`, and pip refuses to hash a
+# file:// URL that points at a directory.
 requirements = [
     "big-white-rabbit[serve] @ @BWR_WHEEL@",
 ]

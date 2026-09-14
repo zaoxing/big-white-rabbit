@@ -412,3 +412,11 @@ def test_server_info_aliases_name_the_loopback(client):
     assert "127.0.0.1" in aliases
     assert "localhost" in aliases
     assert len(aliases) == len(set(aliases)), "duplicate aliases render duplicate chips"
+
+
+def test_api_status_is_served_at_the_root(client):
+    """MenubarStatsPoller polls /api/status (NOT under /admin) every few
+    seconds. It 404'd on every tick, so the menubar showed no activity."""
+    r = client.get("/api/status")
+    assert r.status_code == 200
+    assert "active_models" in r.json()
