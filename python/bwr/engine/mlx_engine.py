@@ -950,7 +950,12 @@ class MLXEngine:
         """Account for one generated token: EOG, then stop, then cap."""
         self._decode_calls += 1
         if req.params.stop_at_eog and token in self._eog_ids():
-            return self._retire(req, "eog", token, piece)
+            # No piece: the end-of-turn marker is a control token, not text.
+            # MetalEngine retires the same way (token, empty piece), and the
+            # stream path never yields it at all -- passing `piece` here made
+            # the manual-loop paths (prefix cache, batching) emit a literal
+            # "<|im_end|>" into the response body.
+            return self._retire(req, "eog", token)
         req.output_tokens.append(token)
         req.n_generated += 1
         req.next_token = token

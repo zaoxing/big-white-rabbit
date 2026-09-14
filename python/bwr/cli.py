@@ -280,6 +280,10 @@ def _cmd_serve(argv: list[str]) -> int:
             "mlx_kv_bits": "mlx_kv_bits",
             "mlx_mtp": "mlx_mtp", "mlx_mtp_depth": "mlx_mtp_depth",
             "mlx_batch": "mlx_batch",
+            # Without this a nested layout like `<repo>/4-bit` would serve
+            # under the name "4-bit", which is what clients would see in
+            # /v1/models.
+            "served_model_name": "served_model_name",
             "comment": "", "bench": "", "fallback_gguf": "",
             "fallback_engine": "", "mlx_fallback": "", "mlx_engine": "",
         }

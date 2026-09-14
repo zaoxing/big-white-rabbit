@@ -351,3 +351,35 @@ def test_quantized_kv_still_works_without_batching():
         assert any(isinstance(c, QuantizedKVCache) for c in eng._make_cache())
     finally:
         eng.ctx.close()
+
+
+@needs_weights
+@pytest.mark.parametrize(
+    "kw", [{}, dict(mlx_prefix_cache=True), dict(mlx_batch=True)],
+)
+def test_eog_marker_never_reaches_the_response_text(kw):
+    """The end-of-turn token is a control token, not text.
+
+    Regression: the manual-loop paths (prefix cache, batching) retired on EOG
+    while passing the decoded piece, so a literal "<|im_end|>" landed in the
+    response body. The stream path never had it -- mlx-lm breaks before
+    yielding EOS -- which is exactly why it went unnoticed. MetalEngine
+    retires with an empty piece; MLX now matches.
+    """
+    from bwr.engine.config import RequestParams
+    from bwr.engine.mlx_engine import MLXEngine
+
+    eng = MLXEngine(str(MODEL), EngineConfig(engine="mlx", n_ctx=4096, **kw))
+    try:
+        rid = eng.add_request(
+            "Reply with exactly: recipe ok\n",
+            RequestParams(max_tokens=16, temp=0.0),
+        )
+        text = "".join(
+            o.piece for o in eng.drain() if o.request_id == rid and o.token >= 0
+        )
+        assert eng.state(rid).finish_reason == "eog", "test needs an EOG stop"
+        for marker in ("<|im_end|>", "<|endoftext|>"):
+            assert marker not in text, f"{marker} leaked into output: {text[-40:]!r}"
+    finally:
+        eng.ctx.close()
