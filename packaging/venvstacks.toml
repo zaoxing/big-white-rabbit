@@ -1,0 +1,47 @@
+# venvstacks spec for the macOS app bundle's embedded Python.
+#
+# The menubar app spawns `bwr serve` as a child process and resolves its
+# interpreter from the bundle (Sources/Server/PythonRuntime.swift):
+#
+#   Contents/Resources/Python/cpython-3.11/bin/python3
+#   Contents/Resources/Python/framework-mlx-base/lib/python3.11/site-packages
+#
+# Those two paths are a hard contract -- `PythonRuntime.resolve()` tries
+# $BWR_PYTHON_OVERRIDE, then that bundled path, then THROWS. There is no
+# system-Python fallback, so an app without these layers cannot serve on any
+# machine. `apps/bwr-mac/Scripts/build.sh` also refuses to stage unless both
+# directories exist.
+#
+# venvstacks derives each directory from the layer name: a runtime layer is
+# named verbatim, a framework layer is prefixed `framework-`. So the names
+# below are chosen to land exactly on the paths above -- renaming either one
+# silently produces a bundle that builds and then cannot start a server.
+#
+# Why bwr itself is installed here rather than copied as source: bwr has a
+# compiled extension (`_bwr_metal`, built from csrc/ by scikit-build-core).
+# Installing the project into the layer makes pip build that extension
+# against THIS interpreter, so the .so matches the CPython that will load it.
+# Copying the one from the development .venv would ship an extension built
+# against a different interpreter build.
+
+[[runtimes]]
+name = "cpython-3.11"
+python_implementation = "cpython@3.11.15"
+requirements = []
+platforms = ["macosx_arm64"]
+
+[[frameworks]]
+name = "mlx-base"
+runtime = "cpython-3.11"
+platforms = ["macosx_arm64"]
+# bwr[serve] pulls mlx, mlx-lm and the control-plane stack (fastapi,
+# uvicorn, pydantic, transformers). The local project is referenced by path
+# so the extension is built from this worktree, not fetched from an index --
+# bwr is not published. @BWR_WHEEL@ is substituted by packaging/build.py,
+# which builds the wheel first: venvstacks locks with hashes and a
+# file:// URL pointing at a DIRECTORY cannot be hashed, so a source
+# checkout is rejected outright. A wheel also pins the compiled
+# extension to one deterministic build.
+requirements = [
+    "big-white-rabbit[serve] @ @BWR_WHEEL@",
+]

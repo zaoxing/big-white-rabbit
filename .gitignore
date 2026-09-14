@@ -47,3 +47,9 @@ loop-run-log.md
 # mtplx CLI run artifacts (tune logs/receipts)
 outputs/
 
+
+# macOS bundle Python layers (venvstacks). _export alone is ~525 MB; all
+# three are reproducible from packaging/venvstacks.toml + build.py.
+packaging/_export/
+packaging/_build/
+packaging/_artifacts/

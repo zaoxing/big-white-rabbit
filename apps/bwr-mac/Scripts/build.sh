@@ -592,7 +592,16 @@ if [ "$WITH_CUSTOM_KERNEL" = "1" ]; then
     _build_custom_kernels
 fi
 
-log "Copying bwr package from source tree…"
+# CHANGED FROM UPSTREAM: copy bwr from the BUILT layer, not the worktree.
+#
+# Upstream rsync'd `$REPO_ROOT/bwr/`. Two problems here: this project keeps
+# its package at `python/bwr/`, so that path does not exist; and bwr has a
+# compiled extension (`_bwr_metal`) which is not in the source tree at all.
+# Resources/ precedes the framework site-packages on the bundle's PYTHONPATH,
+# so copying pure source would SHADOW the installed package and every
+# `import bwr._bwr_metal` would fail -- a bundle that builds and then cannot
+# serve. The venvstacks layer already holds source + extension together.
+log "Copying bwr package from the built Python layer…"
 rm -rf "$RESOURCES_DIR/bwr"
 mkdir -p "$RESOURCES_DIR/bwr"
 # rsync gives us per-tree exclude semantics that ditto lacks.
@@ -610,10 +619,14 @@ if [ "$WITH_CUSTOM_KERNEL" != "1" ]; then
         --exclude='custom_kernels/*/*.metallib'
     )
 fi
+BWR_SRC="$DONOR_LAYERS/framework-mlx-base/lib/python3.11/site-packages/bwr"
+[ -d "$BWR_SRC" ] || die "donor layer has no bwr package at $BWR_SRC"
 rsync -a \
     "${RSYNC_EXCLUDES[@]}" \
-    "$REPO_ROOT/bwr/" "$RESOURCES_DIR/bwr/"
-ok "  + bwr package"
+    "$BWR_SRC/" "$RESOURCES_DIR/bwr/"
+[ -n "$(find "$RESOURCES_DIR/bwr" -maxdepth 1 -name '_bwr_metal*.so' -print -quit)" ] \
+    || die "staged bwr package is missing the _bwr_metal extension"
+ok "  + bwr package (with _bwr_metal)"
 
 if [ "$WITH_CUSTOM_KERNEL" = "1" ]; then
     _validate_packaged_custom_kernel_extensions \
