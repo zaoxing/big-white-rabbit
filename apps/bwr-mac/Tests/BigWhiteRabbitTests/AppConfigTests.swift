@@ -33,7 +33,7 @@ final class AppConfigTests: XCTestCase {
 
     func testEndpointSavePreservesOtherFieldsAndRejectsCorruptStorage() throws {
         let url = AppConfig.settingsURL(basePath: tempBase)
-        let original = Data(#"{"server":{"port":8000,"host":"127.0.0.1","auto_start_on_launch":false},"auth":{"api_key":"keep"},"model":{"model_dirs":["/keep"]},"unknown":{"x":1}}"#.utf8)
+        let original = Data(#"{"server":{"port":1919,"host":"127.0.0.1","auto_start_on_launch":false},"auth":{"api_key":"keep"},"model":{"model_dirs":["/keep"]},"unknown":{"x":1}}"#.utf8)
         try original.write(to: url)
         try AppConfig.saveServerEndpoint(basePath: tempBase, port: 9000)
         var expected = try JSONSerialization.jsonObject(with: original) as! [String: Any]

@@ -166,7 +166,7 @@ final class ServerProcess: @unchecked Sendable {
     init(
         runtime: PythonRuntime,
         bindAddress: String = "127.0.0.1",
-        port: Int = 8000,
+        port: Int = 1919,
         basePath: URL = ServerProcess.defaultBasePath()
     ) {
         self.runtime  = runtime

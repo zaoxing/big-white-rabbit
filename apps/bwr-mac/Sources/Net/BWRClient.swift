@@ -45,7 +45,7 @@ final class BWRClient: ObservableObject {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
-    init(host: String = "127.0.0.1", port: Int = 8000, apiKey: String? = nil) {
+    init(host: String = "127.0.0.1", port: Int = 1919, apiKey: String? = nil) {
         self.host = host
         self.port = port
         self.apiKey = apiKey

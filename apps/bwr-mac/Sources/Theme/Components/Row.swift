@@ -214,7 +214,7 @@ struct LinkRow<Icon: View>: View {
     return ListGroup {
         Row(
             label: "Listen Address",
-            sublabel: "Default 8000. Restart server to apply."
+            sublabel: "Default 1919. Restart server to apply."
         ) {
             CodeChip(value: "127.0.0.1:1919")
         }

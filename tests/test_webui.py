@@ -291,3 +291,48 @@ def test_unknown_path_outside_those_families_still_404s(client):
 @pytest.mark.parametrize("path", ["models", "stats", "server-info", "global-settings"])
 def test_real_endpoints_are_not_shadowed_by_the_fallback(client, path):
     assert client.get(f"/admin/api/{path}").status_code == 200
+
+
+# -- found by exercising the live UI ------------------------------------------
+
+
+def test_dashboard_preset_asset_is_vendored():
+    """dashboard.js fetches /admin/static/bwr_preset.json. The first vendoring
+    pass copied js/css/img and the brand SVGs but missed this one, so the
+    preset panel 404'd against a live server."""
+    preset = pathlib.Path(STATIC_DIR) / "bwr_preset.json"
+    assert preset.is_file(), "bwr_preset.json was not vendored"
+    body = json.loads(preset.read_text())
+    assert body, "preset file is empty"
+    assert "omlx" not in preset.read_text().lower()
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["logout", "reload", "server/restart", "ssd-cache/clear", "stats/clear",
+     "upload/tasks", "web-search/test"],
+)
+def test_families_the_dashboard_polls_are_all_handled(client, path):
+    """Walking every fetch() in the bundled JS against a live server turned up
+    seven families with no handler at all, which 404'd instead of reporting
+    themselves unsupported."""
+    r = client.get(f"/admin/api/{path}")
+    assert r.status_code == 200, f"/admin/api/{path} is unhandled"
+    assert r.json()["supported"] is False
+
+
+def test_stats_family_does_not_shadow_the_real_stats_endpoint(client):
+    """'stats' is in the unsupported list so stats/clear is handled, but
+    /admin/api/stats itself is real. Exact routes register first and win --
+    if that ever changes, the dashboard loses its numbers."""
+    body = client.get("/admin/api/stats").json()
+    assert "active_models" in body
+    assert body.get("supported") is not False
+
+
+def test_audio_transcription_reports_unsupported(client):
+    """The chat page offers mic input; bwr serves text models only. It lives
+    under /v1, outside the /admin fallback, so it needs its own handler."""
+    r = client.post("/v1/audio/transcriptions")
+    assert r.status_code == 501
+    assert r.json()["supported"] is False

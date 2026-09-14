@@ -49,7 +49,7 @@ struct ServerScreen: View {
                                   defaultValue: "Port",
                                   comment: "Row label for the server port field"),
                     sublabel: String(localized: "server.row.port.sub",
-                                     defaultValue: "Default 8000. Server restarts on save.",
+                                     defaultValue: "Default 1919. Server restarts on save.",
                                      comment: "Sublabel under the Port field"),
                     isLast: true
                 ) {

@@ -91,7 +91,7 @@ struct TextInput: View {
 }
 
 #Preview("TextInput") {
-    @Previewable @State var port = "8000"
+    @Previewable @State var port = "1919"
     @Previewable @State var qty = "1024"
     @Previewable @State var temperature = "0.3"
     @Previewable @State var pwd = "sk-bwr-2k4j8"

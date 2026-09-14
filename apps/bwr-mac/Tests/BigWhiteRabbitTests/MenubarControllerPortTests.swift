@@ -597,7 +597,7 @@ final class MenubarControllerPortTests: XCTestCase {
         let comps = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
         XCTAssertEqual(comps.scheme, "http")
         XCTAssertEqual(comps.host, "127.0.0.1")
-        XCTAssertEqual(comps.port, 8000)
+        XCTAssertEqual(comps.port, 1919)
         XCTAssertEqual(comps.path, "/admin/auto-login")
         let items = comps.queryItems ?? []
         XCTAssertEqual(items.first { $0.name == "redirect" }?.value, "/admin/dashboard")
@@ -608,7 +608,7 @@ final class MenubarControllerPortTests: XCTestCase {
         let url = try XCTUnwrap(
             MenubarController.webAdminURL(host: "[::1]", port: 1919, apiKey: nil)
         )
-        XCTAssertTrue(url.absoluteString.hasPrefix("http://[::1]:8000/admin/auto-login"))
+        XCTAssertTrue(url.absoluteString.hasPrefix("http://[::1]:1919/admin/auto-login"))
     }
 
     func testWebAdminURLPercentEncodesKey() throws {
@@ -641,7 +641,7 @@ final class MenubarControllerPortTests: XCTestCase {
     // MARK: - menuAvailability
 
     func testMenuAvailabilityKeepsSettingsEnabledWhenServerIsOffline() {
-        for state in [ServerProcess.State.stopped, .failed(message: "Port 8000 in use")] {
+        for state in [ServerProcess.State.stopped, .failed(message: "Port 1919 in use")] {
             let availability = MenubarController.menuAvailability(for: state)
             XCTAssertTrue(availability.settings)
             XCTAssertFalse(availability.webDashboard)
@@ -675,7 +675,7 @@ final class MenubarControllerPortTests: XCTestCase {
 
     func testGenericFailureAlertSkipsPortConflictMessages() {
         XCTAssertFalse(
-            MenubarController.shouldShowGenericFailureAlert(message: "Port 8000 in use")
+            MenubarController.shouldShowGenericFailureAlert(message: "Port 1919 in use")
         )
         XCTAssertTrue(
             MenubarController.shouldShowGenericFailureAlert(

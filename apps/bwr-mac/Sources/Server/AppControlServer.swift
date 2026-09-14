@@ -35,7 +35,7 @@ final class AppControlServer: @unchecked Sendable {
                 state: AppControlServer.describe(state),
                 pid: server?.pid,
                 host: server?.host ?? "127.0.0.1",
-                port: server?.port ?? 8000,
+                port: server?.port ?? 1919,
                 message: message
             )
         }
@@ -52,7 +52,7 @@ final class AppControlServer: @unchecked Sendable {
                 state: AppControlServer.describe(state),
                 pid: server?.pid,
                 host: server?.host ?? "127.0.0.1",
-                port: server?.port ?? 8000,
+                port: server?.port ?? 1919,
                 message: message
             )
         }

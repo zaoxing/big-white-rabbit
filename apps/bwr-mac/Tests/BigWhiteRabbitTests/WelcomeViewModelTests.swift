@@ -14,7 +14,7 @@ final class WelcomeViewModelTests: XCTestCase {
 
     private func makeVM(basePath: String = "/Users/Fido/.bwr",
                         modelDir: String  = "/Users/Fido/.bwr/models",
-                        port: Int = 8000,
+                        port: Int = 1919,
                         apiKey: String? = nil) -> WelcomeViewModel {
         let cfg = AppConfig(
             bindAddress: "127.0.0.1",
@@ -45,9 +45,9 @@ final class WelcomeViewModelTests: XCTestCase {
         XCTAssertNil(vm.lastError)
     }
 
-    func testDefaultPortIs8000() {
+    func testDefaultPortIs1919() {
         let vm = makeVM()
-        XCTAssertEqual(vm.portText, "8000")
+        XCTAssertEqual(vm.portText, "1919")
     }
 
     // MARK: - validateSetup

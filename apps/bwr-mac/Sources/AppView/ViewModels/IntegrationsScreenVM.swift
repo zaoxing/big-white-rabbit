@@ -51,7 +51,7 @@ final class IntegrationsScreenVM {
     // the running server actually advertises (instead of the local config,
     // which can drift after a hot-reload).
     private(set) var serverHost: String = "127.0.0.1"
-    private(set) var serverPort: Int = 8000
+    private(set) var serverPort: Int = 1919
     private(set) var serverApiKey: String = ""
     private(set) var cliPrefix: String = "bwr"
 

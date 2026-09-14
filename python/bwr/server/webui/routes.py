@@ -375,10 +375,17 @@ def build_router(engine: Any, model_name: str, pool: Any = None) -> APIRouter:
     # reason, because pretending a benchmark started would be worse than
     # saying it cannot.
 
+    # Families found by walking every fetch() in the bundled JS against a
+    # live server -- the first pass missed seven of them, which 404'd.
+    # "stats" is safe here even though /api/stats is real: exact routes are
+    # registered first and win, so only unmatched subpaths (stats/clear)
+    # reach this fallback.
     _UNSUPPORTED = (
         "bench", "hf", "ms", "ane-tune", "profiles", "profile-fields",
         "profile-templates", "grammar", "hot-cache", "logs", "presets",
         "sub-keys", "oq", "cluster",
+        "logout", "reload", "server", "ssd-cache", "stats", "upload",
+        "web-search",
     )
 
     def _is_unsupported(path: str) -> bool:
@@ -442,3 +449,12 @@ def mount(app: Any, engine: Any, model_name: str, pool: Any = None) -> None:
     @app.get("/v1/mcp/tools")
     async def mcp_tools() -> JSONResponse:
         return JSONResponse({"tools": []})
+
+    @app.post("/v1/audio/transcriptions")
+    async def transcriptions() -> JSONResponse:
+        """The chat page offers mic input; bwr serves text models only."""
+        return JSONResponse(
+            {"detail": "audio transcription is not provided by the bwr backend",
+             "supported": False},
+            status_code=501,
+        )
