@@ -374,3 +374,41 @@ def test_vendored_js_initialises_the_mtp_fields():
         "initial modelSettings lost its mtp fields; the settings modal will "
         "throw on first render again"
     )
+
+
+# -- cross-language contract with the macOS app -------------------------------
+
+
+def test_server_info_carries_every_key_the_macos_dto_requires(client):
+    """`apps/bwr-mac/Sources/Net/DTO/ServerInfoDTO.swift` declares host, port
+    and aliases as NON-optional, so Swift's synthesised init(from:) throws
+    keyNotFound on a payload without them -- the whole response is discarded,
+    not just the missing field.
+
+    bwr's server-info answered with name/version/uptime_s/model_count and none
+    of those three, so `BWRClient.getServerInfo()` could never succeed against
+    a real bwr server. It has no caller today, which is the only reason this
+    was latent rather than a visible failure.
+
+    If the Swift DTO gains a required field, this test is where the two
+    languages are supposed to disagree loudly.
+    """
+    body = client.get("/admin/api/server-info").json()
+    for key in ("host", "port", "aliases"):
+        assert key in body, f"ServerInfoDTO requires {key!r}; decode would throw"
+    assert isinstance(body["host"], str) and body["host"]
+    assert isinstance(body["port"], int)
+    assert isinstance(body["aliases"], list)
+    assert all(isinstance(a, str) for a in body["aliases"])
+    # The bwr-specific keys the dashboard reads must survive the addition.
+    for key in ("name", "version", "uptime_s", "model_count", "backend"):
+        assert key in body
+
+
+def test_server_info_aliases_name_the_loopback(client):
+    """The chips the app renders are connect URLs, so the aliases must be
+    things a client can actually dial, and must not repeat."""
+    aliases = client.get("/admin/api/server-info").json()["aliases"]
+    assert "127.0.0.1" in aliases
+    assert "localhost" in aliases
+    assert len(aliases) == len(set(aliases)), "duplicate aliases render duplicate chips"

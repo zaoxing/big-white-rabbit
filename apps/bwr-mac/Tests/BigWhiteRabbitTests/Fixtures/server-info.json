@@ -1,15 +1,18 @@
 {
+    "name": "Big White Rabbit",
+    "version": "1.0.0",
+    "uptime_s": 412.8,
+    "model_count": 2,
+    "loaded": [
+        "Qwen3.8-27B-Uncensored-MLX-4bit"
+    ],
+    "backend": "bwr",
     "host": "127.0.0.1",
     "port": 8964,
     "aliases": [
         "localhost",
         "127.0.0.1",
         "mac.local",
-        "mac.local",
-        "mac.localdomain",
-        "192.0.2.10",
-        "192.0.2.11",
-        "192.0.2.12",
-        "192.0.2.13"
+        "192.0.2.10"
     ]
 }

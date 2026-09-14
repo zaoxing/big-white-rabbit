@@ -74,6 +74,32 @@ def _version() -> str:
         return "0"
 
 
+def _aliases(host: str) -> list[str]:
+    """Addresses a client on this machine can dial, for the macOS app's
+    connect-URL chips. Order is stable and duplicates are dropped, because the
+    app renders one chip per entry.
+
+    The hostname probe is best-effort: a Mac with no DNS name still has a
+    working loopback, and failing to resolve one must not blank the whole
+    server-info response.
+    """
+    names = ["localhost", "127.0.0.1"]
+    try:
+        import socket
+
+        local = socket.gethostname()
+        if local:
+            names.append(local)
+            if not local.endswith(".local"):
+                names.append(f"{local}.local")
+    except OSError:  # noqa: BLE001 - no hostname is not an error worth raising
+        pass
+    if host:
+        names.append(host)
+    seen: set[str] = set()
+    return [n for n in names if not (n in seen or seen.add(n))]
+
+
 def _t(key: str, **kwargs: Any) -> str:
     """oMLX's template/JS translation helper.
 
@@ -160,8 +186,15 @@ def build_router(engine: Any, model_name: str, pool: Any = None) -> APIRouter:
         return JSONResponse({"status": "ok", "auth_enabled": False})
 
     @router.get("/api/server-info")
-    async def server_info() -> JSONResponse:
+    async def server_info(request: Request) -> JSONResponse:
         entries = _entries()
+        # host/port/aliases are for the macOS app: ServerInfoDTO declares all
+        # three non-optional, so a payload without them makes Swift's decode
+        # throw and discard the WHOLE response, not just the missing keys.
+        # Derived from the request so they name the address the client
+        # actually reached us on rather than whatever we think we bound.
+        host = request.url.hostname or "127.0.0.1"
+        port = request.url.port or (443 if request.url.scheme == "https" else 80)
         return JSONResponse(
             {
                 "name": "Big White Rabbit",
@@ -170,6 +203,9 @@ def build_router(engine: Any, model_name: str, pool: Any = None) -> APIRouter:
                 "model_count": len(entries),
                 "loaded": [e["id"] for e in entries if e.get("loaded")],
                 "backend": "bwr",
+                "host": host,
+                "port": port,
+                "aliases": _aliases(host),
             }
         )
 
