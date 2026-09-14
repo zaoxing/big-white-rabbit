@@ -1,5 +1,5 @@
 {
-  "comment": "27B dense qwen35 hybrid, uncensored 4-bit (g64, 15.0 GiB) \u2014 the FASTEST local 4-bit 27B measured T19: 15.7 tok/s decode-only vs MTPLX-Optimized-Speed 14.4 (g32, 19.3 GiB), order-controlled. Defaults are the fast ones: n_ctx 8192 (no decode cost vs 4096) and f16 KV (mlx_kv_bits=8 costs ~4%, buys headroom not speed). mlx_prefix_cache ON: ~8% decode tax, but a 2308-tok repeat goes 28.1s -> 71.6ms TTFT (399x), net win below ~5000 output tokens; needs prompts over prefix_cache_min_tokens (256). mlx_batch ON: concurrent requests decode in one step. Aggregate throughput only ~1.16x at 4 concurrent (MLX's quantized kernel does not amortise rows), but the last request's first token arrives 5x sooner (11.9s -> 2.3s); marginal cost on top of prefix_cache is ~2%, inside noise. Composes with mlx_prefix_cache; forces f16 KV (no batched QuantizedKVCache upstream). spec/MTP stay OFF: both measured SLOWER here (row-scaling, SPEC-mlx-mtp-draft.md). n_seq_max 4 is advisory on MLX (not gated) but keeps /health's free_seq_slots honest.",
+  "comment": "27B dense qwen35 hybrid, uncensored 4-bit (g64, 15.0 GiB) \u2014 the FASTEST local 4-bit 27B measured T19: 15.7 tok/s decode-only vs MTPLX-Optimized-Speed 14.4 (g32, 19.3 GiB), order-controlled. Defaults are the fast ones: n_ctx 8192 (no decode cost vs 4096) and f16 KV (mlx_kv_bits=8 costs ~4%, buys headroom not speed). mlx_prefix_cache ON: ~8% decode tax, but a 2308-tok repeat goes 28.1s -> 71.6ms TTFT (399x), net win below ~5000 output tokens; needs prompts over prefix_cache_min_tokens (256). mlx_batch ON: concurrent requests decode in one step. Aggregate throughput only ~1.16x at 4 concurrent (MLX's quantized kernel does not amortise rows), but the last request's first token arrives 5x sooner (11.9s -> 2.3s); marginal cost on top of prefix_cache is ~2%, inside noise. Composes with mlx_prefix_cache; forces f16 KV (no batched QuantizedKVCache upstream). No Metal fallback: Qwen3.8-27B-Q4_K_M.gguf was removed, and the old 'MLX 13.2 vs Metal 9.85' comparison is no longer reproducible here. spec/MTP stay OFF: both measured SLOWER here (row-scaling, SPEC-mlx-mtp-draft.md). n_seq_max 4 is advisory on MLX (not gated) but keeps /health's free_seq_slots honest.",
   "model": "models/Qwen3.8-27B-Uncensored-MLX-4bit/4-bit",
   "engine": "mlx",
   "n_ctx": 8192,
@@ -11,14 +11,11 @@
   "flash_attn": true,
   "mlx_prefix_cache": true,
   "mlx_prefix_cache_size": 2,
-  "fallback_gguf": "models/Qwen3.8-27B-Q4_K_M.gguf",
-  "fallback_engine": "metal",
   "bench": {
     "engine": "mlx",
     "tok_s": 15.7,
     "protocol": "decode-only, excludes prefill (bwr tune figures include it; not comparable)",
     "vs_mtplx_optimized_speed": 14.4,
-    "vs_metal": 9.85,
     "n_ctx": 8192,
     "concurrent_4": {
       "agg_tok_s": 15.03,

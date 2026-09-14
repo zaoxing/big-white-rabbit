@@ -62,14 +62,14 @@ pip install -e ".[serve]"
 curl -L -o qwen38-mlx-4bit/model-00001-of-00003.safetensors \
   https://huggingface.co/orcarouter/Qwen3.8-27B-MLX/resolve/main/4-bit/model-00001-of-00003.safetensors
 # GGUF (metal backend), e.g. 30B MoE (~17 GB, single file)
-curl -L -o models/qwen3-30b.gguf \
+curl -L -o models/Qwen3-30B-A3B-Q4_K_M.gguf \
   https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF/resolve/main/Qwen3-30B-A3B-Q4_K_M.gguf
 
 # 4. Serve (default port 1919) — ready-to-use recipes
-bwr serve --recipe 27b   # 27B dense qwen35 hybrid: MLX 10.9 tok/s, 4bit 15G, n_ctx 8192 (fallback GGUF: bwr serve --recipe 27b --engine metal)
+bwr serve --recipe 27b   # 27B dense qwen35 hybrid uncensored 4bit: 15.7 tok/s decode, 15G, n_ctx 8192, prefix-cache + continuous batching on
 bwr serve --recipe 30b   # 30B-A3B MoE qwen3moe: Metal 58.2 tok/s (vs MLX 15.97), 4bit 17G, n_ctx 8192, prefix-cache 200× on 21k, spec +7.5% on rep
 # or explicit:
-bwr serve -m models/Qwen3.8-27B-MLX-4bit --engine mlx --ctx-size 8192
+bwr serve -m models/Qwen3.8-27B-Uncensored-MLX-4bit/4-bit --engine mlx --ctx-size 8192 --mlx-prefix-cache --mlx-batch
 bwr serve -m models/Qwen3-30B-A3B-Q4_K_M.gguf --engine metal --ctx-size 8192 --n-seq-max 2 --kv-unified --prefix-cache --speculative
 
 # 5. Check it answers
@@ -80,7 +80,7 @@ curl http://127.0.0.1:1919/v1/chat/completions \
 ```
 bwr info     -m /path/to/model.gguf
 bwr host     -m /path/to/model.gguf -c 8192   # Mac/chip/GPU/RAM probe + ctx fit (also see --no-adapt below)
-bwr tune -m models/Qwen3.8-27B-Q4_K_M.gguf --depths off,2,4   # per-machine n-gram depth tuning (report-only, Metal+MLX)
+bwr tune -m models/Qwen3-30B-A3B-Q4_K_M.gguf --depths off,2,4   # per-machine n-gram depth tuning (report-only, Metal+MLX)
 ```
 
 Point either an OpenAI or an Anthropic client at it — one server, one loaded model,
@@ -118,7 +118,7 @@ per-sequence `n_ctx_seq`. Pass `--kv-unified` to share one buffer instead. The M
 
 | Recipe | Model | Engine | `n_ctx` | `tok/s` | Notes |
 |---|---|---|---|---|---|
-| `bwr serve --recipe 27b` | `Qwen3.8-27B-Uncensored-MLX-4bit/4-bit` `qwen35` hybrid 64L `248320` | `mlx` | `8192` | `10.9` | `4bit 15G` fallback `Q4_K_M` `9.85` `metal`; `spec` off (hybrid); `mlx_prefix_cache` on (repeat 2K TTFT 28s→0.07s, parity exact) |
+| `bwr serve --recipe 27b` | `Qwen3.8-27B-Uncensored-MLX-4bit/4-bit` `qwen35` hybrid 64L `248320` | `mlx` | `8192` `n_seq_max=4` | `15.7` | `4bit g64 15G`, fastest local 4-bit 27B (vs `MTPLX-Optimized-Speed` `14.4`); decode-only timing. `mlx_prefix_cache` on (2308-tok repeat `28.1s→71.6ms`, ~8% decode tax); `mlx_batch` on (4 concurrent: worst TTFT `11.9s→2.3s`); `spec`/`MTP` off — both measured slower. No Metal fallback: that GGUF was removed |
 | `bwr serve --recipe 30b` | `Qwen3-30B-A3B-Q4_K_M.gguf` `qwen3moe` 48L `151936` | `metal` | `8192` `n_seq_max=2 kv_unified` | `58.2` | `vs MLX 15.97` `3.6×`; `spec +7.5%` rep (`drafts=4`), `prefix-cache 123.22s→0.62s 200×` on `21k`, `MLX fallback` `models/Qwen3-30B-A3B-4bit` |
 
 Recipes are `models/recipes/27b.json` / `30b.json` (JSON `EngineConfig` + `model` + `bench`); `bwr serve --recipe 27b --port 1919` or `bwr serve --recipe models/recipes/30b.json` (explicit `CLI` wins; `--receipt` is a deprecated alias). Q4_K_M remains the 30B recipe: Q8_0 fits at 8192 (30.25 GiB) but measured 34% slower decode on this Mac (llama-bench `tg128` 61.2→45.45; `bwr generate` 58.5→41.0 tok/s).
@@ -145,8 +145,8 @@ case you lose a ladder rung, not the process.
 (depths `off,2,4`; 5% noise band): one engine per candidate, median of `--reps`.
 
 ```bash
-bwr tune -m models/Qwen3.8-27B-Q4_K_M.gguf --engine metal --depths off,2,4 --reps 3 --max-tokens 128
-bwr tune --engine mlx -m models/Qwen3.8-27B-MLX-4bit --depths off,2,4
+bwr tune -m models/Qwen3-30B-A3B-Q4_K_M.gguf --engine metal --depths off,2,4 --reps 3 --max-tokens 128
+bwr tune --engine mlx -m models/Qwen3.8-27B-Uncensored-MLX-4bit/4-bit --depths off,2,4
 # verdict: keep baseline | --speculative --spec-max-drafts N (+% vs AR)
 ```
 
