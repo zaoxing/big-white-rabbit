@@ -1,0 +1,69 @@
+// SwiftUI shell. The main AppView is a `Window` scene managed by SwiftUI
+// (state restoration, autosave, opt-in lifecycle). AppDelegate stays in
+// charge of the menubar + server bootstrap + Welcome wizard.
+//
+// Window lifecycle
+//   • `.defaultLaunchBehavior(.suppressed)` keeps the window from appearing
+//     at launch — we're a menubar-first app and the user opens it via the
+//     status-item's "Admin Panel" command (or the Welcome wizard on first
+//     run, which lives in its own manual NSWindow controller).
+//   • `.handlesExternalEvents(matching: ["main"])` lets AppDelegate trigger
+//     the window the FIRST time by sending `bwrapp://main` to this exact app
+//     bundle when no NSWindow instance has been created yet. Subsequent shows
+//     just `makeKeyAndOrderFront` the cached window.
+//   • Dock-icon toggle (regular when visible, accessory when closed) is
+//     handled by AppDelegate via NSWindow notification observers — not in
+//     this file — so the welcome flow shares the same dock-icon logic.
+
+import Darwin
+import SwiftUI
+
+@main
+enum BWREntryPoint {
+    static func main() {
+        do {
+            if let request = try UpdateInstaller.workerRequest(
+                from: CommandLine.arguments
+            ) {
+                exit(UpdateInstaller.runWorker(request))
+            }
+        } catch {
+            NSLog("BigWhiteRabbit: invalid updater worker invocation: %@", error.localizedDescription)
+            exit(EXIT_FAILURE)
+        }
+
+        BWRApp.main()
+    }
+}
+
+struct BWRApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
+    var body: some Scene {
+        // Empty title string keeps the toolbar zone free of "BigWhiteRabbit" text
+        // (SwiftUI macOS 26 renders the Window title in the unified toolbar
+        // regardless of NSWindow.titleVisibility). The Window menu / Dock
+        // right-click menu show the bundle display name ("BigWhiteRabbit") as a
+        // fallback when title is empty, so we don't lose the in-menu name.
+        Window("", id: "main") {
+            AppView()
+                .environment(appDelegate.services)
+        }
+        .defaultLaunchBehavior(.suppressed)
+        .handlesExternalEvents(matching: ["main"])
+        .windowResizability(.contentMinSize)
+        // Replace the system "Quit BigWhiteRabbit" command (Cmd-Q from the in-app
+        // menu). Cmd-Q hides every visible window AND drops the Dock icon
+        // — same path as Dock → Quit (`applicationShouldTerminate`). The
+        // menubar status item's "Quit BigWhiteRabbit" remains the only path to fully
+        // terminate.
+        .commands {
+            CommandGroup(replacing: .appTermination) {
+                Button("Close Window") {
+                    appDelegate.hideWindowsAndDropDockIcon()
+                }
+                .keyboardShortcut("q", modifiers: .command)
+            }
+        }
+    }
+}

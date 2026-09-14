@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- Big White Rabbit -->
+  <ellipse cx="23" cy="20" rx="6.5" ry="15" fill="#FFFFFF" transform="rotate(-13 23 20)"/>
+  <ellipse cx="41" cy="20" rx="6.5" ry="15" fill="#FFFFFF" transform="rotate(13 41 20)"/>
+  <ellipse cx="23" cy="21" rx="3" ry="10" fill="#F7B8C8" transform="rotate(-13 23 21)"/>
+  <ellipse cx="41" cy="21" rx="3" ry="10" fill="#F7B8C8" transform="rotate(13 41 21)"/>
+  <circle cx="32" cy="43" r="17" fill="#FFFFFF"/>
+  <circle cx="25.5" cy="40" r="2.6" fill="#22202A"/>
+  <circle cx="38.5" cy="40" r="2.6" fill="#22202A"/>
+  <ellipse cx="32" cy="46.5" rx="2.8" ry="2" fill="#F7B8C8"/>
+  <path d="M32 48.5v2.5" stroke="#22202A" stroke-width="1.6" stroke-linecap="round"/>
+  <path d="M32 51q-3 2.5-6 1M32 51q3 2.5 6 1" stroke="#22202A" stroke-width="1.6"
+        stroke-linecap="round" fill="none"/>
+</svg>

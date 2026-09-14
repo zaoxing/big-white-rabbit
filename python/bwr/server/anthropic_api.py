@@ -223,6 +223,7 @@ def register_anthropic_routes(
     model: Model | MLXEngine,
     async_engine: AsyncEngine,
     model_name: str,
+    resolve=None,
     render_prompt,
 ) -> None:
     """Mount /v1/messages. `render_prompt` is injected rather than reimplemented so the
@@ -254,7 +255,11 @@ def register_anthropic_routes(
         prompt = render_prompt(pairs)
         params = _request_params(req)
         n_prompt = count_tokens(model, prompt)
-        request_id = await submit_request(async_engine, prompt, params)
+        if resolve is None:
+            served, engine_r = model_name, async_engine
+        else:
+            served, engine_r, _renderer = await resolve(req.model)
+        request_id = await submit_request(engine_r, prompt, params)
 
         # Read back off the params the ENGINE was given, so the sequences the engine
         # stops on and the ones the wire truncates on cannot be two different lists.
@@ -262,7 +267,7 @@ def register_anthropic_routes(
         if req.stream:
             return sse_response(
                 _stream(
-                    async_engine,
+                    engine_r,
                     request_id,
                     model_name,
                     known,
@@ -279,9 +284,9 @@ def register_anthropic_routes(
             parts: list[str] = []
             n_completion = 0
             reason = "eog"
-            async for out in async_engine.stream(request_id):
+            async for out in engine_r.stream(request_id):
                 if await http_request.is_disconnected():
-                    await async_engine.cancel(request_id)
+                    await engine_r.cancel(request_id)
                     break
                 if not (out.finished and out.piece == "" and out.finish_reason == "eog"):
                     n_completion += 1
@@ -295,7 +300,7 @@ def register_anthropic_routes(
             else:
                 parts.append(stopper.flush())
         finally:
-            async_engine.release(request_id)
+            engine_r.release(request_id)
 
         raw = "".join(parts)
         try:
@@ -321,7 +326,7 @@ def register_anthropic_routes(
 
         return A.MessagesResponse(
             content=blocks,
-            model=model_name,
+            model=served,
             stop_reason=stop_reason,
             # Which sequence matched, the field Anthropic clients read to learn which
             # delimiter ended the turn. Only ever set together with the matching

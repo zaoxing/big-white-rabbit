@@ -58,7 +58,9 @@ class HostCaps:
 def _sysctl(runner, key: str) -> str | None:
     try:
         out = runner(["sysctl", "-n", key])
-    except Exception:
+    except Exception:  # noqa: BLE001 - probe is best-effort; any failure (missing
+        # sysctl, unreadable key, non-Mac) means "unknown", and the caller
+        # already degrades on None. Never let a probe abort a serve.
         return None
     text = out.strip() if isinstance(out, str) else None
     return text or None
@@ -102,7 +104,9 @@ def probe(
         sp = sysprof(["system_profiler", "SPDisplaysDataType"])
         m = re.search(r"Total Number of Cores:\s*(\d+)", sp)
         caps.gpu_cores = int(m.group(1)) if m else None
-    except Exception:
+    except Exception:  # noqa: BLE001 - same best-effort contract: system_profiler
+        # is absent on minimal installs and slow/flaky under load. Unknown GPU
+        # core count is reported as None, not an error.
         caps.gpu_cores = None
 
     if not caps.mem_bytes:

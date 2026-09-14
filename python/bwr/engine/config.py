@@ -81,6 +81,14 @@ class EngineConfig:
     # (not a path here: the caller owns loading). Mutually exclusive with
     # `speculative`; MetalEngine raises if both are set.
     draft_max_drafts: int = 4
+    # MTP-head speculation on the MLX backend (SPEC-mlx-mtp-draft.md). Needs
+    # an `mtp.safetensors` sidecar next to the weights; MLXEngine raises if
+    # the flag is on and the model has none. Mutually exclusive with
+    # `speculative` (same rule as draft_max_drafts on Metal) -- both source
+    # drafts for the one verify path. Depth 0 means "ask the checkpoint"
+    # (mtp_depth_default, clamped to mtp_depth_max).
+    mlx_mtp: bool = False
+    mlx_mtp_depth: int = 0
     # Prefix-cache TTFT (SPEC-prefix-cache.md). Off by default: pins hold
     # seq slots outside the free pool, which only pays when prompts repeat.
     # Retired requests with fully-prefilled prompts of effective savings

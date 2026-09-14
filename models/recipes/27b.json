@@ -1,6 +1,6 @@
 {
-  "comment": "27B dense qwen35 hybrid — MLX 13.2 tok/s vs Metal 9.85. T15: q8 live-KV neutral on decode, FA-Steel reverted. T16: mlx_prefix_cache ON — repeat 2K prompt TTFT 28.14s→0.07s (400x), token parity 16/16, LRU size 2; short prompts (<256 toks) unaffected.",
-  "model": "models/Qwen3.8-27B-MLX-4bit",
+  "comment": "27B dense qwen35 hybrid — MLX 10.9 tok/s (uncensored 4-bit, kancilbersayap) vs Metal 9.85 (censored fallback). T15: q8 live-KV neutral on decode, FA-Steel reverted. T16: mlx_prefix_cache ON — repeat 2K prompt TTFT 28.14s→0.07s (400x), token parity 16/16, LRU size 2; short prompts (<256 toks) unaffected.",
+  "model": "models/Qwen3.8-27B-Uncensored-MLX-4bit/4-bit",
   "engine": "mlx",
   "n_ctx": 8192,
   "n_batch": 512,
@@ -13,5 +13,5 @@
   "mlx_prefix_cache_size": 2,
   "fallback_gguf": "models/Qwen3.8-27B-Q4_K_M.gguf",
   "fallback_engine": "metal",
-  "bench": {"engine":"mlx","tok_s":13.2,"vs_metal":9.85,"n_ctx":8192}
+  "bench": {"engine":"mlx","tok_s":10.9,"vs_metal":9.85,"n_ctx":8192}
 }
