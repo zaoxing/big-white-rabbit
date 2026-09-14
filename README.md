@@ -159,9 +159,10 @@ bwr tune --engine mlx -m models/Qwen3.8-27B-MLX-4bit --depths off,2,4
 | `EngineConfig(speculative=True)` | N-gram speculative decoding | Both backends, greedy only; ~1.5x on repetitive text, parity on prose; use `bwr tune` to pick depth per machine |
 | `--draft-model GGUF` | Draft-model speculation (metal) | Attention targets only; refused on hybrids |
 | `--prefix-cache` | Pin repeated prompt prefixes, skip re-prefill (metal) | Attention only; ~20x TTFT win measured |
-| `mlx_kv_bits=8` / `EngineConfig(mlx_kv_bits=8)` | Quantized KV cache (MLX qwen35) | 2x KV headroom for long context; default `f16` (None); live-KV `q8` measured neutral on decode |
+| `mlx_kv_bits=8` / `EngineConfig(mlx_kv_bits=8)` | Quantized KV cache (MLX qwen35) | 2x KV headroom for long context; default `f16` (None). Costs **~4% decode** (alternating A/B, 15.82→15.13) — a headroom trade, not a speed win |
 | `ModelParams(expert_weights="cpu")` | MoE expert weights on CPU (metal) | Residency knob only — no prefetch policy yet |
 | `bwr host` / `--no-adapt` | Host RAM fit for `n_ctx` | Auto-clamp down ladder as above; explicit wins, `--no-adapt` disables |
+| `--mlx-prefix-cache` | MLX exact-prefix prompt cache | Repeat prompts skip prefill: 2308-tok repeat measured **28.1s → 70ms** TTFT. Costs **~8% decode** on every request (alternating A/B), so it wins until responses exceed ~5000 tokens; needs prompts over `prefix_cache_min_tokens` (256) |
 | `--model-dir DIR` | Multi-model pool: lazy load + LRU eviction | Instead of `-m`; nothing loads until a request names a model. See below |
 | `--mlx-mtp` | MTP-head speculation (MLX) | Output-identical but **slower** on mlx-lm 0.31.3 — the trunk forward is linear in rows. Off for a reason; see `SPEC-mlx-mtp-draft.md` |
 
