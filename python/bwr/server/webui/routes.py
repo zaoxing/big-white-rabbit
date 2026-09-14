@@ -180,6 +180,11 @@ def build_router(engine: Any, model_name: str, pool: Any = None) -> APIRouter:
         engine.ctx.decode_calls in /api/stats for what it does track."""
         return JSONResponse({"activity": [], "requests": []})
 
+    # The dashboard dereferences `m.cluster.live` unguarded. bwr is
+    # single-node, so `live` is null -- present, so the expression
+    # short-circuits instead of throwing on undefined.
+    _NO_CLUSTER = {"live": None, "enabled": False}
+
     def _single_entry() -> dict[str, Any]:
         return {
             "id": model_name,
@@ -187,6 +192,7 @@ def build_router(engine: Any, model_name: str, pool: Any = None) -> APIRouter:
             "model_type": "llm",
             "loaded": True,
             "status": "loaded",
+            "cluster": dict(_NO_CLUSTER),
             "n_ctx": engine.ctx.n_ctx,
             "n_ctx_seq": engine.ctx.n_ctx_seq,
         }
@@ -199,6 +205,7 @@ def build_router(engine: Any, model_name: str, pool: Any = None) -> APIRouter:
             "model_type": "llm",
             "loaded": m["loaded"],
             "status": "loaded" if m["loaded"] else "available",
+            "cluster": dict(_NO_CLUSTER),
             "kind": m["kind"],
             "size_bytes": m["size_bytes"],
         }
@@ -351,6 +358,17 @@ def build_router(engine: Any, model_name: str, pool: Any = None) -> APIRouter:
             {
                 "model_id": model_id,
                 "read_only": True,
+                # oMLX-shaped capability flags. All false: bwr supports none
+                # of these. `mtp_compatibility_reason` must be a STRING, not
+                # absent -- the template calls .includes() on it whenever
+                # mtp_compatible is falsy, and undefined.includes throws.
+                "mtp_compatible": False,
+                "mtp_compatibility_reason": "not supported by the bwr backend",
+                "mtp_enabled": False,
+                "vlm_mtp_enabled": False,
+                "dflash_enabled": False,
+                "moe_expert_offload_enabled": False,
+                "is_paroquant": False,
                 "settings": {
                     "n_ctx": cfg.n_ctx,
                     "n_batch": cfg.n_batch,
@@ -385,7 +403,7 @@ def build_router(engine: Any, model_name: str, pool: Any = None) -> APIRouter:
         "profile-templates", "grammar", "hot-cache", "logs", "presets",
         "sub-keys", "oq", "cluster",
         "logout", "reload", "server", "ssd-cache", "stats", "upload",
-        "web-search",
+        "web-search", "usage",
     )
 
     def _is_unsupported(path: str) -> bool:

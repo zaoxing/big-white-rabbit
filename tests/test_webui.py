@@ -336,3 +336,41 @@ def test_audio_transcription_reports_unsupported(client):
     r = client.post("/v1/audio/transcriptions")
     assert r.status_code == 501
     assert r.json()["supported"] is False
+
+
+def test_model_entries_carry_a_cluster_shape(client):
+    """The dashboard dereferences `m.cluster.live` unguarded. bwr is
+    single-node, so `live` must be present-and-null rather than absent --
+    absent throws a TypeError in the template."""
+    for m in client.get("/admin/api/models").json()["models"]:
+        assert "cluster" in m, "cluster key missing -> template TypeError"
+        assert m["cluster"]["live"] is None
+
+
+def test_model_settings_carry_mtp_capability_flags(client):
+    """_modal_model_settings.html calls
+    `modelSettings.mtp_compatibility_reason.includes(...)` whenever
+    mtp_compatible is falsy, so the reason must be a STRING, not absent."""
+    body = client.get("/admin/api/models/x/settings").json()
+    assert body["mtp_compatible"] is False
+    assert isinstance(body["mtp_compatibility_reason"], str)
+
+
+def test_usage_family_is_handled(client):
+    """The dashboard polls /admin/api/usage?range=today on load."""
+    r = client.get("/admin/api/usage?range=today&model=")
+    assert r.status_code == 200
+    assert r.json()["supported"] is False
+
+
+def test_vendored_js_initialises_the_mtp_fields():
+    """Upstream's initial modelSettings omitted mtp_compatible /
+    mtp_compatibility_reason, so the modal's x-show threw on first render,
+    before any model was loaded. Patched in the vendored JS; a resync must
+    not drop it."""
+    js = (pathlib.Path(STATIC_DIR) / "js" / "dashboard.js").read_text()
+    head = js[: js.index("model_alias: ''")]
+    assert "mtp_compatibility_reason: ''" in head, (
+        "initial modelSettings lost its mtp fields; the settings modal will "
+        "throw on first render again"
+    )

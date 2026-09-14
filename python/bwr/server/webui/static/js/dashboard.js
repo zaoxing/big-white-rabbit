@@ -213,6 +213,15 @@
             showModelSettingsModal: false,
             selectedModel: null,
             modelSettings: {
+                // CHANGED FROM UPSTREAM: the initial state omitted these two,
+                // but _modal_model_settings.html evaluates
+                // `!modelSettings.mtp_compatible
+                //   && modelSettings.mtp_compatibility_reason.includes(...)`
+                // on first render -- before any model is loaded -- so
+                // undefined.includes() threw. buildModelSettingsState() does
+                // define both; only the pre-load state was missing them.
+                mtp_compatible: false,
+                mtp_compatibility_reason: '',
                 model_alias: '',
                 model_type_override: '',
                 max_context_window: null,

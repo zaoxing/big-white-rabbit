@@ -15,6 +15,12 @@ vendor/LICENSE.omlx-Apache-2.0). Changes made, per Apache-2.0 section 4(b):
   state for both this and a real oMLX install without collision.
 - The bundled webfonts (~11 MB) were dropped; the UI falls back to the system
   font stack.
+- Two upstream defects are patched in the vendored `dashboard.js`, both
+  found by loading the page in a real browser: the initial `modelSettings`
+  omitted `mtp_compatible` / `mtp_compatibility_reason`, which made the
+  settings modal throw on first render (the template calls `.includes()` on
+  the reason whenever compatible is falsy). Marked CHANGED FROM UPSTREAM at
+  the call sites.
 - The server side is NOT oMLX's: `routes.py` here is a small original adapter
   over bwr's own engine, not a copy of `omlx/admin/routes.py`.
 
