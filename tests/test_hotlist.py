@@ -17,6 +17,10 @@ from bwr.engine.hotlist import ExpertHotlist
 
 MODEL_PATH = os.environ.get("BWR_MOE_MODEL")
 
+# NOT named `pytestmark`: that name applies module-wide, and the pure-logic
+# ExpertHotlist tests below need no weights. Every test that touches a real
+# model must carry this decorator explicitly -- two of them did not, and so
+# failed with `Model(None, ...)` -> TypeError instead of skipping.
 pytestmark_moe = pytest.mark.skipif(
     not MODEL_PATH or not os.path.exists(MODEL_PATH),
     reason="set BWR_MOE_MODEL to a MoE .gguf path to run hotlist integration",
@@ -74,6 +78,7 @@ def test_multi_layer_isolation() -> None:
     assert hl.resident(1) == [1]
 
 
+@pytestmark_moe
 def test_engine_hotlist_wiring() -> None:
     """Engine with ssd_hotlist auto-feeds hotlist from expert_activations."""
     cfg = EngineConfig(
@@ -92,6 +97,7 @@ def test_engine_hotlist_wiring() -> None:
     model.close()
 
 
+@pytestmark_moe
 def test_hotlist_needs_recording() -> None:
     with pytest.raises(ValueError, match="record_experts"):
         EngineConfig(n_ctx=512, n_seq_max=1, ssd_hotlist=True, record_experts=False).validate_hotlist()

@@ -23,6 +23,10 @@ venv/
 *.safetensors
 models/Qwen3.8-27B-MLX-4bit/
 models/Qwen3-30B-A3B-4bit/
+models/Qwen3.8-27B-Uncensored-MLX-4bit/
+models/Qwen3.8-27B-MTP-4bit/
+models/Qwen3.8-27B-AWQ-5.0bpw/
+models/Qwen3.8-27B-MTPLX-Optimized-Speed/
 
 # macOS
 .DS_Store
@@ -39,3 +43,7 @@ loop-constraints.md
 loop-budget.md
 STATE.md
 loop-run-log.md
+
+# mtplx CLI run artifacts (tune logs/receipts)
+outputs/
+
