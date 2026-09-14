@@ -119,7 +119,7 @@ final class ReleasesCheckerTests: XCTestCase {
             tagName: tag,
             name: tag,
             body: nil,
-            htmlURL: URL(string: "https://github.com/jundot/bwr/releases/tag/\(tag)")!,
+            htmlURL: URL(string: "https://github.com/zaoxing/big-white-rabbit/releases/tag/\(tag)")!,
             prerelease: prerelease,
             draft: draft,
             assets: []
@@ -159,5 +159,36 @@ final class UpdateControllerPrefsTests: XCTestCase {
         ) as? [String: Any]
         XCTAssertEqual(saved?["autoNotify"] as? Bool, false)
         XCTAssertNil(saved?["autoDownload"])
+    }
+}
+
+// MARK: - Update feed ownership
+
+/// The fork's rename pass rewrote the repository NAME but not its OWNER, so
+/// the updater pointed at `zaoxing/big-white-rabbit` — upstream's account with our repo
+/// name on the end. That URL is not cosmetic: `check()` reads a release's
+/// `browser_download_url` from it and `UpdateInstaller` atomically swaps the
+/// running .app with what it downloads. A feed in someone else's namespace is
+/// therefore an install path we do not control.
+///
+/// It 404s today, which is the only reason this was inert rather than
+/// exploitable. Pinned here so a resync from upstream cannot quietly restore
+/// it.
+final class ReleasesFeedOwnershipTests: XCTestCase {
+
+    func testUpdateFeedPointsAtThisProjectsOwnRepository() {
+        let url = ReleasesChecker.releasesURL
+        XCTAssertEqual(url.host, "api.github.com")
+        XCTAssertTrue(
+            url.path.hasPrefix("/repos/zaoxing/big-white-rabbit/"),
+            "Update feed must live in this project's namespace, got \(url.path)"
+        )
+    }
+
+    func testUpdateFeedIsNotUpstreamsNamespace() {
+        XCTAssertFalse(
+            ReleasesChecker.releasesURL.absoluteString.contains("jundot"),
+            "Updater would install DMGs from the upstream author's account."
+        )
     }
 }
