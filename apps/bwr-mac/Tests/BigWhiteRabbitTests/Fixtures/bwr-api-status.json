@@ -2,15 +2,15 @@
  "active_models": {
   "models": [
    {
-    "decode_calls": 8,
-    "id": "Qwen3-30B-A3B-4bit",
+    "decode_calls": 332,
+    "id": "SmolLM-135M-Instruct-4bit",
     "in_flight": 0,
     "loaded": true
    }
   ]
  },
  "loaded": [
-  "Qwen3-30B-A3B-4bit"
+  "SmolLM-135M-Instruct-4bit"
  ],
  "status": "ok"
 }

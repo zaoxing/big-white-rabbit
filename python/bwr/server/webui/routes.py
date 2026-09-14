@@ -46,6 +46,27 @@ from jinja2 import ChainableUndefined, Undefined
 from starlette.requests import Request
 
 from . import PACKAGE_DIR, STATIC_DIR, TEMPLATES_DIR
+from ..bench import BenchError
+from ..downloads import DownloadError
+from ..profiles import ProfileError
+
+
+class _Unavailable(RuntimeError):
+    """A surface that needs state this server was not started with."""
+
+
+async def _json_body(request: Request) -> dict[str, Any]:
+    """Request body as a dict; `{}` for an absent or non-object body.
+
+    Every profile write treats "no field" as "leave it alone", so a missing
+    body is a no-op patch rather than a 400 -- the same shape the client
+    sends when it omits its nil fields.
+    """
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - absent or malformed body is not fatal
+        return {}
+    return body if isinstance(body, dict) else {}
 
 _STARTED = time.time()
 _I18N_PATH = PACKAGE_DIR / "i18n" / "en.json"
@@ -166,6 +187,8 @@ def install_log_buffer() -> None:
 
 def build_router(
     engine: Any, model_name: str, pool: Any = None, stats: Any = None,
+    profiles: Any = None, downloads: Any = None, hub: Any = None,
+    bench: Any = None,
 ) -> APIRouter:
     """Router for /admin.
 
@@ -596,6 +619,263 @@ def build_router(
             }
         )
 
+    # -- throughput benchmarks --------------------------------------------
+    #
+    # Runs go through the ordinary serving path, so the numbers include what
+    # a real request pays. See server/bench.py.
+
+    @router.post("/api/bench/start")
+    async def api_bench_start(request: Request) -> JSONResponse:
+        if bench is None:
+            return JSONResponse(
+                {"detail": "benchmarks need a model directory"}, status_code=400
+            )
+        body = await _json_body(request)
+        try:
+            return JSONResponse(bench.start(
+                body.get("model_id") or body.get("modelId") or model_name,
+                prompt_lengths=body.get("prompt_lengths") or body.get("promptLengths"),
+                generation_length=int(
+                    body.get("generation_length")
+                    or body.get("generationLength") or 64
+                ),
+                batch_sizes=body.get("batch_sizes") or body.get("batchSizes"),
+                context_profile=body.get("context_profile")
+                or body.get("contextProfile"),
+            ))
+        except (BenchError, ValueError, TypeError) as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+
+    @router.get("/api/bench/{bench_id}/results")
+    async def api_bench_results(bench_id: str) -> JSONResponse:
+        body = bench.get(bench_id) if bench is not None else None
+        if body is None:
+            return JSONResponse({"detail": "unknown benchmark"}, status_code=404)
+        return JSONResponse(body)
+
+    @router.post("/api/bench/{bench_id}/cancel")
+    async def api_bench_cancel(bench_id: str) -> JSONResponse:
+        ok = bench.cancel(bench_id) if bench is not None else False
+        return JSONResponse(
+            {"status": "cancelling" if ok else "not_running", "bench_id": bench_id}
+        )
+
+    # -- Hugging Face downloads -------------------------------------------
+    #
+    # Downloads land in the serving model directory and the manager rescans
+    # the pool when one finishes, so a completed download is servable without
+    # a restart. See server/downloads.py.
+
+    _EMPTY_TASKS = {"tasks": []}
+
+    @router.get("/api/hf/tasks")
+    async def api_hf_tasks() -> JSONResponse:
+        if downloads is None:
+            return JSONResponse(_EMPTY_TASKS)
+        return JSONResponse({"tasks": downloads.list()})
+
+    @router.post("/api/hf/download")
+    async def api_hf_download(request: Request) -> JSONResponse:
+        body = await _json_body(request)
+        if downloads is None:
+            return JSONResponse(
+                {"success": False, "detail": "no model directory to download into"},
+                status_code=400,
+            )
+        try:
+            task = downloads.start(
+                body.get("repo_id") or body.get("repoId") or "",
+                token=body.get("hf_token") or body.get("hfToken") or None,
+            )
+        except DownloadError as exc:
+            return JSONResponse({"success": False, "detail": str(exc)}, status_code=400)
+        return JSONResponse({"success": True, "task": task})
+
+    @router.post("/api/hf/cancel/{task_id}")
+    async def api_hf_cancel(task_id: str) -> JSONResponse:
+        if downloads is None:
+            return JSONResponse({"status": "unknown"}, status_code=404)
+        ok = downloads.cancel(task_id)
+        return JSONResponse({"status": "cancelled" if ok else "not_running"})
+
+    @router.post("/api/hf/retry/{task_id}")
+    async def api_hf_retry(task_id: str) -> JSONResponse:
+        if downloads is None:
+            return JSONResponse({"success": False}, status_code=404)
+        try:
+            task = downloads.retry(task_id)
+        except DownloadError as exc:
+            return JSONResponse({"success": False, "detail": str(exc)}, status_code=400)
+        return JSONResponse({"success": True, "task": task})
+
+    @router.get("/api/hf/task/{task_id}")
+    async def api_hf_task(task_id: str) -> JSONResponse:
+        task = downloads.get(task_id) if downloads is not None else None
+        if task is None:
+            return JSONResponse({"detail": "unknown task"}, status_code=404)
+        return JSONResponse({"task": task})
+
+    @router.delete("/api/hf/task/{task_id}")
+    async def api_hf_forget(task_id: str) -> JSONResponse:
+        """Drop the task from the list. Downloaded files are left alone --
+        removing a model is `DELETE /hf/models/{name}`, and conflating the
+        two would make dismissing a finished row delete the weights."""
+        if downloads is None:
+            return JSONResponse({"deleted": False}, status_code=404)
+        try:
+            return JSONResponse({"deleted": downloads.forget(task_id)})
+        except DownloadError as exc:
+            return JSONResponse({"deleted": False, "detail": str(exc)}, status_code=400)
+
+    @router.delete("/api/hf/models/{name:path}")
+    async def api_hf_delete_model(name: str) -> JSONResponse:
+        if downloads is None:
+            return JSONResponse({"deleted": False}, status_code=404)
+        try:
+            deleted = downloads.delete_model(name)
+        except DownloadError as exc:
+            return JSONResponse({"deleted": False, "detail": str(exc)}, status_code=400)
+        if deleted and pool is not None:
+            pool.rescan()
+        return JSONResponse({"deleted": deleted, "name": name})
+
+    @router.get("/api/hf/search")
+    async def api_hf_search(q: str = "", limit: int = 30) -> JSONResponse:
+        if hub is None:
+            return JSONResponse({"models": [], "total": 0})
+        models = hub.search(q, limit=limit)
+        return JSONResponse({"models": models, "total": len(models)})
+
+    @router.get("/api/hf/recommended")
+    async def api_hf_recommended(limit: int = 20) -> JSONResponse:
+        if hub is None:
+            return JSONResponse({"trending": [], "popular": []})
+        return JSONResponse(hub.recommended(limit=limit))
+
+    @router.get("/api/hf/model-info")
+    async def api_hf_model_info(repo_id: str = "") -> JSONResponse:
+        info = hub.model_info(repo_id) if (hub is not None and repo_id) else None
+        if info is None:
+            return JSONResponse({"detail": "unknown repo"}, status_code=404)
+        return JSONResponse(info)
+
+    # -- profiles and templates -------------------------------------------
+    #
+    # Two collections: global templates (some built in and read-only) and
+    # per-model profiles. See server/profiles.py for why the sampling/engine
+    # split is enforced there rather than in the UI.
+
+    def _need_profiles() -> Any:
+        if profiles is None:
+            raise _Unavailable("this server was started without a model directory")
+        return profiles
+
+    @router.get("/api/profile-templates")
+    async def api_templates() -> JSONResponse:
+        if profiles is None:
+            return JSONResponse({"templates": []})
+        return JSONResponse(
+            {"templates": [t.to_dict() for t in profiles.list_templates()]}
+        )
+
+    @router.post("/api/profile-templates")
+    async def api_create_template(request: Request) -> JSONResponse:
+        body = await _json_body(request)
+        try:
+            t = _need_profiles().create_template(
+                body.get("name", ""),
+                display_name=body.get("display_name") or body.get("displayName") or "",
+                description=body.get("description"),
+                settings=body.get("settings") or {},
+            )
+        except (ProfileError, _Unavailable) as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        return JSONResponse({"template": t.to_dict()})
+
+    @router.put("/api/profile-templates/{name}")
+    async def api_update_template(name: str, request: Request) -> JSONResponse:
+        body = await _json_body(request)
+        try:
+            t = _need_profiles().update_template(name, **body)
+        except (ProfileError, _Unavailable) as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        return JSONResponse({"template": t.to_dict()})
+
+    @router.delete("/api/profile-templates/{name}")
+    async def api_delete_template(name: str) -> JSONResponse:
+        try:
+            deleted = _need_profiles().delete_template(name)
+        except (ProfileError, _Unavailable) as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        return JSONResponse({"deleted": deleted, "name": name})
+
+    @router.get("/api/models/{model_id:path}/profiles")
+    async def api_profiles(model_id: str) -> JSONResponse:
+        if profiles is None:
+            return JSONResponse({"profiles": []})
+        return JSONResponse(
+            {"profiles": [p.to_dict(base_model=model_id)
+                          for p in profiles.list_profiles(model_id)]}
+        )
+
+    @router.post("/api/models/{model_id:path}/profiles")
+    async def api_create_profile(model_id: str, request: Request) -> JSONResponse:
+        body = await _json_body(request)
+        try:
+            p = _need_profiles().create_profile(
+                model_id,
+                body.get("name", ""),
+                display_name=body.get("display_name") or body.get("displayName") or "",
+                description=body.get("description"),
+                settings=body.get("settings") or {},
+                source_template=body.get("source_template"),
+                also_save_as_template=bool(body.get("also_save_as_template")),
+                expose_as_model=bool(body.get("expose_as_model")),
+            )
+        except (ProfileError, _Unavailable) as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        return JSONResponse({"profile": p.to_dict(base_model=model_id)})
+
+    @router.put("/api/models/{model_id:path}/profiles/{name}")
+    async def api_update_profile(model_id: str, name: str, request: Request) -> JSONResponse:
+        body = await _json_body(request)
+        try:
+            p = _need_profiles().update_profile(model_id, name, **body)
+        except (ProfileError, _Unavailable) as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        return JSONResponse({"profile": p.to_dict(base_model=model_id)})
+
+    @router.delete("/api/models/{model_id:path}/profiles/{name}")
+    async def api_delete_profile(model_id: str, name: str) -> JSONResponse:
+        try:
+            deleted = _need_profiles().delete_profile(model_id, name)
+        except (ProfileError, _Unavailable) as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        return JSONResponse({"deleted": deleted, "name": name})
+
+    @router.post("/api/models/{model_id:path}/profiles/{name}/apply")
+    async def api_apply_profile(model_id: str, name: str) -> JSONResponse:
+        """Report the settings this profile would put into effect.
+
+        bwr's engine settings are fixed at load, so "apply" cannot mutate a
+        resident engine. It answers what the profile holds and which half of
+        it needs a reload, which is exactly what the caller has to know --
+        rather than reporting a success that changed nothing.
+        """
+        if profiles is None:
+            return JSONResponse({"detail": "no profile store"}, status_code=400)
+        p = profiles.get_profile(model_id, name)
+        if p is None:
+            return JSONResponse(
+                {"detail": f"unknown profile {name!r} for {model_id}"}, status_code=404
+            )
+        return JSONResponse({
+            "model_id": model_id,
+            "settings": dict(p.settings),
+            "applied_now": p.sampling_settings,
+            "requires_reload": p.has_engine_fields,
+        })
+
     @router.get("/api/usage")
     async def api_usage(range: str = "today", model: str = "") -> JSONResponse:
         """Token/request totals, optionally for one model.
@@ -760,12 +1040,16 @@ def build_router(
 
 
 def mount(
-    app: Any, engine: Any, model_name: str, pool: Any = None, *, stats: Any = None,
+    app: Any, engine: Any, model_name: str, pool: Any = None, *,
+    stats: Any = None, profiles: Any = None, downloads: Any = None,
+    hub: Any = None, bench: Any = None,
 ) -> None:
     """Attach the UI at /admin plus the two /v1 helpers the page polls."""
     install_log_buffer()
     app.include_router(
-        build_router(engine, model_name, pool, stats), prefix="/admin"
+        build_router(engine, model_name, pool, stats, profiles, downloads, hub,
+                     bench),
+        prefix="/admin"
     )
     app.mount(
         "/admin/static", StaticFiles(directory=str(STATIC_DIR)), name="bwr-webui-static"

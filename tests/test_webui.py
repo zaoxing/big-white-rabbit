@@ -201,13 +201,15 @@ class _PoolStub:
 
 
 @pytest.fixture
-def pool_client():
+def pool_client(tmp_path):
+    from bwr.server.profiles import ProfileStore
     from bwr.server.stats import ServerStats
 
     app = FastAPI()
     pool = _PoolStub()
     stats = ServerStats()
-    mount(app, _StubEngine(), "a", pool, stats=stats)
+    mount(app, _StubEngine(), "a", pool, stats=stats,
+          profiles=ProfileStore(tmp_path))
     return TestClient(app), pool
 
 
@@ -286,8 +288,12 @@ def test_unsupported_families_answer_empty_not_404(client, path):
 
 
 def test_unsupported_writes_are_501_not_a_fake_success(client):
-    """Pretending a benchmark started is worse than saying it cannot."""
-    r = client.post("/admin/api/bench/start")
+    """Pretending a quantization job started is worse than saying it cannot.
+
+    This used to POST /bench/start, which has a real handler now -- the
+    assertion has to point at a family bwr genuinely has no equivalent for.
+    """
+    r = client.post("/admin/api/oq/start")
     assert r.status_code == 501
     assert r.json()["supported"] is False
 
@@ -545,3 +551,198 @@ def test_reload_rescans_the_pool(pool_client):
 def test_reload_without_a_pool_refuses_clearly(client):
     r = client.post("/admin/api/reload")
     assert r.status_code == 409
+
+
+# -- profiles and templates ---------------------------------------------------
+
+
+def test_templates_list_includes_the_builtins(pool_client):
+    client, _ = pool_client
+    names = {t["name"] for t in client.get("/admin/api/profile-templates").json()["templates"]}
+    assert {"precise", "balanced", "creative"} <= names
+
+
+def test_template_crud_round_trip(pool_client):
+    client, _ = pool_client
+    r = client.post("/admin/api/profile-templates",
+                    json={"name": "mine", "display_name": "Mine",
+                          "settings": {"top_p": 0.5}})
+    assert r.status_code == 200
+    assert r.json()["template"]["settings"] == {"top_p": 0.5}
+
+    r = client.put("/admin/api/profile-templates/mine", json={"display_name": "Ours"})
+    assert r.json()["template"]["display_name"] == "Ours"
+
+    assert client.delete("/admin/api/profile-templates/mine").json()["deleted"] is True
+
+
+def test_editing_a_builtin_template_is_refused(pool_client):
+    client, _ = pool_client
+    assert client.put("/admin/api/profile-templates/precise",
+                      json={"display_name": "x"}).status_code == 400
+    assert client.delete("/admin/api/profile-templates/precise").status_code == 400
+
+
+def test_profile_crud_round_trip(pool_client):
+    client, _ = pool_client
+    r = client.post("/admin/api/models/a/profiles",
+                    json={"name": "fast", "settings": {"temperature": 0.1}})
+    assert r.status_code == 200, r.text
+    body = r.json()["profile"]
+    assert body["settings"] == {"temperature": 0.1}
+    assert body["model_id"] == "a:fast"
+    assert body["has_engine_fields"] is False
+
+    assert [p["name"] for p in
+            client.get("/admin/api/models/a/profiles").json()["profiles"]] == ["fast"]
+
+    r = client.put("/admin/api/models/a/profiles/fast",
+                   json={"settings": {"temperature": 0.4}})
+    assert r.json()["profile"]["settings"] == {"temperature": 0.4}
+
+    assert client.delete("/admin/api/models/a/profiles/fast").json()["deleted"] is True
+
+
+def test_a_profile_with_engine_fields_says_so(pool_client):
+    """The client renders its reload warning from this flag rather than
+    keeping its own copy of the field list."""
+    client, _ = pool_client
+    r = client.post("/admin/api/models/a/profiles",
+                    json={"name": "big", "settings": {"n_ctx": 8192}})
+    assert r.json()["profile"]["has_engine_fields"] is True
+
+
+def test_apply_reports_what_takes_effect_now_versus_on_reload(pool_client):
+    """bwr fixes engine settings at load, so "apply" cannot mutate a resident
+    engine. Saying which half needs a reload beats reporting a success that
+    changed nothing."""
+    client, _ = pool_client
+    client.post("/admin/api/models/a/profiles",
+                json={"name": "mixed",
+                      "settings": {"temperature": 0.2, "n_ctx": 8192}})
+    body = client.post("/admin/api/models/a/profiles/mixed/apply").json()
+    assert body["applied_now"] == {"temperature": 0.2}
+    assert body["requires_reload"] is True
+
+
+def test_applying_an_unknown_profile_is_404(pool_client):
+    client, _ = pool_client
+    assert client.post("/admin/api/models/a/profiles/nope/apply").status_code == 404
+
+
+def test_a_bad_profile_name_is_400_not_500(pool_client):
+    client, _ = pool_client
+    r = client.post("/admin/api/models/a/profiles", json={"name": "has space"})
+    assert r.status_code == 400
+
+
+def test_profile_surfaces_are_empty_not_broken_without_a_store(client):
+    """The single-model fixture mounts no store: the screens must render
+    empty rather than error."""
+    assert client.get("/admin/api/profile-templates").json()["templates"] == []
+    assert client.get("/admin/api/models/x/profiles").json()["profiles"] == []
+
+
+# -- downloads ---------------------------------------------------------------
+
+
+@pytest.fixture
+def download_client(tmp_path):
+    """A client whose download manager never touches the network."""
+    from bwr.server.downloads import DownloadManager
+
+    class _Hub:
+        def search(self, q, limit=30):
+            return [{"repo_id": f"org/{q or 'x'}", "name": q or "x"}]
+
+        def recommended(self, limit=20):
+            return {"trending": [{"repo_id": "org/hot"}], "popular": []}
+
+        def model_info(self, repo_id):
+            return {"repo_id": repo_id, "size": 1} if repo_id == "org/known" else None
+
+    app = FastAPI()
+    pool = _PoolStub()
+    mount(app, _StubEngine(), "a", pool,
+          downloads=DownloadManager(tmp_path, pool=pool), hub=_Hub())
+    return TestClient(app), tmp_path
+
+
+def test_download_tasks_start_empty(download_client):
+    client, _ = download_client
+    assert client.get("/admin/api/hf/tasks").json()["tasks"] == []
+
+
+def test_starting_a_download_returns_a_task_row(download_client, monkeypatch):
+    client, _ = download_client
+    monkeypatch.setattr("huggingface_hub.snapshot_download", lambda **k: k["local_dir"])
+    r = client.post("/admin/api/hf/download", json={"repo_id": "org/model"})
+    assert r.status_code == 200
+    task = r.json()["task"]
+    assert task["repo_id"] == "org/model"
+    for key in ("task_id", "status", "progress", "total_size", "downloaded_size",
+                "error", "created_at", "started_at", "completed_at", "retry_count"):
+        assert key in task, f"HFTaskDTO requires {key}"
+
+
+def test_starting_a_download_without_a_repo_is_400(download_client):
+    client, _ = download_client
+    assert client.post("/admin/api/hf/download", json={}).status_code == 400
+
+
+def test_cancelling_an_unknown_task_is_not_a_crash(download_client):
+    client, _ = download_client
+    assert client.post("/admin/api/hf/cancel/nope").json()["status"] == "not_running"
+
+
+def test_an_unknown_task_reads_as_404(download_client):
+    client, _ = download_client
+    assert client.get("/admin/api/hf/task/nope").status_code == 404
+
+
+def test_deleting_a_model_directory_rescans_the_pool(download_client):
+    client, tmp_path = download_client
+    (tmp_path / "gone").mkdir()
+    r = client.delete("/admin/api/hf/models/gone")
+    assert r.json() == {"deleted": True, "name": "gone"}
+    assert not (tmp_path / "gone").exists()
+
+
+def test_deleting_outside_the_model_directory_is_refused(download_client):
+    """Two layers stop a traversal and either is enough.
+
+    `..` never reaches the handler -- the URL is normalised first, so it
+    misses the route and lands on the unsupported catch-all. An encoded one
+    does reach it and hits the manager's own guard. What matters is that
+    neither reports success, and that the directory outside survives.
+    """
+    client, tmp_path = download_client
+    outside = tmp_path.parent / "keep-me"
+    outside.mkdir(exist_ok=True)
+    for path in ("/admin/api/hf/models/..",
+                 "/admin/api/hf/models/%2E%2E%2Fkeep-me"):
+        assert client.delete(path).status_code != 200, path
+    assert outside.is_dir()
+
+
+def test_hub_browse_surfaces_answer(download_client):
+    client, _ = download_client
+    assert client.get("/admin/api/hf/search?q=qwen").json()["models"]
+    assert client.get("/admin/api/hf/recommended").json()["trending"]
+    assert client.get("/admin/api/hf/model-info?repo_id=org/known").status_code == 200
+    assert client.get("/admin/api/hf/model-info?repo_id=org/nope").status_code == 404
+
+
+def test_download_surfaces_are_empty_not_broken_without_a_manager(client):
+    assert client.get("/admin/api/hf/tasks").json()["tasks"] == []
+    assert client.get("/admin/api/hf/search?q=x").json()["models"] == []
+    assert client.post("/admin/api/hf/download", json={"repo_id": "a/b"}).status_code == 400
+
+
+# -- benchmarks --------------------------------------------------------------
+
+
+def test_bench_surfaces_refuse_clearly_without_a_runner(client):
+    assert client.post("/admin/api/bench/start", json={}).status_code == 400
+    assert client.get("/admin/api/bench/nope/results").status_code == 404
+    assert client.post("/admin/api/bench/nope/cancel").json()["status"] == "not_running"

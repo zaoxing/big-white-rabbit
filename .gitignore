@@ -21,12 +21,13 @@ venv/
 *.gguf
 # MLX weights (large, machine-local; FTM_MLX_MODEL points here)
 *.safetensors
-models/Qwen3.8-27B-MLX-4bit/
-models/Qwen3-30B-A3B-4bit/
-models/Qwen3.8-27B-Uncensored-MLX-4bit/
-models/Qwen3.8-27B-MTP-4bit/
-models/Qwen3.8-27B-AWQ-5.0bpw/
-models/Qwen3.8-27B-MTPLX-Optimized-Speed/
+# Everything under models/ except the checked-in recipes. This used to name
+# each model directory one at a time, which was already stale -- and the
+# downloader now writes new ones here on its own (server/downloads.py), so a
+# downloaded model would have shown up as several GB of untracked files.
+# `.bwr/` in the same directory is the server's profile store.
+models/*
+!models/recipes/
 
 # macOS
 .DS_Store

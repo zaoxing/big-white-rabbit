@@ -2,51 +2,51 @@
  "active_models": {
   "models": [
    {
-    "actual_size": 17186333775,
+    "actual_size": 79220196,
     "cluster": {
      "enabled": false,
      "live": null
     },
-    "decode_calls": 8,
-    "display_name": "Qwen3-30B-A3B-4bit",
-    "estimated_size": 17186333775,
-    "estimated_size_formatted": "16.0 GB",
+    "decode_calls": 332,
+    "display_name": "SmolLM-135M-Instruct-4bit",
+    "estimated_size": 79220196,
+    "estimated_size_formatted": "75.6 MB",
     "free_seq_slots": 8,
-    "id": "Qwen3-30B-A3B-4bit",
+    "id": "SmolLM-135M-Instruct-4bit",
     "in_flight": 0,
     "is_loading": false,
     "kind": "mlx",
     "loaded": true,
-    "model_path": "/Users/test/src/big-white-rabbit/models/Qwen3-30B-A3B-4bit",
+    "model_path": "/Users/test/src/big-white-rabbit/models/SmolLM-135M-Instruct-4bit",
     "model_type": "llm",
     "n_ctx": 4096,
     "n_ctx_seq": 4096,
-    "name": "Qwen3-30B-A3B-4bit",
-    "size_bytes": 17186333775,
+    "name": "SmolLM-135M-Instruct-4bit",
+    "size_bytes": 79220196,
     "status": "loaded"
    }
   ]
  },
  "api_key": "",
- "avg_generation_tps": 68.0726986256387,
- "avg_prefill_tps": 34.60341979336769,
+ "avg_generation_tps": 361.11811225015293,
+ "avg_prefill_tps": 17.03085854888795,
  "cache_efficiency": 0.0,
  "cli_prefix": "bwr",
  "host": "127.0.0.1",
  "memory": {
   "budget_bytes": 64424509440,
   "loaded": [
-   "Qwen3-30B-A3B-4bit"
+   "SmolLM-135M-Instruct-4bit"
   ],
-  "resident_bytes": 19764283841
+  "resident_bytes": 91103225
  },
  "persisted": false,
  "port": 1919,
  "total_cached_tokens": 0,
- "total_completion_tokens": 8,
- "total_prompt_tokens": 15,
+ "total_completion_tokens": 12,
+ "total_prompt_tokens": 10,
  "total_requests": 1,
- "total_tokens_served": 23,
- "uptime_s": 5.5545878410339355,
- "uptime_seconds": 5.574782848358154
+ "total_tokens_served": 22,
+ "uptime_s": 305.45283818244934,
+ "uptime_seconds": 305.4717388153076
 }

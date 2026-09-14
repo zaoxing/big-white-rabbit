@@ -37,6 +37,9 @@ from ..engine.config import (
 from ..engine.metal_engine import MetalEngine
 from ..engine.pool import ModelPoolError
 from ..engine.mlx_engine import MLXEngine
+from .bench import BenchRunner
+from .downloads import DownloadManager, HubIndex
+from .profiles import ProfileStore
 from .stats import ServerStats
 from .schemas import (
     ChatCompletion,
@@ -173,19 +176,36 @@ def _render_prompt(model: Model | MLXEngine, req: ChatCompletionRequest) -> str:
 render_prompt = _render_prompt
 
 
-def _request_params(req: ChatCompletionRequest) -> RequestParams:
+def _request_params(
+    req: ChatCompletionRequest, defaults: dict[str, object] | None = None
+) -> RequestParams:
     # Shared builder so a new sampling field cannot be added to one surface and
     # forgotten on the other (see server/params.py).
+    #
+    # `defaults` is an exposed profile's sampling bundle. It fills only fields
+    # the REQUEST left unset: a profile is a default, not an override, so
+    # `temperature=0` sent explicitly still beats a profile that prefers 0.7.
+    d = defaults or {}
+
+    def pick(field: str, value: object) -> object:
+        return d.get(field) if value is None else value
+
+    stops = normalize_stops(req.stop)
+    if not stops and d.get("stop"):
+        stops = normalize_stops(d["stop"])
+    max_tokens = req.resolved_max_tokens(DEFAULT_MAX_TOKENS)
+    if req.max_tokens is None and d.get("max_tokens"):
+        max_tokens = int(d["max_tokens"])
     return build_params(
-        max_tokens=req.resolved_max_tokens(DEFAULT_MAX_TOKENS),
+        max_tokens=max_tokens,
         # `stop` may be a bare string or a list of them; the engine takes the normalised
         # tuple so it can stop decoding past the delimiter instead of merely having its
         # output truncated here.
-        stop=normalize_stops(req.stop),
-        temperature=req.temperature,
-        top_p=req.top_p,
-        top_k=req.top_k,
-        seed=req.seed,
+        stop=stops,
+        temperature=pick("temperature", req.temperature),
+        top_p=pick("top_p", req.top_p),
+        top_k=pick("top_k", req.top_k),
+        seed=pick("seed", req.seed),
     )
 
 
@@ -260,6 +280,17 @@ def build_app(
         from ..engine.pool import ModelPool
 
         pool = ModelPool(model_dir, config)
+    # Profiles live beside the models they describe, so the store is anchored
+    # to the model directory. Without one there is nowhere to persist them and
+    # the surfaces report themselves empty rather than inventing a location.
+    profile_store = ProfileStore(model_dir) if model_dir is not None else None
+    # Downloads land in the model directory and rescan the pool on success,
+    # so a finished download is servable without a restart. The Hub index is
+    # separate because browsing works with no model directory at all.
+    downloads = (
+        DownloadManager(model_dir, pool=pool) if model_dir is not None else None
+    )
+    hub = HubIndex()
     if pool is None and config.engine not in ("metal", "mlx"):
         raise ValueError(
             f"engine must be 'metal' or 'mlx'; got {config.engine!r}"
@@ -291,18 +322,26 @@ def build_app(
         async_engine = AsyncEngine(engine)
 
     async def resolve(requested: str | None):
-        """(model_id, engine, renderer) for one request.
+        """(model_id, engine, renderer, overlay) for one request.
 
         Constant in single-model mode; in pool mode this is where a load can
         happen, so it is awaited inside the handler rather than captured at
         registration.
+
+        `overlay` carries the sampling defaults of an exposed profile. An id
+        like `my-model:precise` names one model to load and one settings
+        bundle to apply, so the split happens HERE -- ahead of the pool,
+        which knows nothing about profiles and would reject the id outright.
         """
+        overlay: dict[str, object] = {}
+        if profile_store is not None and requested:
+            requested, overlay = profile_store.resolve_overlay(requested)
         if pool is None:
-            return model_name, async_engine, renderer
+            return model_name, async_engine, renderer, overlay
         mid, eng = await pool.acquire(requested)
         raw = pool.engine_for(mid)
         # MetalEngine delegates tokenization to its Model; MLXEngine owns it.
-        return mid, eng, (getattr(raw, "model", None) or raw)
+        return mid, eng, (getattr(raw, "model", None) or raw), overlay
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -351,6 +390,12 @@ def build_app(
     # finishing; the dashboard only reads what they record.
     stats = ServerStats()
     app.state.stats = stats
+    app.state.profiles = profile_store
+    app.state.downloads = downloads
+    # The runner drives `resolve`, so a benchmark loads the model the same
+    # way a request does -- including the pool's LRU accounting.
+    bench = BenchRunner(resolve) if model_dir is not None else None
+    app.state.bench = bench
 
     # Web UI at /admin (derived from oMLX, Apache-2.0 -- see
     # bwr/server/webui/__init__.py for provenance and changes). Optional: a
@@ -358,7 +403,9 @@ def build_app(
     try:
         from .webui.routes import mount as _mount_webui
 
-        _mount_webui(app, engine, model_name, pool, stats=stats)
+        _mount_webui(app, engine, model_name, pool, stats=stats,
+                     profiles=profile_store, downloads=downloads, hub=hub,
+                     bench=bench)
         app.state.webui = True
     except ImportError:  # noqa: BLE001 - jinja2/static deps absent; API still serves
         app.state.webui = False
@@ -396,9 +443,13 @@ def build_app(
 
     @app.get("/v1/models")
     async def list_models() -> ModelList:
-        if pool is not None:
-            return ModelList(data=[ModelCard(id=m["id"]) for m in pool.list()])
-        return ModelList(data=[ModelCard(id=model_name)])
+        ids = [m["id"] for m in pool.list()] if pool is not None else [model_name]
+        # An exposed profile IS a model id as far as a client is concerned --
+        # listing it is what lets one be picked from a model dropdown rather
+        # than typed from memory.
+        if profile_store is not None:
+            ids += [eid for eid, _base, _p in profile_store.exposed()]
+        return ModelList(data=[ModelCard(id=i) for i in ids])
 
     @app.post("/v1/chat/completions")
     async def chat_completions(req: ChatCompletionRequest, http_request: Request):
@@ -414,12 +465,15 @@ def build_app(
             raise HTTPException(status_code=400, detail=cap_error)
 
         try:
-            served, engine_r, renderer_r = await resolve(req.model)
+            served, engine_r, renderer_r, overlay = await resolve(req.model)
         except ModelPoolError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         prompt = _render_prompt(renderer_r, req)
-        params = _request_params(req)
+        # The profile supplies DEFAULTS: an explicit value on the request
+        # always wins, because a client that asked for temperature=0 means it
+        # even when the profile it selected prefers 0.7.
+        params = _request_params(req, defaults=overlay)
         known_tools = _parsing_names(req)
         n_prompt = count_tokens(renderer_r, prompt)
         # Read BEFORE submitting: the delta across the request is how many

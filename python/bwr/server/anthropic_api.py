@@ -258,7 +258,7 @@ def register_anthropic_routes(
         if resolve is None:
             served, engine_r = model_name, async_engine
         else:
-            served, engine_r, _renderer = await resolve(req.model)
+            served, engine_r, _renderer, _overlay = await resolve(req.model)
         request_id = await submit_request(engine_r, prompt, params)
 
         # Read back off the params the ENGINE was given, so the sequences the engine

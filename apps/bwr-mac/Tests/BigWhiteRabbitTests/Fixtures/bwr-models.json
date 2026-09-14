@@ -1,7 +1,7 @@
 {
  "models": [
   {
-   "actual_size": 17186333775,
+   "actual_size": null,
    "cluster": {
     "enabled": false,
     "live": null
@@ -12,14 +12,12 @@
    "id": "Qwen3-30B-A3B-4bit",
    "is_loading": false,
    "kind": "mlx",
-   "loaded": true,
+   "loaded": false,
    "model_path": "/Users/test/src/big-white-rabbit/models/Qwen3-30B-A3B-4bit",
    "model_type": "llm",
-   "n_ctx": 4096,
-   "n_ctx_seq": 4096,
    "name": "Qwen3-30B-A3B-4bit",
    "size_bytes": 17186333775,
-   "status": "loaded"
+   "status": "available"
   },
   {
    "actual_size": null,
@@ -58,6 +56,27 @@
    "name": "Qwen3.8-27B-Uncensored-MLX-4bit/4-bit",
    "size_bytes": 16081489320,
    "status": "available"
+  },
+  {
+   "actual_size": 79220196,
+   "cluster": {
+    "enabled": false,
+    "live": null
+   },
+   "display_name": "SmolLM-135M-Instruct-4bit",
+   "estimated_size": 79220196,
+   "estimated_size_formatted": "75.6 MB",
+   "id": "SmolLM-135M-Instruct-4bit",
+   "is_loading": false,
+   "kind": "mlx",
+   "loaded": true,
+   "model_path": "/Users/test/src/big-white-rabbit/models/SmolLM-135M-Instruct-4bit",
+   "model_type": "llm",
+   "n_ctx": 4096,
+   "n_ctx_seq": 4096,
+   "name": "SmolLM-135M-Instruct-4bit",
+   "size_bytes": 79220196,
+   "status": "loaded"
   }
  ]
 }
