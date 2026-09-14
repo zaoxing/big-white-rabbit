@@ -16,6 +16,7 @@ at ``import bwr`` time.
 
 from __future__ import annotations
 
+import logging
 from collections import OrderedDict
 from copy import deepcopy
 from typing import Iterable, Iterator, Sequence
@@ -24,6 +25,8 @@ from .batching import RequestState
 from .config import EngineConfig, RequestParams, StopSequenceFilter
 from .metal_engine import MIN_RETAINED_FINISHED, StepOutput
 from .ngram import NgramTable
+
+logger = logging.getLogger(__name__)
 
 
 def _require_mlx():
@@ -146,13 +149,30 @@ class MLXEngine:
         config: EngineConfig | None = None,
     ) -> None:
         self.config = config or EngineConfig()
+        # Effective KV width. Normally the configured value; batching forces
+        # f16 (see below), so the engine tracks its own rather than mutating
+        # the caller's EngineConfig, which may be shared across engines.
+        self._kv_bits = self.config.mlx_kv_bits
         if self.config.mlx_batch:
+            if self.config.mlx_kv_bits not in (None, 0):
+                # mlx-lm ships BatchKVCache and BatchRotatingKVCache but no
+                # batched QuantizedKVCache, and QuantizedKVCache has no
+                # merge(), so a batched join would AttributeError on the
+                # first quantized layer. Quantized KV buys KV HEADROOM, not
+                # speed (~4% slower decode, measured), so dropping to f16
+                # costs memory rather than throughput -- worth a warning, not
+                # a refusal.
+                logger.warning(
+                    "mlx_batch: ignoring mlx_kv_bits=%s and using f16 KV; "
+                    "mlx-lm has no batched QuantizedKVCache. This costs KV "
+                    "memory (2-4x more per sequence), not decode speed.",
+                    self.config.mlx_kv_bits,
+                )
+                self._kv_bits = None
             clashes = [
                 n for n in ("speculative", "mlx_mtp")
                 if getattr(self.config, n, False)
             ]
-            if self.config.mlx_kv_bits is not None:
-                clashes.append("mlx_kv_bits")
             if clashes:
                 raise ValueError(
                     "mlx_batch is mutually exclusive with "
@@ -245,9 +265,9 @@ class MLXEngine:
         from mlx_lm.models.cache import KVCache
 
         cache = self._model.make_cache()
-        if self.config.mlx_kv_bits is None:
+        bits = getattr(self, "_kv_bits", self.config.mlx_kv_bits)
+        if bits is None:
             return cache
-        bits = self.config.mlx_kv_bits
         if bits == 0:
             return cache  # manual-loop f16 control (no swap)
         if bits not in (4, 8):

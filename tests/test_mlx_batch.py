@@ -122,7 +122,7 @@ def test_step_on_empty_batch_is_an_error(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "kw", [dict(speculative=True), dict(mlx_mtp=True), dict(mlx_kv_bits=8)],
+    "kw", [dict(speculative=True), dict(mlx_mtp=True)],
 )
 def test_batch_refuses_to_combine_with_per_request_features(kw, tmp_path):
     """Those features own a per-request cache; batching owns one shared
@@ -311,5 +311,43 @@ def test_prefix_cache_composes_with_batching():
             pass
         assert list(eng.tokens_of(r1))[:n] == ref_long[:n]
         assert list(eng.tokens_of(r2))[:n] == ref_other[:n]
+    finally:
+        eng.ctx.close()
+
+
+@needs_weights
+def test_batching_degrades_quantized_kv_to_f16_with_a_warning(caplog):
+    """mlx-lm has no batched QuantizedKVCache, but quantized KV buys headroom
+    rather than speed -- so batching drops to f16 and says so, instead of
+    refusing a config the user reasonably expected to work."""
+    import logging
+
+    from bwr.engine.mlx_engine import MLXEngine
+    from mlx_lm.models.cache import QuantizedKVCache
+
+    with caplog.at_level(logging.WARNING, logger="bwr.engine.mlx_engine"):
+        eng = MLXEngine(str(MODEL), EngineConfig(
+            engine="mlx", n_ctx=4096, mlx_batch=True, mlx_kv_bits=8))
+    try:
+        assert any("mlx_kv_bits" in r.message for r in caplog.records), \
+            "the downgrade must be announced, not silent"
+        # and it must actually be f16: no quantized entries in a fresh cache
+        cache = eng._make_cache()
+        assert not any(isinstance(c, QuantizedKVCache) for c in cache)
+        # the caller's config is untouched -- it may be shared across engines
+        assert eng.config.mlx_kv_bits == 8
+    finally:
+        eng.ctx.close()
+
+
+@needs_weights
+def test_quantized_kv_still_works_without_batching():
+    """The downgrade is scoped to batching; on its own the flag still bites."""
+    from bwr.engine.mlx_engine import MLXEngine
+    from mlx_lm.models.cache import QuantizedKVCache
+
+    eng = MLXEngine(str(MODEL), EngineConfig(engine="mlx", n_ctx=4096, mlx_kv_bits=8))
+    try:
+        assert any(isinstance(c, QuantizedKVCache) for c in eng._make_cache())
     finally:
         eng.ctx.close()
