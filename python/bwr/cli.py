@@ -192,6 +192,13 @@ def _cmd_serve(argv: list[str]) -> int:
     ap.add_argument("--model-dir", default=None, metavar="DIR",
                     help="serve every model under DIR (multi-model pool, lazy load + "
                          "LRU eviction; see engine/pool.py). Mutually exclusive with -m")
+    ap.add_argument("--mlx-batch", action="store_true",
+                    help="continuous batching on the MLX backend: concurrent requests "
+                         "decode in one batched step instead of one after another. "
+                         "Aggregate throughput gain is small (~1.16x at 4 concurrent on "
+                         "27B/M1 Max) but the last request sees its first token ~5x "
+                         "sooner. Output-identical. Mutually exclusive with "
+                         "--speculative / --mlx-mtp / --mlx-prefix-cache / mlx_kv_bits")
     ap.add_argument("--mlx-mtp", action="store_true",
                     help="MLX MTP-head speculation (needs an mtp.safetensors sidecar; "
                          "SPEC-mlx-mtp-draft.md). Output-identical but MEASURED SLOWER "
@@ -271,6 +278,7 @@ def _cmd_serve(argv: list[str]) -> int:
             "mlx_prefix_cache_size": "mlx_prefix_cache_size",
             "mlx_kv_bits": "mlx_kv_bits",
             "mlx_mtp": "mlx_mtp", "mlx_mtp_depth": "mlx_mtp_depth",
+            "mlx_batch": "mlx_batch",
             "comment": "", "bench": "", "fallback_gguf": "",
             "fallback_engine": "", "mlx_fallback": "", "mlx_engine": "",
         }
@@ -362,6 +370,7 @@ def _cmd_serve(argv: list[str]) -> int:
         mlx_prefix_cache_size=args.mlx_prefix_cache_size,
         mlx_kv_bits=getattr(args, "mlx_kv_bits", None),
         model_dir=getattr(args, "model_dir", None),
+        mlx_batch=getattr(args, "mlx_batch", False),
         mlx_mtp=getattr(args, "mlx_mtp", False),
         mlx_mtp_depth=getattr(args, "mlx_mtp_depth", 0),
         prefix_cache=args.prefix_cache,

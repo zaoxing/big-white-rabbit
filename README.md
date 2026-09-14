@@ -112,8 +112,7 @@ API never reaches the model, which sees only the format its chat template was tr
 On `--engine metal`, `--n-seq-max` is how many requests decode concurrently. With the
 default split KV buffer each sequence gets `ctx-size / n-seq-max` tokens of context, so
 raising concurrency shrinks per-request context; `/health` reports both `n_ctx` and the
-per-sequence `n_ctx_seq`. Pass `--kv-unified` to share one buffer instead. The MLX
-backend serves requests from independent generators (batching parity is follow-up work).
+per-sequence `n_ctx_seq`. Pass `--kv-unified` to share one buffer instead. The MLX backend serves requests from independent generators by default; `--mlx-batch` decodes concurrent requests in one batched step (see the table below).
 
 ## Ready-to-use recipes (bench on M1 Max 64GB; `bench` in each JSON)
 
@@ -164,6 +163,7 @@ bwr tune --engine mlx -m models/Qwen3.8-27B-MLX-4bit --depths off,2,4
 | `bwr host` / `--no-adapt` | Host RAM fit for `n_ctx` | Auto-clamp down ladder as above; explicit wins, `--no-adapt` disables |
 | `--mlx-prefix-cache` | MLX exact-prefix prompt cache | Repeat prompts skip prefill: 2308-tok repeat measured **28.1s → 70ms** TTFT. Costs **~8% decode** on every request (alternating A/B), so it wins until responses exceed ~5000 tokens; needs prompts over `prefix_cache_min_tokens` (256) |
 | `--model-dir DIR` | Multi-model pool: lazy load + LRU eviction | Instead of `-m`; nothing loads until a request names a model. See below |
+| `--mlx-batch` | Continuous batching (MLX) | Concurrent requests decode in one batched step. Output-identical. Aggregate throughput only **~1.16x** at 4 concurrent (MLX's quantized kernel does not amortise rows), but the last request's **first token arrives ~5x sooner** (11.9s → 2.3s). Latency feature, not a throughput one |
 | `--mlx-mtp` | MTP-head speculation (MLX) | Output-identical but **slower** on mlx-lm 0.31.3 — the trunk forward is linear in rows. Off for a reason; see `SPEC-mlx-mtp-draft.md` |
 
 ## Multi-model pool & web UI

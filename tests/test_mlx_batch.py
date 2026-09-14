@@ -1,0 +1,235 @@
+"""Continuous batching on the MLX backend (engine/mlx_batch.py).
+
+Two things are worth pinning. Membership bookkeeping is pure logic and is
+tested with stub caches. Output parity needs real weights: a batch whose
+output depends on who else is in flight would be worse than no batching, and
+that is exactly the failure the cache-convention bugs produced while this was
+being written.
+"""
+
+from __future__ import annotations
+
+import pathlib
+
+import pytest
+
+from bwr.engine.config import EngineConfig
+
+MODEL = pathlib.Path("models/Qwen3.8-27B-Uncensored-MLX-4bit/4-bit")
+needs_weights = pytest.mark.skipif(
+    not (MODEL / "config.json").is_file(), reason=f"{MODEL} not present"
+)
+
+
+# -- membership bookkeeping (no weights) -------------------------------------
+
+
+class _StubCache:
+    """Enough surface for join/leave: merge returns a marker, filter records."""
+
+    def __init__(self, tag):
+        self.tag = tag
+        self.filtered = None
+
+    @classmethod
+    def merge(cls, caches):
+        m = cls("+".join(str(c.tag) for c in caches))
+        return m
+
+    def filter(self, idx):
+        self.filtered = idx
+
+
+def _batch(monkeypatch):
+    from bwr.engine import mlx_batch
+
+    # join() on a non-empty batch goes through _concat_batched; for
+    # bookkeeping tests replace it with something that just records.
+    monkeypatch.setattr(
+        mlx_batch, "_concat_batched", lambda a, b: _StubCache(f"{a.tag}|{b.tag}")
+    )
+    return mlx_batch.MLXBatch(model=object())
+
+
+def test_new_batch_is_empty(monkeypatch):
+    b = _batch(monkeypatch)
+    assert b.empty and len(b) == 0
+    assert b.index_of(1) is None
+
+
+def test_join_assigns_rows_in_order(monkeypatch):
+    b = _batch(monkeypatch)
+    b.join(7, [_StubCache("a")])
+    b.join(9, [_StubCache("b")])
+    assert b.rows == [7, 9]
+    assert b.index_of(7) == 0 and b.index_of(9) == 1
+    assert len(b) == 2
+
+
+def test_first_member_is_still_merged(monkeypatch):
+    """A batch of one must have the same shape as a batch of many, or the
+    single-member path diverges structurally and hides bugs."""
+    b = _batch(monkeypatch)
+    b.join(1, [_StubCache("solo")])
+    assert b.caches[0].tag == "solo"      # went through merge(), not raw
+
+
+def test_double_join_is_rejected(monkeypatch):
+    b = _batch(monkeypatch)
+    b.join(1, [_StubCache("a")])
+    with pytest.raises(ValueError, match="already batched"):
+        b.join(1, [_StubCache("b")])
+
+
+def test_leave_drops_the_row_and_filters(monkeypatch):
+    b = _batch(monkeypatch)
+    b.join(1, [_StubCache("a")])
+    b.join(2, [_StubCache("b")])
+    b.leave([1])
+    assert b.rows == [2]
+    assert b.caches[0].filtered is not None, "surviving rows must be filtered"
+
+
+def test_leave_of_last_member_empties_the_batch(monkeypatch):
+    b = _batch(monkeypatch)
+    b.join(1, [_StubCache("a")])
+    b.leave([1])
+    assert b.empty and b.caches is None
+
+
+def test_leave_of_unknown_request_is_a_noop(monkeypatch):
+    b = _batch(monkeypatch)
+    b.join(1, [_StubCache("a")])
+    b.leave([99])
+    assert b.rows == [1]
+
+
+def test_step_rejects_a_token_count_mismatch(monkeypatch):
+    b = _batch(monkeypatch)
+    b.join(1, [_StubCache("a")])
+    b.join(2, [_StubCache("b")])
+    with pytest.raises(ValueError, match="one token per row"):
+        b.step([5])          # two rows, one token
+
+
+def test_step_on_empty_batch_is_an_error(monkeypatch):
+    b = _batch(monkeypatch)
+    with pytest.raises(RuntimeError, match="empty batch"):
+        b.step([])
+
+
+# -- config guard (no weights) -----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kw", [dict(speculative=True), dict(mlx_mtp=True), dict(mlx_prefix_cache=True),
+           dict(mlx_kv_bits=8)],
+)
+def test_batch_refuses_to_combine_with_per_request_features(kw, tmp_path):
+    """Those features own a per-request cache; batching owns one shared
+    batched cache. Silently picking a winner would be worse than refusing."""
+    from bwr.engine.mlx_engine import MLXEngine
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        MLXEngine(str(tmp_path), EngineConfig(engine="mlx", mlx_batch=True, **kw))
+
+
+# -- output parity (weights required) ----------------------------------------
+
+
+@needs_weights
+def test_incremental_join_matches_mlx_lm_merge():
+    """A mid-flight join must produce exactly the cache mlx-lm's all-at-once
+    merge would. Getting the offset/left_padding convention wrong here
+    corrupts only the SHORTER rows, which is how it hides."""
+    import mlx.core as mx
+    from mlx_lm import load
+    from mlx_lm.models.cache import ArraysCache
+
+    from bwr.engine.mlx_batch import _concat_batched
+
+    model, tok = load(str(MODEL))
+    tgt = model.language_model
+    prompts = ["Explain in one sentence what a B-tree is.\n", "Short.\n"]
+
+    per_seq = []
+    for p in prompts:
+        c = tgt.make_cache()
+        mx.eval(tgt(mx.array(tok.encode(p))[None], cache=c))
+        per_seq.append(c)
+
+    mismatches = []
+    for layer in range(len(per_seq[0])):
+        ref = type(per_seq[0][layer]).merge([c[layer] for c in per_seq])
+        inc = type(per_seq[0][layer]).merge([per_seq[0][layer]])
+        inc = _concat_batched(inc, type(per_seq[1][layer]).merge([per_seq[1][layer]]))
+        if isinstance(ref, ArraysCache):
+            same = all(
+                (x is None and y is None)
+                or (x.shape == y.shape
+                    and float(mx.max(mx.abs(x.astype(mx.float32) - y.astype(mx.float32)))) == 0)
+                for x, y in zip(ref.cache, inc.cache)
+            )
+        else:
+            rk, _, ro, rp = ref.state
+            ik, _, io, ip = inc.state
+            same = (
+                rk.shape == ik.shape
+                and ro.tolist() == io.tolist()
+                and rp.tolist() == ip.tolist()
+                and float(mx.max(mx.abs(rk.astype(mx.float32) - ik.astype(mx.float32)))) == 0
+            )
+        if not same:
+            mismatches.append(layer)
+    assert not mismatches, f"join diverged from merge at layers {mismatches[:5]}"
+
+
+@needs_weights
+def test_batched_decode_is_output_identical():
+    """Three concurrent requests must each produce exactly what they produce
+    alone. The reference is a DIRECT greedy loop, not the engine's non-batch
+    path -- that one uses mlx-lm's stream generator, whose numeric drift
+    looks like a batching bug and already caused one false alarm."""
+    import mlx.core as mx
+    from mlx_lm import load
+
+    from bwr.engine.config import RequestParams
+    from bwr.engine.mlx_engine import MLXEngine
+
+    prompts = ["Explain in one sentence what a B-tree is.\n",
+               "Name three sorting algorithms.\n",
+               "Write a haiku about caching.\n"]
+    n = 12
+
+    model, tok = load(str(MODEL))
+    tgt = model.language_model
+
+    def solo(prompt):
+        cache = tgt.make_cache()
+        logits = tgt(mx.array(tok.encode(prompt))[None], cache=cache)
+        t = int(mx.argmax(logits[0, -1]).item())
+        out = [t]
+        for _ in range(n - 1):
+            logits = tgt(mx.array([[t]]), cache=cache)
+            t = int(mx.argmax(logits[0, -1]).item())
+            out.append(t)
+        return out
+
+    ref = [solo(p) for p in prompts]
+
+    eng = MLXEngine(str(MODEL), EngineConfig(engine="mlx", n_ctx=4096, mlx_batch=True))
+    try:
+        rids = [
+            eng.add_request(p, RequestParams(max_tokens=n, temp=0.0, stop_at_eog=False))
+            for p in prompts
+        ]
+        emitted = []
+        for out in eng.drain():
+            if out.token >= 0:
+                emitted.append(out.request_id)
+        for i, rid in enumerate(rids):
+            assert list(eng.tokens_of(rid))[:n] == ref[i], f"seq{i} diverged"
+        # every live row emits once per step, so the first rows interleave
+        assert len(set(emitted[:6])) > 1, "requests did not interleave"
+    finally:
+        eng.ctx.close()

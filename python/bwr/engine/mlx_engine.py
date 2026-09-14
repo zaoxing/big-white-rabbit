@@ -99,6 +99,7 @@ class _MLXContext:
         eng._mtp_caches.clear()
         eng._mtp_hidden.clear()
         eng._mtp = None
+        eng._batch = None
         eng._prefix.clear()
         eng._model = None
         eng._tokenizer = None
@@ -145,6 +146,20 @@ class MLXEngine:
         config: EngineConfig | None = None,
     ) -> None:
         self.config = config or EngineConfig()
+        if self.config.mlx_batch:
+            clashes = [
+                n for n in ("speculative", "mlx_mtp", "mlx_prefix_cache")
+                if getattr(self.config, n, False)
+            ]
+            if self.config.mlx_kv_bits is not None:
+                clashes.append("mlx_kv_bits")
+            if clashes:
+                raise ValueError(
+                    "mlx_batch is mutually exclusive with "
+                    + ", ".join(sorted(clashes))
+                    + " (those own a per-request cache; batching owns one "
+                    "shared batched cache)"
+                )
         # MTP-head speculation (SPEC-mlx-mtp-draft.md). Mutually exclusive
         # with n-gram: both feed the one verify path, so allowing both would
         # silently pick a winner. Validated BEFORE load() so a misconfigured
@@ -154,6 +169,7 @@ class MLXEngine:
         self._mtp = None
         self._mtp_caches: dict[int, list] = {}
         self._mtp_hidden: dict[int, object] = {}
+        self._batch = None
         if self.config.mlx_mtp:
             from . import mtp as _mtp_mod
 
@@ -170,6 +186,10 @@ class MLXEngine:
         load, _ = _require_mlx()
         self._model, self._tokenizer = load(model_path)
         self.model_path = model_path
+        if self.config.mlx_batch:
+            from .mlx_batch import MLXBatch
+
+            self._batch = MLXBatch(self._model)
         if self.config.mlx_mtp:
             from . import mtp as _mtp_mod
 
@@ -266,6 +286,8 @@ class MLXEngine:
         self._spec_stats.pop(req.request_id, None)
         self._mtp_caches.pop(req.request_id, None)
         self._mtp_hidden.pop(req.request_id, None)
+        if self._batch is not None:
+            self._batch.leave([req.request_id])
         self._states.pop(req.request_id, None)
         self._retired[req.request_id] = req
         while len(self._retired) > self._retired_limit:
@@ -416,6 +438,8 @@ class MLXEngine:
         """Advance every in-flight request by one step (one token, or one
         verify round for speculating requests)."""
         self._ensure_open()
+        if self._batch is not None:
+            return self._step_batch()
         outputs: list[StepOutput] = []
         for req in list(self._states.values()):
             if req.finished:
@@ -769,6 +793,85 @@ class MLXEngine:
             else []
         )
         table.update_stream([*prefix, *new_tokens])
+
+
+    def _step_batch(self) -> list[StepOutput]:
+        """One continuous-batching step: admit joiners, then decode all rows.
+
+        Admission prefills the joiner ALONE and merges the result, so ragged
+        prompt lengths never reach the decode loop (mlx-lm's merge sets
+        left_padding for us). The prefill's own argmax is that request's
+        first token, emitted here exactly as the single-stream path does --
+        dropping it would shift every later token by one.
+        """
+        mx = _mx()
+        outputs: list[StepOutput] = []
+        batch = self._batch
+        assert batch is not None
+
+        for req in list(self._states.values()):
+            if req.finished or batch.index_of(req.request_id) is not None:
+                continue
+            try:
+                cache = self._make_cache()
+                logits = None
+                for i in range(0, len(req.prompt), _PREFILL_CHUNK):
+                    chunk = req.prompt[i : i + _PREFILL_CHUNK]
+                    logits = self._model(mx.array(chunk)[None], cache=cache)
+                mx.eval(logits)
+                token = self._sample_row(req, logits[0, -1])
+                batch.join(req.request_id, cache)
+                outputs.append(
+                    self._feed(req, token, self._tokenizer.decode([token]))
+                )
+            except BaseException:  # noqa: BLE001 - re-raised; must not leave a half-joined row
+                try:
+                    self._retire(req, "error")
+                except BaseException:  # noqa: BLE001 - never mask the real failure
+                    pass
+                raise
+
+        if batch.empty:
+            return outputs
+
+        # Decode every live row together. next_token is what each row feeds.
+        rows = list(batch.rows)
+        tokens = []
+        for rid in rows:
+            req = self._states.get(rid)
+            if req is None or req.next_token is None:
+                # Retired between join and step: drop the row rather than
+                # feeding a stale token into the shared forward.
+                batch.leave([rid])
+                continue
+            tokens.append(req.next_token)
+        rows = list(batch.rows)
+        if not rows:
+            return outputs
+
+        logits = batch.step(tokens)
+        for i, rid in enumerate(rows):
+            req = self._states.get(rid)
+            if req is None or req.finished:
+                continue
+            token = self._sample_row(req, logits[i, -1])
+            outputs.append(
+                self._feed(req, token, self._tokenizer.decode([token]))
+            )
+        return outputs
+
+    def _sample_row(self, req: RequestState, row) -> int:
+        """Sample one row's logits with THAT request's parameters.
+
+        Per-row rather than one sampler for the batch: two requests in the
+        same step can ask for different temperatures, and a shared sampler
+        would silently give one of them the other's settings.
+        """
+        mx = _mx()
+        if req.params.temp and req.params.temp > 0:
+            sampler = self._sampler_for(req.params)
+            return int(sampler(row[None]).item())
+        return int(mx.argmax(row).item())
 
     def _step_stream(self, req: RequestState) -> list[StepOutput]:
         """Advance one request down the plain generator path."""

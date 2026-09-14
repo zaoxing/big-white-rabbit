@@ -89,6 +89,14 @@ class EngineConfig:
     # (mtp_depth_default, clamped to mtp_depth_max).
     mlx_mtp: bool = False
     mlx_mtp_depth: int = 0
+    # Continuous batching on the MLX backend (engine/mlx_batch.py). Off by
+    # default: measured ~1.13x aggregate throughput on 27B/M1 Max, because
+    # MLX's quantized kernel does not amortise rows the way a batched GEMM
+    # would. Turn it on for CONCURRENCY LATENCY -- without it the Nth
+    # simultaneous request waits for N-1 whole generations. Mutually
+    # exclusive with the per-request manual-loop features (speculative,
+    # mlx_mtp, mlx_prefix_cache, mlx_kv_bits), which own their own caches.
+    mlx_batch: bool = False
     # Prefix-cache TTFT (SPEC-prefix-cache.md). Off by default: pins hold
     # seq slots outside the free pool, which only pays when prompts repeat.
     # Retired requests with fully-prefilled prompts of effective savings
