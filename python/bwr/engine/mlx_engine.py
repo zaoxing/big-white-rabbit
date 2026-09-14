@@ -148,7 +148,7 @@ class MLXEngine:
         self.config = config or EngineConfig()
         if self.config.mlx_batch:
             clashes = [
-                n for n in ("speculative", "mlx_mtp", "mlx_prefix_cache")
+                n for n in ("speculative", "mlx_mtp")
                 if getattr(self.config, n, False)
             ]
             if self.config.mlx_kv_bits is not None:
@@ -472,12 +472,13 @@ class MLXEngine:
             return True
         return bool(self.config.speculative and req.params.temp <= 0)
 
-    def _prefix_hit(self, req: RequestState) -> list[StepOutput] | None:
-        """Exact-prefix hit: install the snapshot and replay its base token.
+    def _prefix_lookup(self, req: RequestState):
+        """Shared exact-prefix probe: `(cache_copy, base, entry)` or None.
 
-        Returns None on miss (caller prefills normally). The snapshot covers
-        exactly len(prompt) positions and base is the prefill's argmax, so
-        replay is deterministic — no forward pass, TTFT is deepcopy time.
+        Split out so the batching path can reuse it. A hit yields a
+        single-sequence cache covering exactly the prompt -- which is
+        precisely what `MLXBatch.join` wants, so the prefix cache and
+        continuous batching compose instead of excluding each other.
         """
         key = tuple(req.prompt)
         entry = self._prefix.get(key)
@@ -485,8 +486,20 @@ class MLXEngine:
             self.prefix_misses += 1
             return None
         self._prefix.move_to_end(key)
-        cache, base = deepcopy(entry[0]), entry[1]
         self.prefix_hits += 1
+        return deepcopy(entry[0]), entry[1], entry
+
+    def _prefix_hit(self, req: RequestState) -> list[StepOutput] | None:
+        """Exact-prefix hit: install the snapshot and replay its base token.
+
+        Returns None on miss (caller prefills normally). The snapshot covers
+        exactly len(prompt) positions and base is the prefill's argmax, so
+        replay is deterministic — no forward pass, TTFT is deepcopy time.
+        """
+        found = self._prefix_lookup(req)
+        if found is None:
+            return None
+        cache, base, entry = found
         self._caches[req.request_id] = cache
         if self._mtp is not None:
             # The head cache is part of the snapshot: restoring only the trunk
@@ -813,13 +826,28 @@ class MLXEngine:
             if req.finished or batch.index_of(req.request_id) is not None:
                 continue
             try:
-                cache = self._make_cache()
-                logits = None
-                for i in range(0, len(req.prompt), _PREFILL_CHUNK):
-                    chunk = req.prompt[i : i + _PREFILL_CHUNK]
-                    logits = self._model(mx.array(chunk)[None], cache=cache)
-                mx.eval(logits)
-                token = self._sample_row(req, logits[0, -1])
+                cache = token = None
+                if self.config.mlx_prefix_cache:
+                    # A hit skips prefill entirely: the snapshot already
+                    # covers the whole prompt, so admission costs a deepcopy
+                    # instead of a forward pass. Its stored base token is the
+                    # prefill's argmax, so replay stays deterministic.
+                    found = self._prefix_lookup(req)
+                    if found is not None:
+                        cache, token, _entry = found
+                if cache is None:
+                    cache = self._make_cache()
+                    logits = None
+                    for i in range(0, len(req.prompt), _PREFILL_CHUNK):
+                        chunk = req.prompt[i : i + _PREFILL_CHUNK]
+                        logits = self._model(mx.array(chunk)[None], cache=cache)
+                    mx.eval(logits)
+                    token = self._sample_row(req, logits[0, -1])
+                    if self.config.mlx_prefix_cache:
+                        # Snapshot BEFORE the join: once merged the cache is
+                        # batched, and a batched snapshot could not be
+                        # restored into a different batch later.
+                        self._prefix_insert(req, cache, token)
                 batch.join(req.request_id, cache)
                 outputs.append(
                     self._feed(req, token, self._tokenizer.decode([token]))

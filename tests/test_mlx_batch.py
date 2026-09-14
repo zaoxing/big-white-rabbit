@@ -122,8 +122,7 @@ def test_step_on_empty_batch_is_an_error(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "kw", [dict(speculative=True), dict(mlx_mtp=True), dict(mlx_prefix_cache=True),
-           dict(mlx_kv_bits=8)],
+    "kw", [dict(speculative=True), dict(mlx_mtp=True), dict(mlx_kv_bits=8)],
 )
 def test_batch_refuses_to_combine_with_per_request_features(kw, tmp_path):
     """Those features own a per-request cache; batching owns one shared
@@ -132,6 +131,19 @@ def test_batch_refuses_to_combine_with_per_request_features(kw, tmp_path):
 
     with pytest.raises(ValueError, match="mutually exclusive"):
         MLXEngine(str(tmp_path), EngineConfig(engine="mlx", mlx_batch=True, **kw))
+
+
+def test_batch_does_not_refuse_the_prefix_cache(tmp_path):
+    """These two DO compose: a prefix hit yields a single-sequence cache
+    covering the prompt, which is exactly what join() consumes. The failure
+    here would be an exclusion error; a missing-weights error means the
+    config was accepted and the load got further."""
+    from bwr.engine.mlx_engine import MLXEngine
+
+    with pytest.raises(Exception) as exc:
+        MLXEngine(str(tmp_path), EngineConfig(
+            engine="mlx", mlx_batch=True, mlx_prefix_cache=True))
+    assert "mutually exclusive" not in str(exc.value)
 
 
 # -- output parity (weights required) ----------------------------------------
@@ -231,5 +243,73 @@ def test_batched_decode_is_output_identical():
             assert list(eng.tokens_of(rid))[:n] == ref[i], f"seq{i} diverged"
         # every live row emits once per step, so the first rows interleave
         assert len(set(emitted[:6])) > 1, "requests did not interleave"
+    finally:
+        eng.ctx.close()
+
+
+@needs_weights
+def test_prefix_cache_composes_with_batching():
+    """A repeated prompt must still skip prefill while batching is on, and
+    a cache-hit request must batch correctly alongside a fresh one."""
+    import time
+
+    import mlx.core as mx
+    from mlx_lm import load
+
+    from bwr.engine.config import RequestParams
+    from bwr.engine.mlx_engine import MLXEngine
+
+    long_prompt = ("Review this module and continue it.\n\n" + "".join(
+        f"def helper_{i}(x):\n    return x * {i} + 1\n\n" for i in range(120)))
+    other = "Name three sorting algorithms.\n"
+    n = 6
+
+    model, tok = load(str(MODEL))
+    tgt = model.language_model
+
+    def solo(prompt):
+        cache = tgt.make_cache()
+        logits = tgt(mx.array(tok.encode(prompt))[None], cache=cache)
+        t = int(mx.argmax(logits[0, -1]).item())
+        out = [t]
+        for _ in range(n - 1):
+            logits = tgt(mx.array([[t]]), cache=cache)
+            t = int(mx.argmax(logits[0, -1]).item())
+            out.append(t)
+        return out
+
+    ref_long, ref_other = solo(long_prompt), solo(other)
+
+    eng = MLXEngine(str(MODEL), EngineConfig(
+        engine="mlx", n_ctx=8192, mlx_batch=True, mlx_prefix_cache=True))
+    try:
+        def run(prompt):
+            rid = eng.add_request(
+                prompt, RequestParams(max_tokens=n, temp=0.0, stop_at_eog=False))
+            t0 = time.perf_counter()
+            first = None
+            for out in eng.drain():
+                if out.request_id == rid and out.token >= 0 and first is None:
+                    first = time.perf_counter()
+            return (first - t0) * 1000, list(eng.tokens_of(rid))
+
+        cold_ms, cold = run(long_prompt)
+        warm_ms, warm = run(long_prompt)
+        assert cold[:n] == ref_long[:n] and warm[:n] == ref_long[:n]
+        assert eng.prefix_hits >= 1, "repeat did not hit the prefix cache"
+        assert warm_ms < cold_ms / 10, (
+            f"repeat admission {warm_ms:.0f}ms vs cold {cold_ms:.0f}ms -- "
+            "prefill was not skipped"
+        )
+
+        # a cache-hit request batched with a fresh one: both must be correct
+        r1 = eng.add_request(
+            long_prompt, RequestParams(max_tokens=n, temp=0.0, stop_at_eog=False))
+        r2 = eng.add_request(
+            other, RequestParams(max_tokens=n, temp=0.0, stop_at_eog=False))
+        for _ in eng.drain():
+            pass
+        assert list(eng.tokens_of(r1))[:n] == ref_long[:n]
+        assert list(eng.tokens_of(r2))[:n] == ref_other[:n]
     finally:
         eng.ctx.close()

@@ -198,7 +198,7 @@ def _cmd_serve(argv: list[str]) -> int:
                          "Aggregate throughput gain is small (~1.16x at 4 concurrent on "
                          "27B/M1 Max) but the last request sees its first token ~5x "
                          "sooner. Output-identical. Mutually exclusive with "
-                         "--speculative / --mlx-mtp / --mlx-prefix-cache / mlx_kv_bits")
+                         "--speculative / --mlx-mtp / mlx_kv_bits; composes with --mlx-prefix-cache")
     ap.add_argument("--mlx-mtp", action="store_true",
                     help="MLX MTP-head speculation (needs an mtp.safetensors sidecar; "
                          "SPEC-mlx-mtp-draft.md). Output-identical but MEASURED SLOWER "
