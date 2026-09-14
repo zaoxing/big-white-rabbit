@@ -164,6 +164,7 @@ class _PoolStub:
         self.unloaded: list[str] = []
         self.model_dir = "/tmp/models"
         self.rescans = 0
+        self.overrides: dict[str, int] = {}
 
     def rescan(self):
         self.rescans += 1
@@ -186,6 +187,15 @@ class _PoolStub:
 
     def engine_for(self, model_id):
         return _StubEngine() if self._models.get(model_id) else None
+
+    def native_ctx(self, model_id):
+        return 32768 if model_id in self._models else None
+
+    def ctx_override(self, model_id):
+        return self.overrides.get(model_id)
+
+    def set_ctx_override(self, model_id, n_ctx):
+        self.overrides[model_id] = n_ctx
 
     async def acquire(self, model_id):
         if model_id not in self._models:
@@ -796,3 +806,107 @@ def test_ane_results_answer_200_with_a_status_rather_than_404(client):
 def test_ane_capability_is_readable_on_its_own(client):
     body = client.get("/admin/api/bench/ane-tune/capability").json()
     assert set(body) >= {"available", "reason", "checks", "candidates"}
+
+
+# -- context benchmark --------------------------------------------------------
+
+
+def test_context_bench_surfaces_refuse_clearly_without_a_runner(client):
+    """Single-model mode has no runner: there is no "load this again at a
+    different n_ctx" without restarting the process."""
+    r = client.post("/admin/api/bench/context/start", json={})
+    assert r.status_code == 400
+    assert "model directory" in r.json()["detail"]
+    assert client.get("/admin/api/bench/context/nope/results").status_code == 404
+    assert (
+        client.post("/admin/api/bench/context/nope/cancel").json()["status"]
+        == "not_running"
+    )
+
+
+class _CtxBenchStub:
+    def __init__(self):
+        self.started: list[tuple[str, int]] = []
+        self.cancelled: list[str] = []
+
+    def start(self, model_id, target_tokens):
+        from bwr.server.ctxbench import TARGETS, ContextBenchError
+
+        if target_tokens not in TARGETS:
+            raise ContextBenchError("bad target")
+        self.started.append((model_id, target_tokens))
+        return {"bench_id": "cb1", "status": "running", "target_tokens": target_tokens}
+
+    def get(self, bench_id):
+        if bench_id != "cb1":
+            return None
+        return {
+            "bench_id": "cb1", "status": "running", "phase": "searching",
+            "progress": 42.0, "message": "probing", "result": None, "error": None,
+        }
+
+    def cancel(self, bench_id):
+        self.cancelled.append(bench_id)
+        return bench_id == "cb1"
+
+
+@pytest.fixture()
+def ctx_client():
+    app = FastAPI()
+    stub = _CtxBenchStub()
+    mount(app, _StubEngine(), "a", _PoolStub(), ctxbench=stub)
+    return TestClient(app), stub
+
+
+def test_context_bench_start_accepts_both_spellings_of_the_body(ctx_client):
+    """The Swift client encodes camelCase; the dashboard's JS sends snake."""
+    c, stub = ctx_client
+    assert c.post(
+        "/admin/api/bench/context/start",
+        json={"modelId": "a", "targetTokens": 65536},
+    ).json()["bench_id"] == "cb1"
+    c.post(
+        "/admin/api/bench/context/start",
+        json={"model_id": "b", "target_tokens": 16384},
+    )
+    assert stub.started == [("a", 65536), ("b", 16384)]
+
+
+def test_context_bench_start_rejects_a_target_off_the_ladder(ctx_client):
+    c, _ = ctx_client
+    r = c.post(
+        "/admin/api/bench/context/start",
+        json={"model_id": "a", "target_tokens": 99999},
+    )
+    assert r.status_code == 400
+
+
+def test_context_bench_results_and_cancel_round_trip(ctx_client):
+    c, stub = ctx_client
+    body = c.get("/admin/api/bench/context/cb1/results").json()
+    assert body["phase"] == "searching"
+    assert body["progress"] == 42.0
+    assert c.get("/admin/api/bench/context/other/results").status_code == 404
+    assert c.post("/admin/api/bench/context/cb1/cancel").json()["status"] == "cancelling"
+    assert stub.cancelled == ["cb1"]
+
+
+def test_context_routes_do_not_shadow_the_throughput_bench(ctx_client):
+    """`context` is a literal segment competing with `{bench_id}`. If the
+    ordering ever regresses, `/api/bench/context/start` starts a THROUGHPUT
+    run named "context" instead, which looks like it worked."""
+    c, stub = ctx_client
+    # The throughput routes still resolve to their own handlers...
+    assert c.post("/admin/api/bench/start", json={}).status_code == 400
+    assert c.get("/admin/api/bench/anything/results").status_code == 404
+    # ...and the context start reached the context runner, not the other one.
+    c.post("/admin/api/bench/context/start", json={"model_id": "a"})
+    assert stub.started == [("a", 131072)]
+
+
+def test_pool_entries_report_the_model_s_own_context_length(ctx_client):
+    """The Context Bench screen filters its target presets by this. Reporting
+    the SERVING window here would hide every target the model can reach."""
+    c, _ = ctx_client
+    models = c.get("/admin/api/models").json()["models"]
+    assert all(m["model_context_length"] == 32768 for m in models)

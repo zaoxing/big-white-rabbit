@@ -300,3 +300,173 @@ def test_a_known_budget_still_evicts(pool_factory):
     asyncio.run(p.acquire("a"))
     asyncio.run(p.acquire("b"))
     assert p.loaded_ids == ["b"]
+
+
+# -- per-model context overrides ---------------------------------------------
+#
+# The context benchmark measures a window and writes it here; the pool is
+# what makes it take effect. See server/ctxbench.py.
+
+
+def _ctx_pool(tmp_path, monkeypatch, models=("a",)):
+    """A pool whose stub factory records the n_ctx each load was given."""
+    for name in models:
+        d = tmp_path / name
+        d.mkdir(exist_ok=True)
+        # Only if the test has not written its own: `native_ctx` reads this
+        # file, so clobbering it would make that untestable.
+        cfg = d / "config.json"
+        if not cfg.exists():
+            cfg.write_text("{}")
+    seen: list[int] = []
+
+    def fake_build(entry, config):
+        seen.append(config.n_ctx)
+        return _StubRaw(entry)
+
+    monkeypatch.setattr("bwr.engine.pool.AsyncEngine", _StubAsync)
+    p = ModelPool(
+        tmp_path, EngineConfig(n_ctx=4096),
+        budget_bytes=64 * GIB, engine_factory=fake_build,
+    )
+    return p, seen
+
+
+def test_a_model_without_an_override_loads_at_the_shared_config(tmp_path, monkeypatch):
+    p, seen = _ctx_pool(tmp_path, monkeypatch)
+    asyncio.run(p.acquire("a"))
+    assert seen == [4096]
+
+
+def test_an_override_is_what_the_next_load_uses(tmp_path, monkeypatch):
+    p, seen = _ctx_pool(tmp_path, monkeypatch)
+    p.set_ctx_override("a", 40960)
+    asyncio.run(p.acquire("a"))
+    assert seen == [40960]
+
+
+def test_an_override_does_not_disturb_a_resident_engine(tmp_path, monkeypatch):
+    """KV geometry is fixed when the engine is built, so a live engine cannot
+    adopt a new window. The pool must not pretend otherwise."""
+    p, seen = _ctx_pool(tmp_path, monkeypatch)
+    asyncio.run(p.acquire("a"))
+    p.set_ctx_override("a", 40960)
+    asyncio.run(p.acquire("a"))
+    assert seen == [4096]  # still the engine loaded before the override
+
+
+def test_reload_is_how_a_new_override_becomes_live(tmp_path, monkeypatch):
+    p, seen = _ctx_pool(tmp_path, monkeypatch)
+    asyncio.run(p.acquire("a"))
+    p.set_ctx_override("a", 40960)
+    asyncio.run(p.reload("a"))
+    assert seen == [4096, 40960]
+    assert p.loaded_ids == ["a"]
+
+
+def test_reload_leaves_nothing_loaded_when_the_new_load_fails(tmp_path, monkeypatch):
+    """A window the machine cannot allocate must not leave the old engine
+    half-dropped and the pool claiming it is resident."""
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "config.json").write_text("{}")
+    calls = {"n": 0}
+
+    def fake_build(entry, config):
+        calls["n"] += 1
+        if config.n_ctx > 8192:
+            raise RuntimeError("cannot allocate KV")
+        return _StubRaw(entry)
+
+    monkeypatch.setattr("bwr.engine.pool.AsyncEngine", _StubAsync)
+    p = ModelPool(tmp_path, EngineConfig(n_ctx=4096), budget_bytes=64 * GIB,
+                  engine_factory=fake_build)
+    asyncio.run(p.acquire("a"))
+    p.set_ctx_override("a", 999_999)
+    with pytest.raises(RuntimeError):
+        asyncio.run(p.reload("a"))
+    assert p.loaded_ids == []
+    assert p.engine_for("a") is None
+
+
+def test_an_override_survives_a_restart(tmp_path, monkeypatch):
+    """Measuring a context window costs minutes; losing it on the next boot
+    would make the benchmark worth running only once per session."""
+    p, _ = _ctx_pool(tmp_path, monkeypatch)
+    p.set_ctx_override("a", 40960)
+    fresh, seen = _ctx_pool(tmp_path, monkeypatch)
+    assert fresh.ctx_override("a") == 40960
+    asyncio.run(fresh.acquire("a"))
+    assert seen == [40960]
+
+
+def test_clearing_an_override_returns_the_model_to_the_shared_config(
+    tmp_path, monkeypatch
+):
+    p, _ = _ctx_pool(tmp_path, monkeypatch)
+    p.set_ctx_override("a", 40960)
+    p.set_ctx_override("a", None)
+    fresh, seen = _ctx_pool(tmp_path, monkeypatch)
+    assert fresh.ctx_override("a") is None
+    asyncio.run(fresh.acquire("a"))
+    assert seen == [4096]
+
+
+def test_a_corrupt_override_file_is_ignored_rather_than_fatal(tmp_path, monkeypatch):
+    """A settings file nobody can parse must not stop the pool serving: the
+    cost of ignoring it is one model at the default window."""
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "config.json").write_text("{}")
+    (tmp_path / ".bwr-context.json").write_text("{not json")
+    p, seen = _ctx_pool(tmp_path, monkeypatch)
+    assert p.ctx_override("a") is None
+    asyncio.run(p.acquire("a"))
+    assert seen == [4096]
+
+
+@pytest.mark.parametrize("bad", [0, -1, "8192", True, None])
+def test_a_nonsense_override_value_is_dropped_not_loaded_with(
+    tmp_path, monkeypatch, bad
+):
+    """`True` is in here on purpose: bool is an int in Python, and an
+    override of `True` would load a model with n_ctx=1."""
+    import json
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "config.json").write_text("{}")
+    (tmp_path / ".bwr-context.json").write_text(json.dumps({"n_ctx": {"a": bad}}))
+    p, _ = _ctx_pool(tmp_path, monkeypatch)
+    assert p.ctx_override("a") is None
+
+
+def test_setting_a_nonpositive_override_is_refused(tmp_path, monkeypatch):
+    p, _ = _ctx_pool(tmp_path, monkeypatch)
+    with pytest.raises(ValueError):
+        p.set_ctx_override("a", 0)
+
+
+def test_the_override_file_is_not_discovered_as_a_model(tmp_path, monkeypatch):
+    p, _ = _ctx_pool(tmp_path, monkeypatch)
+    p.set_ctx_override("a", 40960)
+    assert [e.model_id for e in discover(tmp_path)] == ["a"]
+
+
+# -- native context length ---------------------------------------------------
+
+
+def test_native_ctx_reads_an_mlx_model_s_own_config(tmp_path, monkeypatch):
+    import json
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "config.json").write_text(
+        json.dumps({"max_position_embeddings": 262144})
+    )
+    p, _ = _ctx_pool(tmp_path, monkeypatch)
+    assert p.native_ctx("a") == 262144
+
+
+def test_native_ctx_is_unknown_rather_than_guessed(tmp_path, monkeypatch):
+    """`config.json` without the key answers None. A default here would
+    silently cap or uncap a benchmark's search."""
+    p, _ = _ctx_pool(tmp_path, monkeypatch)  # writes an empty config.json
+    assert p.native_ctx("a") is None
+    assert p.native_ctx("no-such-model") is None

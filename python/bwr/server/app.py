@@ -38,6 +38,7 @@ from ..engine.metal_engine import MetalEngine
 from ..engine.pool import ModelPoolError
 from ..engine.mlx_engine import MLXEngine
 from .bench import BenchRunner
+from .ctxbench import ContextBenchRunner
 from .downloads import DownloadManager, HubIndex, MSFetcher, ModelScopeIndex
 from .profiles import ProfileStore
 from .stats import ServerStats
@@ -403,6 +404,12 @@ def build_app(
     # way a request does -- including the pool's LRU accounting.
     bench = BenchRunner(resolve) if model_dir is not None else None
     app.state.bench = bench
+    # Takes the POOL, not `resolve`: it reloads the model at each candidate
+    # context size, which is residency work rather than request work. Pool
+    # mode only -- there is no single-model equivalent of "load this one
+    # again at a different n_ctx" that would not restart the process.
+    ctxbench = ContextBenchRunner(pool) if pool is not None else None
+    app.state.ctxbench = ctxbench
 
     # Web UI at /admin (derived from oMLX, Apache-2.0 -- see
     # bwr/server/webui/__init__.py for provenance and changes). Optional: a
@@ -412,7 +419,8 @@ def build_app(
 
         _mount_webui(app, engine, model_name, pool, stats=stats,
                      profiles=profile_store, downloads=downloads, hub=hub,
-                     bench=bench, ms_downloads=ms_downloads, ms_index=ms_index)
+                     bench=bench, ms_downloads=ms_downloads, ms_index=ms_index,
+                     ctxbench=ctxbench)
         app.state.webui = True
     except ImportError:  # noqa: BLE001 - jinja2/static deps absent; API still serves
         app.state.webui = False

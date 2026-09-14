@@ -193,9 +193,25 @@ A web UI (chat + dashboard) is served at `/admin`, and a macOS menubar app
 lives in `apps/bwr-mac`. Both are derived from
 [oMLX](https://github.com/jundot/omlx) under Apache-2.0 — see
 `python/bwr/server/webui/__init__.py` and `apps/bwr-mac/PROVENANCE.md` for
-what was changed, and `vendor/` for the licence. oMLX-only features
-(benchmark suites, model downloaders, ANE tuning) report `supported: false`
-rather than pretending.
+what was changed, and `vendor/` for the licence. Features with no bwr
+equivalent (accuracy suites, oQ quantization, Hugging Face upload) report
+`supported: false` rather than pretending.
+
+### Context benchmark
+
+`POST /admin/api/bench/context/start` measures the largest context this
+machine can actually **prefill** for a model, then writes it to that model's
+context window. `host.adapt_ctx` already predicts a ceiling analytically;
+this one seeds its search with that prediction and lets a real prefill decide,
+because the formula does not know about heap fragmentation, what else holds
+memory right now, or a hybrid model's real KV cost per token.
+
+Pool mode only (`--model-dir`), because each probe reloads the model at a
+different `n_ctx`. The result is persisted per model in
+`<model-dir>/.bwr-context.json`, so a window that took minutes to measure
+survives a restart; delete the file to go back to the shared `--ctx-size`.
+Measured here: SmolLM2-360M reaches its full native 8192 in 9.2 s, 2905 tok/s
+prefill. Details in `python/bwr/server/ctxbench.py`.
 
 ## License
 

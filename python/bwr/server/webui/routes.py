@@ -48,6 +48,7 @@ from starlette.requests import Request
 from . import PACKAGE_DIR, STATIC_DIR, TEMPLATES_DIR
 from ..ane import probe as ane_probe
 from ..bench import BenchError
+from ..ctxbench import ContextBenchError
 from ..downloads import DownloadError
 from ..profiles import ProfileError
 
@@ -190,6 +191,7 @@ def build_router(
     engine: Any, model_name: str, pool: Any = None, stats: Any = None,
     profiles: Any = None, downloads: Any = None, hub: Any = None,
     bench: Any = None, ms_downloads: Any = None, ms_index: Any = None,
+    ctxbench: Any = None,
 ) -> APIRouter:
     """Router for /admin.
 
@@ -310,6 +312,17 @@ def build_router(
     # ModelDTO declares id/loaded/is_loading/estimated_size non-optional, and
     # Swift's Decodable fails the WHOLE list on one missing key -- omitting
     # `is_loading` blanked the Models screen rather than dimming one badge.
+    def _native_ctx_single() -> int | None:
+        """The served model's trained context length, if the engine exposes it.
+
+        MetalEngine carries a llama.cpp `Model` with `n_ctx_train`; MLXEngine
+        does not surface the config value, so this answers None there rather
+        than reporting the serving window as if it were the model's own.
+        """
+        model = getattr(engine, "model", None)
+        value = getattr(model, "n_ctx_train", None)
+        return int(value) if isinstance(value, int) and value > 0 else None
+
     def _single_entry() -> dict[str, Any]:
         return {
             "id": model_name,
@@ -325,6 +338,11 @@ def build_router(
             "estimated_size": 0,
             "n_ctx": engine.ctx.n_ctx,
             "n_ctx_seq": engine.ctx.n_ctx_seq,
+            # The model's OWN trained context length, which is not n_ctx (what
+            # this server admits). The Context Bench screen filters its target
+            # presets by it, so reporting the serving window here would hide
+            # every target above it on a model that can reach them.
+            "model_context_length": _native_ctx_single(),
         }
 
     def _pool_entry(m: dict[str, Any]) -> dict[str, Any]:
@@ -352,6 +370,18 @@ def build_router(
         if raw is not None:
             out["n_ctx"] = raw.ctx.n_ctx
             out["n_ctx_seq"] = raw.ctx.n_ctx_seq
+        # Optional on the client: absent means "unknown", which is the honest
+        # answer for a GGUF nobody has loaded yet (only llama.cpp parses its
+        # metadata). Unknown widens the target list rather than narrowing it,
+        # and the benchmark caps at the real value anyway.
+        native = pool.native_ctx(m["id"])
+        if native:
+            out["model_context_length"] = native
+        override = pool.ctx_override(m["id"])
+        if override:
+            # A measured window that is configured but not yet live -- the
+            # engine resident right now was built before it was applied.
+            out["configured_n_ctx"] = override
         return out
 
     def _entries() -> list[dict[str, Any]]:
@@ -646,6 +676,49 @@ def build_router(
             ))
         except (BenchError, ValueError, TypeError) as exc:
             return JSONResponse({"detail": str(exc)}, status_code=400)
+
+    # -- context benchmark -------------------------------------------------
+    #
+    # Registered BEFORE `/api/bench/{bench_id}/...` on purpose: routes match
+    # in registration order, and a literal `context` segment competing with a
+    # `{bench_id}` placeholder is exactly the kind of ordering that works
+    # until someone reorders the file. See server/ctxbench.py.
+
+    @router.post("/api/bench/context/start")
+    async def api_ctxbench_start(request: Request) -> JSONResponse:
+        if ctxbench is None:
+            return JSONResponse(
+                {"detail": "the context benchmark needs a model directory"},
+                status_code=400,
+            )
+        body = await _json_body(request)
+        try:
+            return JSONResponse(ctxbench.start(
+                body.get("model_id") or body.get("modelId") or model_name,
+                int(
+                    body.get("target_tokens")
+                    or body.get("targetTokens")
+                    or 131072
+                ),
+            ))
+        except (ContextBenchError, ValueError, TypeError) as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+
+    @router.get("/api/bench/context/{bench_id}/results")
+    async def api_ctxbench_results(bench_id: str) -> JSONResponse:
+        body = ctxbench.get(bench_id) if ctxbench is not None else None
+        if body is None:
+            return JSONResponse(
+                {"detail": "unknown context benchmark"}, status_code=404
+            )
+        return JSONResponse(body)
+
+    @router.post("/api/bench/context/{bench_id}/cancel")
+    async def api_ctxbench_cancel(bench_id: str) -> JSONResponse:
+        ok = ctxbench.cancel(bench_id) if ctxbench is not None else False
+        return JSONResponse(
+            {"status": "cancelling" if ok else "not_running", "bench_id": bench_id}
+        )
 
     @router.get("/api/bench/{bench_id}/results")
     async def api_bench_results(bench_id: str) -> JSONResponse:
@@ -1171,13 +1244,13 @@ def mount(
     app: Any, engine: Any, model_name: str, pool: Any = None, *,
     stats: Any = None, profiles: Any = None, downloads: Any = None,
     hub: Any = None, bench: Any = None, ms_downloads: Any = None,
-    ms_index: Any = None,
+    ms_index: Any = None, ctxbench: Any = None,
 ) -> None:
     """Attach the UI at /admin plus the two /v1 helpers the page polls."""
     install_log_buffer()
     app.include_router(
         build_router(engine, model_name, pool, stats, profiles, downloads, hub,
-                     bench, ms_downloads, ms_index),
+                     bench, ms_downloads, ms_index, ctxbench),
         prefix="/admin"
     )
     app.mount(

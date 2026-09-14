@@ -54,7 +54,10 @@ it:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import tempfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -74,6 +77,12 @@ _LOAD_OVERHEAD = 1.15
 
 _MLX_MARKER = "config.json"
 _GGUF_SUFFIX = ".gguf"
+
+#: Per-model `n_ctx` overrides, written beside the weights. Kept in the model
+#: directory rather than a user-wide config for the same reason profiles are
+#: (see server/profiles.py): a model directory that moves takes its settings
+#: with it, and two servers over two directories cannot tread on each other.
+_CTX_FILE = ".bwr-context.json"
 
 
 @dataclass
@@ -179,6 +188,7 @@ class ModelPool:
         else:
             caps = host.probe()
             self.budget_bytes = max(0, caps.mem_bytes - _OS_RESERVE_BYTES)
+        self._ctx_overrides: dict[str, int] = _read_ctx_overrides(self.model_dir)
 
     # -- inspection --------------------------------------------------------
 
@@ -201,6 +211,68 @@ class ModelPool:
     @property
     def resident_bytes(self) -> int:
         return sum(int(l.entry.size_bytes * _LOAD_OVERHEAD) for l in self._loaded.values())
+
+    def ctx_override(self, model_id: str) -> int | None:
+        """The per-model `n_ctx` this pool will load `model_id` with, if any."""
+        return self._ctx_overrides.get(model_id)
+
+    def set_ctx_override(self, model_id: str, n_ctx: int | None) -> None:
+        """Pin (or clear) the `n_ctx` future loads of `model_id` use.
+
+        Takes effect on the model's next load, not on a resident engine: the
+        KV geometry is fixed when the engine is built, so changing it under a
+        live engine is not a thing that can be done. Callers that need the new
+        value NOW unload first -- `reload()` does exactly that.
+
+        Persisted immediately so a measured context window survives a restart.
+        A failed write is logged and the in-process override still stands:
+        losing the value on the next boot is better than failing a benchmark
+        that already did the expensive part.
+        """
+        if n_ctx is None:
+            self._ctx_overrides.pop(model_id, None)
+        else:
+            if n_ctx <= 0:
+                raise ValueError(f"n_ctx must be positive, got {n_ctx}")
+            self._ctx_overrides[model_id] = int(n_ctx)
+        _write_ctx_overrides(self.model_dir, self._ctx_overrides)
+
+    def native_ctx(self, model_id: str) -> int | None:
+        """The model's own trained context length, or None if unreadable.
+
+        Read from `config.json` for an MLX model, which costs a small file
+        read and works whether or not the model is resident. A GGUF carries
+        the same number in its metadata, but only llama.cpp parses it, so a
+        Metal model answers only once it is loaded -- and None before that,
+        rather than a guess the caller would have no way to distrust.
+        """
+        entry = self._entries.get(model_id)
+        if entry is None:
+            return None
+        if entry.kind == "mlx":
+            return _native_ctx_from_config(entry.path)
+        raw = self.engine_for(model_id)
+        model = getattr(raw, "model", None)
+        value = getattr(model, "n_ctx_train", None)
+        return int(value) if isinstance(value, int) and value > 0 else None
+
+    async def reload(self, model_id: str) -> tuple[str, AsyncEngine]:
+        """Drop `model_id` if resident, then load it again.
+
+        The way a changed `ctx_override` is made to take effect. Unload and
+        load are one critical section so a request arriving mid-swap cannot
+        acquire the engine that is on its way out.
+        """
+        mid = self.resolve(model_id)
+        entry = self._entries[mid]
+        async with self._lock:
+            await self._unload_locked(mid, reason="reload")
+            await self._make_room(entry)
+            rec = await self._load(entry)
+            self._loaded.move_to_end(mid)
+            self._clock += 1.0
+            entry.last_used = self._clock
+            return mid, rec.engine
 
     def engine_for(self, model_id: str) -> Any | None:
         """The raw engine if resident, else None. Read-only callers (stats,
@@ -278,7 +350,16 @@ class ModelPool:
 
     async def _load(self, entry: ModelEntry) -> _Loaded:
         logger.info("pool: loading %s (%s)", entry.model_id, entry.kind)
-        raw = await asyncio.to_thread(self._factory, entry, self.config)
+        config = self.config
+        override = self._ctx_overrides.get(entry.model_id)
+        if override:
+            import dataclasses
+
+            config = dataclasses.replace(config, n_ctx=override)
+            logger.info(
+                "pool: %s loading with measured n_ctx=%d", entry.model_id, override
+            )
+        raw = await asyncio.to_thread(self._factory, entry, config)
         engine = AsyncEngine(raw)
         await engine.start()
         rec = _Loaded(engine=engine, raw=raw, entry=entry)
@@ -328,6 +409,76 @@ def _build_engine(entry: ModelEntry, config: EngineConfig) -> Any:
     cfg = _with_engine(config, "metal")
     model = Model(str(entry.path))
     return MetalEngine(model, cfg)
+
+
+def _native_ctx_from_config(path: Path) -> int | None:
+    """`max_position_embeddings` from an MLX model's `config.json`.
+
+    Anything unreadable, absent or non-positive answers None. A model whose
+    own context length we cannot establish must not be described as having
+    one -- the caller reports "unknown", which is true, instead of a default
+    that would silently cap or uncap a search.
+    """
+    try:
+        with (path / _MLX_MARKER).open("r", encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except Exception:  # noqa: BLE001 - absent or malformed config: unknown, not fatal
+        return None
+    for key in ("max_position_embeddings", "max_sequence_length", "n_positions"):
+        value = cfg.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
+def _read_ctx_overrides(model_dir: Path) -> dict[str, int]:
+    """Per-model `n_ctx` overrides from the model directory.
+
+    Every failure mode -- no file, bad JSON, a value that is not a positive
+    int -- degrades to "no override for that model". A corrupt settings file
+    must not stop the pool serving; the cost of ignoring it is one model
+    loading at the default context, which is what happened before the file
+    existed.
+    """
+    try:
+        with (model_dir / _CTX_FILE).open("r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except Exception:  # noqa: BLE001 - see above
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    table = raw.get("n_ctx")
+    if not isinstance(table, dict):
+        return {}
+    out: dict[str, int] = {}
+    for mid, value in table.items():
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            out[str(mid)] = value
+    return out
+
+
+def _write_ctx_overrides(model_dir: Path, overrides: dict[str, int]) -> None:
+    """Replace the override file atomically.
+
+    Written to a temporary file in the same directory and renamed, so a
+    reader never sees a half-written file and a crash mid-write leaves the
+    previous settings intact rather than an empty one.
+    """
+    try:
+        model_dir.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(model_dir), prefix=".bwr-context-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({"n_ctx": overrides}, fh, indent=2, sort_keys=True)
+            os.replace(tmp, model_dir / _CTX_FILE)
+        except Exception:  # noqa: BLE001 - not a swallow: this removes the
+            # half-written temporary file and re-raises, so the caller below
+            # still sees why the write failed.
+            os.unlink(tmp)
+            raise
+    except Exception as exc:  # noqa: BLE001 - a read-only model dir must not
+        # fail the caller: the in-process override is already set and correct.
+        logger.warning("pool: could not persist context overrides: %s", exc)
 
 
 def _with_engine(config: EngineConfig, kind: str) -> EngineConfig:
