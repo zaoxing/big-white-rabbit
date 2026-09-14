@@ -490,12 +490,13 @@ resolve_donor_layers() {
     esac
 }
 
-# --- Derive bundle version from bwr/_version.py --------------------------
+# --- Derive bundle version from pyproject.toml ---------------------------
 #
-# bwr/_version.py is the canonical source — pyproject.toml reads it via
-# `[tool.setuptools.dynamic] version = {attr = ...}`. Mirror that into the
-# Swift bundle so CFBundleShortVersionString (MARKETING_VERSION) tracks
-# the Python package without a second hand-maintained string.
+# CHANGED FROM UPSTREAM: oMLX kept the version in `<repo>/bwr/_version.py`
+# and had pyproject read it dynamically. This project declares
+# `version = "..."` directly in pyproject.toml and keeps its package under
+# `python/bwr/`, so that file does not exist and the old lookup died before
+# the build started. pyproject.toml is the single source of truth here.
 #
 # CURRENT_PROJECT_VERSION uses `git rev-list --count HEAD` so each commit
 # gives a monotonically-increasing CFBundleVersion — enough for the
@@ -505,13 +506,16 @@ resolve_donor_layers() {
 # stale numbers; falling back to the pbxproj placeholders would mask a
 # real regression.
 
-VERSION_FILE="$REPO_ROOT/bwr/_version.py"
+VERSION_FILE="$REPO_ROOT/pyproject.toml"
 [ -f "$VERSION_FILE" ] || die "missing $VERSION_FILE — cannot derive bundle version"
-APP_VERSION=$(grep -oE '__version__[[:space:]]*=[[:space:]]*"[^"]+"' "$VERSION_FILE" | \
-              sed -E 's/.*"([^"]+)".*/\1/')
-[ -n "$APP_VERSION" ] || die "could not parse __version__ from $VERSION_FILE"
+# First `version = "..."` under [project]; stop before any other table so a
+# tool's own version key (e.g. cmake.version) cannot win.
+APP_VERSION=$(awk '/^\[project\]/{p=1;next} /^\[/{p=0}
+                 p && /^version[[:space:]]*=/ && match($0, /"[^"]*"/) {
+                     print substr($0, RSTART + 1, RLENGTH - 2); exit }' "$VERSION_FILE")
+[ -n "$APP_VERSION" ] || die "could not parse [project] version from $VERSION_FILE"
 BUILD_NUMBER=$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null || echo 1)
-log "Bundle version: $APP_VERSION (build $BUILD_NUMBER) — from bwr/_version.py"
+log "Bundle version: $APP_VERSION (build $BUILD_NUMBER) — from pyproject.toml"
 
 # --- xcodebuild -----------------------------------------------------------
 
