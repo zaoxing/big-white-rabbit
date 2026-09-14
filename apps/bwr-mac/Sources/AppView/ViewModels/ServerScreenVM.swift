@@ -7,6 +7,15 @@ final class ServerScreenVM {
     var portText: String = "1919"
     var logLevel: String = "info"
     var autoStartOnLaunch: Bool = true
+    /// Model id to warm during server startup; empty means load lazily.
+    /// Launch configuration, not a runtime setting -- it is an argv flag on
+    /// the server process, so a change takes effect on the next start.
+    var preloadModel: String = ""
+    /// Ids offered by the picker, refreshed from /admin/api/models. Always
+    /// includes whatever is currently selected, even if the server cannot
+    /// see it any more, so a stale selection is visible rather than
+    /// silently reset to "none".
+    private(set) var availableModels: [String] = []
 
     // Phase 4 — Advanced disclosure.
     var sseKeepaliveMode: String = "chunk"
@@ -461,6 +470,7 @@ final class ServerScreenVM {
             self.host = config.bindAddress
             self.portText = String(config.port)
             self.autoStartOnLaunch = config.autoStartOnLaunch
+            self.preloadModel = config.preloadModel ?? ""
             self.appliedBindAddress = config.bindAddress
             self.effectiveHost = config.host
             self.effectivePort = config.port
@@ -607,6 +617,34 @@ final class ServerScreenVM {
                 self.lastError = error.bwrDescription
             }
         }
+    }
+
+    /// Persist the startup model. Local only: `--preload` is an argument to
+    /// the server process, so there is nothing for a running server to
+    /// apply and no patch to POST -- it lands in settings.json and
+    /// ServerProcess.start() reads it on the next start.
+    func savePreloadModel(services: AppServices) {
+        let selection = preloadModel.trimmingCharacters(in: .whitespaces)
+        var updated = services.config
+        updated.preloadModel = selection.isEmpty ? nil : selection
+        do {
+            try updated.save()
+            services.updateConfig(updated)
+            self.lastError = nil
+        } catch {
+            self.lastError = error.bwrDescription
+        }
+    }
+
+    /// Refresh the picker's options. A failure is not surfaced: the list is
+    /// an affordance, and an unreachable server already shows its own state
+    /// everywhere else on this screen.
+    func refreshAvailableModels(client: BWRClient?) async {
+        guard let client else { return }
+        var ids: [String] = (try? await client.listModels())?.models.map(\.id) ?? []
+        let current = preloadModel.trimmingCharacters(in: .whitespaces)
+        if !current.isEmpty && !ids.contains(current) { ids.append(current) }
+        self.availableModels = ids
     }
 
     /// Build a `Binding` that calls `save` after the value changes. Used for

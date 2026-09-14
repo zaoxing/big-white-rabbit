@@ -1,0 +1,19 @@
+{
+ "dflash_enabled": false,
+ "is_paroquant": false,
+ "model_id": "Qwen3-30B-A3B-4bit",
+ "moe_expert_offload_enabled": false,
+ "mtp_compatibility_reason": "not supported by the bwr backend",
+ "mtp_compatible": false,
+ "mtp_enabled": false,
+ "read_only": true,
+ "settings": {
+  "mlx_mtp": false,
+  "mlx_prefix_cache": false,
+  "n_batch": 512,
+  "n_ctx": 4096,
+  "n_seq_max": 8,
+  "speculative": false
+ },
+ "vlm_mtp_enabled": false
+}

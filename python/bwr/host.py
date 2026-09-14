@@ -55,9 +55,16 @@ class HostCaps:
     notes: list[str] = field(default_factory=list)
 
 
+# Absolute path, because PATH is not guaranteed to hold /usr/sbin. A process
+# spawned by a GUI app inherits launchd's PATH, not a login shell's, and an
+# unfound `sysctl` reads as "RAM size unknown" -- which used to cost the model
+# pool its entire memory budget.
+_SYSCTL = "/usr/sbin/sysctl" if os.path.exists("/usr/sbin/sysctl") else "sysctl"
+
+
 def _sysctl(runner, key: str) -> str | None:
     try:
-        out = runner(["sysctl", "-n", key])
+        out = runner([_SYSCTL, "-n", key])
     except Exception:  # noqa: BLE001 - probe is best-effort; any failure (missing
         # sysctl, unreadable key, non-Mac) means "unknown", and the caller
         # already degrades on None. Never let a probe abort a serve.

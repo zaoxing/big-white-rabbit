@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -36,6 +37,7 @@ from ..engine.config import (
 from ..engine.metal_engine import MetalEngine
 from ..engine.pool import ModelPoolError
 from ..engine.mlx_engine import MLXEngine
+from .stats import ServerStats
 from .schemas import (
     ChatCompletion,
     ChatCompletionChunk,
@@ -344,6 +346,11 @@ def build_app(
     app.state.engine = async_engine
     app.state.pool = pool
     app.state.resolve = resolve
+    # Counters behind /admin/api/stats. Created here rather than in the webui
+    # module because the request paths below are what can observe a request
+    # finishing; the dashboard only reads what they record.
+    stats = ServerStats()
+    app.state.stats = stats
 
     # Web UI at /admin (derived from oMLX, Apache-2.0 -- see
     # bwr/server/webui/__init__.py for provenance and changes). Optional: a
@@ -351,7 +358,7 @@ def build_app(
     try:
         from .webui.routes import mount as _mount_webui
 
-        _mount_webui(app, engine, model_name, pool)
+        _mount_webui(app, engine, model_name, pool, stats=stats)
         app.state.webui = True
     except ImportError:  # noqa: BLE001 - jinja2/static deps absent; API still serves
         app.state.webui = False
@@ -415,6 +422,12 @@ def build_app(
         params = _request_params(req)
         known_tools = _parsing_names(req)
         n_prompt = count_tokens(renderer_r, prompt)
+        # Read BEFORE submitting: the delta across the request is how many
+        # prompt tokens the prefix cache served. Under concurrency a token
+        # can land on a neighbouring request's tally, but the SUM -- which is
+        # all /admin/api/stats reports -- stays exact.
+        cached_before = _prefix_tokens(engine_r)
+        t_submit = time.perf_counter()
         request_id = await submit_request(engine_r, prompt, params)
 
         if req.stream:
@@ -426,6 +439,11 @@ def build_app(
                     http_request,
                     known_tools,
                     params.stop,
+                    stats=stats,
+                    n_prompt=n_prompt,
+                    t_submit=t_submit,
+                    cached_before=cached_before,
+                    served=served,
                 ),
             )
 
@@ -439,7 +457,10 @@ def build_app(
             parts: list[str] = []
             n_completion = 0
             finish_reason = "stop"
+            t_first: float | None = None
             async for out in engine_r.stream(request_id):
+                if t_first is None:
+                    t_first = time.perf_counter()
                 if await http_request.is_disconnected():
                     await engine_r.cancel(request_id)
                     break
@@ -464,6 +485,12 @@ def build_app(
                 parts.append(stopper.flush())
         finally:
             engine_r.release(request_id)
+            _record(
+                stats, engine_r,
+                n_prompt=n_prompt, n_completion=n_completion,
+                cached_before=cached_before,
+                t_submit=t_submit, t_first=t_first, model=served,
+            )
 
         text = "".join(parts)
         content: str | None = text
@@ -520,6 +547,50 @@ def build_app(
     return app
 
 
+def _prefix_tokens(engine: object) -> int:
+    """Prompt tokens the prefix cache has served, or 0 where there is no cache.
+
+    MetalEngine keeps no such counter and the MLX one only has it when the
+    prefix cache is enabled, so this must degrade to 0 rather than raise --
+    stats are observability, never a reason to fail a completion.
+    """
+    raw = getattr(engine, "engine", engine)
+    return int(getattr(raw, "prefix_hit_tokens", 0) or 0)
+
+
+def _record(
+    stats: "ServerStats",
+    engine: object,
+    *,
+    n_prompt: int,
+    n_completion: int,
+    cached_before: int,
+    t_submit: float,
+    t_first: float | None,
+    model: str | None = None,
+) -> None:
+    """Fold a finished request into the counters. Swallows everything.
+
+    Called from `finally` blocks on both completion paths, including the
+    cancelled and errored ones -- a request that burned a slot is a request
+    that happened. Anything raised here would replace the client's real
+    result (or real error) with an accounting bug, so nothing may escape.
+    """
+    try:
+        now = time.perf_counter()
+        cached = max(0, _prefix_tokens(engine) - cached_before)
+        stats.record(
+            prompt_tokens=n_prompt,
+            completion_tokens=n_completion,
+            cached_tokens=cached,
+            prefill_seconds=(t_first - t_submit) if t_first else None,
+            decode_seconds=(now - t_first) if t_first else None,
+            model=model,
+        )
+    except Exception:  # noqa: BLE001 - counters must never break a response
+        pass
+
+
 async def _sse(
     engine: AsyncEngine,
     request_id: int,
@@ -527,6 +598,12 @@ async def _sse(
     http_request: Request,
     known_tools: set[str] | None = None,
     stops: tuple[str, ...] = (),
+    *,
+    stats: "ServerStats | None" = None,
+    n_prompt: int = 0,
+    t_submit: float = 0.0,
+    cached_before: int = 0,
+    served: str | None = None,
 ) -> AsyncIterator[bytes]:
     """Emit OpenAI-shaped SSE frames, then `[DONE]`."""
     completion_id = _rid("chatcmpl")
@@ -584,10 +661,18 @@ async def _sse(
             )
         return out
 
+    n_completion = 0
+    t_first: float | None = None
     try:
         # First frame announces the role and carries no content, as OpenAI does.
         yield frame(ChunkChoice(delta=Delta(role="assistant")))
         async for out in engine.stream(request_id):
+            if t_first is None:
+                t_first = time.perf_counter()
+            # Same rule as the non-streaming path: the natural-end retirement
+            # carries no text and must not count as a generated token.
+            if not (out.finished and out.piece == "" and out.finish_reason == "eog"):
+                n_completion += 1
             # A client that hangs up mid-stream should stop costing us decodes.
             if await http_request.is_disconnected():
                 await engine.cancel(request_id)
@@ -613,3 +698,10 @@ async def _sse(
         yield b"data: [DONE]\n\n"
     finally:
         engine.release(request_id)
+        if stats is not None:
+            _record(
+                stats, engine,
+                n_prompt=n_prompt, n_completion=n_completion,
+                cached_before=cached_before,
+                t_submit=t_submit, t_first=t_first, model=served,
+            )

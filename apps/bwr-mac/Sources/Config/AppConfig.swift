@@ -51,6 +51,14 @@ struct AppConfig: Sendable, Equatable, Codable {
     var modelDirs: [String] = []
     /// HuggingFace endpoint override. Empty = default `huggingface.co`.
     var hfEndpoint: String
+    /// Model to load during server startup instead of on the first request,
+    /// passed through as `bwr serve --preload <id>`. `nil`/empty means load
+    /// nothing up front.
+    ///
+    /// Deliberately NOT defaulted to "whichever model is first": the server
+    /// is supposed to start in the configuration the user selected, and
+    /// picking a 17 GiB model on their behalf is not that.
+    var preloadModel: String?
 
     init(
         bindAddress: String,
@@ -60,7 +68,8 @@ struct AppConfig: Sendable, Equatable, Codable {
         basePath: String,
         modelDir: String,
         modelDirs: [String]? = nil,
-        hfEndpoint: String
+        hfEndpoint: String,
+        preloadModel: String? = nil
     ) {
         self.bindAddress = bindAddress
         self.port = port
@@ -76,6 +85,7 @@ struct AppConfig: Sendable, Equatable, Codable {
             self.modelDir = primary
         }
         self.hfEndpoint = hfEndpoint
+        self.preloadModel = preloadModel
     }
 
     static var `default`: AppConfig {
@@ -296,6 +306,11 @@ struct AppConfig: Sendable, Equatable, Codable {
                 c.modelDirs = [m]
             }
             if let hf = slice.hfEndpoint { c.hfEndpoint = hf }
+            // Empty string means "load nothing", which is the default; keep
+            // it as nil in memory so callers have one way to spell "unset".
+            if let preload = slice.preloadModel {
+                c.preloadModel = preload.isEmpty ? nil : preload
+            }
         }
 
         // Env overrides for non-path fields. basePath is already env-driven
@@ -331,6 +346,10 @@ struct AppConfig: Sendable, Equatable, Codable {
         server.removeValue(forKey: "bind_address")
         server["port"] = port
         server["auto_start_on_launch"] = autoStartOnLaunch
+        // Empty string, not a removed key: "" is how the UI says "load
+        // nothing", and dropping the key would let a stale value reappear
+        // from whatever the file held before.
+        server["preload_model"] = preloadModel ?? ""
         json["server"] = server
 
         var auth = (json["auth"] as? [String: Any]) ?? [:]
@@ -393,6 +412,7 @@ struct AppConfig: Sendable, Equatable, Codable {
         var modelDirs: [String]?
         var modelDir: String?
         var hfEndpoint: String?
+        var preloadModel: String?
     }
 
     static func readSettingsForTests(basePath: String) throws -> ServerSettingsSlice {
@@ -421,7 +441,8 @@ struct AppConfig: Sendable, Equatable, Codable {
             apiKey: auth?["api_key"] as? String,
             modelDirs: model?["model_dirs"] as? [String],
             modelDir: model?["model_dir"] as? String,
-            hfEndpoint: hf?["endpoint"] as? String
+            hfEndpoint: hf?["endpoint"] as? String,
+            preloadModel: server?["preload_model"] as? String
         )
     }
 }

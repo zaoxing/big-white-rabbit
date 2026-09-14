@@ -272,3 +272,31 @@ def test_preload_first_resolves_to_a_concrete_id(pool_factory):
 
     with pytest.raises(ModelPoolError):
         p.resolve(None)      # the bug: None is not a valid multi-model target
+
+
+# -- unknown memory budget ---------------------------------------------------
+
+
+def test_an_unknown_budget_does_not_evict_everything(pool_factory):
+    """`budget_bytes == 0` means the RAM size was unreadable, not "no room".
+
+    The admission guard already reads it that way (it skips on falsy), but
+    the eviction loop read the same 0 as a hard cap and unloaded EVERY
+    resident model before each load. `sysctl` being off PATH -- which is the
+    normal case for a process spawned by a GUI app, since it inherits
+    launchd's PATH and not a login shell's -- was enough to silently turn the
+    pool into a one-model cache that reloaded 17 GiB on every switch.
+    """
+    p = pool_factory({"a": 4, "b": 4}, budget_gib=32)
+    p.budget_bytes = 0
+    asyncio.run(p.acquire("a"))
+    asyncio.run(p.acquire("b"))
+    assert sorted(p.loaded_ids) == ["a", "b"]
+
+
+def test_a_known_budget_still_evicts(pool_factory):
+    """The companion to the above: a real budget must still make room."""
+    p = pool_factory({"a": 4, "b": 4}, budget_gib=6)
+    asyncio.run(p.acquire("a"))
+    asyncio.run(p.acquire("b"))
+    assert p.loaded_ids == ["b"]

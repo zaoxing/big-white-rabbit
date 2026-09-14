@@ -242,6 +242,7 @@ class MLXEngine:
         # prefill's last logits row, so a hit replays deterministically.
         self._prefix: OrderedDict[tuple[int, ...], tuple[list, int]] = OrderedDict()
         self.prefix_hits = 0
+        self.prefix_hit_tokens = 0
         self.prefix_misses = 0
         self._next_request_id = 0
 
@@ -507,6 +508,11 @@ class MLXEngine:
             return None
         self._prefix.move_to_end(key)
         self.prefix_hits += 1
+        # The cache is exact-match, so a hit covers the WHOLE prompt: the
+        # token count reused is len(prompt), not some matched prefix of it.
+        # /admin/api/stats reports cache efficiency in tokens, which a hit
+        # COUNT cannot produce.
+        self.prefix_hit_tokens += len(req.prompt)
         return deepcopy(entry[0]), entry[1], entry
 
     def _prefix_hit(self, req: RequestState) -> list[StepOutput] | None:

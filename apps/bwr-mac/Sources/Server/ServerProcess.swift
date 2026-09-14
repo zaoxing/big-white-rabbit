@@ -126,6 +126,10 @@ final class ServerProcess: @unchecked Sendable {
     /// fine — bwr serves zero models and the dashboard shows an empty list,
     /// which is exactly the first-launch state.
     private(set) var modelDir: String
+    /// Model to warm during server startup, or nil to load lazily. Read from
+    /// settings.json at `start()` like host/port/modelDir, so it is whatever
+    /// the user last selected rather than whatever this object was built with.
+    private(set) var preloadModel: String?
     private let runtime: PythonRuntime
     private var resolver: PortConflictResolver
 
@@ -136,7 +140,7 @@ final class ServerProcess: @unchecked Sendable {
     /// uvicorn.
     enum ReconfigureError: Error { case serverIsLive }
     func reconfigure(bindAddress: String? = nil, port: Int? = nil, basePath: URL? = nil,
-                     modelDir: String? = nil) throws {
+                     modelDir: String? = nil, preloadModel: String?? = nil) throws {
         switch state {
         case .running, .starting, .stopping, .unresponsive:
             throw ReconfigureError.serverIsLive
@@ -147,6 +151,10 @@ final class ServerProcess: @unchecked Sendable {
         if let port { self.port = port }
         if let basePath { self.basePath = basePath }
         if let modelDir, !modelDir.isEmpty { self.modelDir = modelDir }
+        // Double optional: the outer nil means "leave it alone", the inner
+        // one means "the user selected no startup model". Collapsing them
+        // would make clearing the selection impossible.
+        if let preloadModel { self.preloadModel = preloadModel }
         self.resolver = PortConflictResolver(host: self.host, port: self.port)
     }
 
@@ -228,7 +236,9 @@ final class ServerProcess: @unchecked Sendable {
         let nextModelDir = saved.modelDirs?.first(where: { !$0.isEmpty })
             ?? saved.modelDir
             ?? AppConfig.defaultModelDir(forBasePath: basePath.path)
-        try reconfigure(bindAddress: nextHost, port: nextPort, modelDir: nextModelDir)
+        let nextPreload = saved.preloadModel.flatMap { $0.isEmpty ? nil : $0 }
+        try reconfigure(bindAddress: nextHost, port: nextPort, modelDir: nextModelDir,
+                        preloadModel: .some(nextPreload))
 
         // Sync probe — fast enough on local connect refused.
         if resolver.isPortInUseSync() {
@@ -529,19 +539,21 @@ final class ServerProcess: @unchecked Sendable {
         if let dev = env["BWR_DEV_SERVER_SCRIPT"], !dev.isEmpty {
             return [dev, "--host", bindAddress, "--port", String(port)]
         }
-        return [
+        var args = [
             "-m", "bwr.cli", "serve",
             "--model-dir", modelDir,
             "--host", bindAddress,
             "--port", String(port),
-            // Warm the first model at startup rather than on the first
-            // request. Without it the app looks healthy while the first
-            // prompt silently pays a 15-19 GiB weight load. "first" means
-            // whichever model the pool lists first; with an empty model
-            // directory bwr logs that preload found nothing and serves
-            // anyway, so this is safe on a fresh install.
-            "--preload", "first",
         ]
+        // Only when the user picked one. Warming a model moves a 15-19 GiB
+        // weight load off the first request, but choosing WHICH model is
+        // the user's call -- an earlier version passed "first" here and the
+        // server loaded whatever happened to sort first, which is not the
+        // configuration anyone selected.
+        if let preloadModel, !preloadModel.isEmpty {
+            args += ["--preload", preloadModel]
+        }
+        return args
     }
 
     private func update(_ next: State) {

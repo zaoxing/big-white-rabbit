@@ -33,7 +33,9 @@ a stub waiting to be filled.
 from __future__ import annotations
 
 import json
+import logging
 import time
+from collections import deque
 from typing import Any
 
 from fastapi import APIRouter
@@ -115,13 +117,64 @@ def _t(key: str, **kwargs: Any) -> str:
     return text
 
 
-def build_router(engine: Any, model_name: str, pool: Any = None) -> APIRouter:
+class _LogBuffer(logging.Handler):
+    """Last N formatted log lines, for GET /admin/api/logs.
+
+    The Logs screen wants the server's log. bwr's own process does not own a
+    log FILE -- when the macOS app runs it, the Swift parent captures the
+    child's stdout/stderr into
+    ~/Library/Application Support/BigWhiteRabbit/logs/server.log, and a bare
+    `bwr serve` in a terminal writes to a terminal. Rather than guess at a
+    path that may not exist, the server reports what it can prove: the
+    records it emitted, kept in memory.
+
+    `logs` is returned as ONE string, not a list. LogsDTO declares
+    `logs: String`, and Swift's decoder fails the whole response on a type
+    mismatch -- an array here blanked the entire Logs screen rather than
+    showing it unstyled.
+    """
+
+    CAPACITY = 2000
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: deque[str] = deque(maxlen=self.CAPACITY)
+        self.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)-8s %(name)s: %(message)s")
+        )
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.records.append(self.format(record))
+        except Exception:  # noqa: BLE001 - logging must never raise into a caller
+            pass
+
+
+LOG_BUFFER = _LogBuffer()
+# uvicorn.access is deliberately included: "which requests arrived" is most of
+# what makes a server log worth reading.
+_LOGGED = ("bwr", "uvicorn", "uvicorn.error", "uvicorn.access")
+
+
+def install_log_buffer() -> None:
+    """Attach the buffer once per process, idempotently."""
+    for name in _LOGGED:
+        lg = logging.getLogger(name)
+        if LOG_BUFFER not in lg.handlers:
+            lg.addHandler(LOG_BUFFER)
+
+
+def build_router(
+    engine: Any, model_name: str, pool: Any = None, stats: Any = None,
+) -> APIRouter:
     """Router for /admin.
 
     `engine` is the raw engine (not the AsyncEngine): the UI only reads
     counters, never admits work through it. `pool`, when present, makes the
     model-management surfaces real -- list/load/unload act on actual
-    residency instead of describing a single fixed model.
+    residency instead of describing a single fixed model. `stats` is the
+    request accumulator owned by server/app.py; without it /api/stats can
+    only report what it can see from the engine.
     """
     router = APIRouter()
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -221,29 +274,56 @@ def build_router(engine: Any, model_name: str, pool: Any = None) -> APIRouter:
     # short-circuits instead of throwing on undefined.
     _NO_CLUSTER = {"live": None, "enabled": False}
 
+    def _human_bytes(n: int) -> str:
+        step = 1024.0
+        value = float(n)
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if value < step or unit == "TB":
+                return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+            value /= step
+        return f"{value:.1f} TB"
+
+    # ModelDTO declares id/loaded/is_loading/estimated_size non-optional, and
+    # Swift's Decodable fails the WHOLE list on one missing key -- omitting
+    # `is_loading` blanked the Models screen rather than dimming one badge.
     def _single_entry() -> dict[str, Any]:
         return {
             "id": model_name,
             "name": model_name,
+            "display_name": model_name,
             "model_type": "llm",
             "loaded": True,
+            # bwr loads synchronously inside the request that needs the
+            # model, so there is no observable in-between state to report.
+            "is_loading": False,
             "status": "loaded",
             "cluster": dict(_NO_CLUSTER),
+            "estimated_size": 0,
             "n_ctx": engine.ctx.n_ctx,
             "n_ctx_seq": engine.ctx.n_ctx_seq,
         }
 
     def _pool_entry(m: dict[str, Any]) -> dict[str, Any]:
         raw = pool.engine_for(m["id"])
+        size = int(m.get("size_bytes") or 0)
         out = {
             "id": m["id"],
             "name": m["id"],
+            "display_name": m["id"],
+            "model_path": m.get("path"),
             "model_type": "llm",
             "loaded": m["loaded"],
+            "is_loading": False,
             "status": "loaded" if m["loaded"] else "available",
             "cluster": dict(_NO_CLUSTER),
             "kind": m["kind"],
-            "size_bytes": m["size_bytes"],
+            "size_bytes": size,
+            # On-disk weight bytes. bwr mmaps, so this is the honest size of
+            # the model -- not an RSS reading, which counts only the pages
+            # the kernel happens to have faulted in.
+            "estimated_size": size,
+            "estimated_size_formatted": _human_bytes(size),
+            "actual_size": size if m["loaded"] else None,
         }
         if raw is not None:
             out["n_ctx"] = raw.ctx.n_ctx
@@ -287,10 +367,52 @@ def build_router(engine: Any, model_name: str, pool: Any = None) -> APIRouter:
             {"status": "ok" if ok else "not_loaded", "loaded": pool.loaded_ids}
         )
 
+    def _stats_totals() -> dict[str, Any]:
+        """The request-accounting half of /api/stats.
+
+        StatsDTO declares total_tokens_served, total_requests, the two tps
+        averages and uptime_seconds NON-optional. A response missing any of
+        them decodes to nothing at all in Swift, which is why this returns
+        the full set (zeros before the first request) rather than only the
+        keys that happen to be interesting.
+        """
+        if stats is not None:
+            return dict(stats.snapshot())
+        # No accumulator (a caller that built the router directly). Report
+        # zeros in the right shape rather than omitting the keys.
+        return {
+            "total_requests": 0, "total_prompt_tokens": 0,
+            "total_completion_tokens": 0, "total_tokens_served": 0,
+            "total_cached_tokens": 0, "cache_efficiency": 0.0,
+            "avg_prefill_tps": 0.0, "avg_generation_tps": 0.0,
+            "uptime_seconds": time.time() - _STARTED, "persisted": False,
+        }
+
+    @router.post("/api/stats/clear")
+    @router.post("/api/stats/clear-alltime")
+    async def api_stats_clear() -> JSONResponse:
+        """Reset the counters.
+
+        One handler for both paths on purpose: bwr keeps no stats database,
+        so "session" and "all time" are the same numbers (see server/stats.py)
+        and pretending otherwise would make the two buttons look like they do
+        different things.
+        """
+        if stats is not None:
+            stats.clear()
+        return JSONResponse({"status": "ok", "persisted": False})
+
     @router.get("/api/stats")
-    async def api_stats() -> JSONResponse:
+    async def api_stats(request: Request) -> JSONResponse:
         """Dashboard numbers. Reads only -- never triggers a load."""
         body: dict[str, Any] = {"uptime_s": time.time() - _STARTED}
+        body.update(_stats_totals())
+        body["host"] = request.url.hostname or "127.0.0.1"
+        body["port"] = request.url.port or 1919
+        # bwr does not gate on an API key; empty string is what the
+        # Integrations command builders substitute for "no key needed".
+        body["api_key"] = ""
+        body["cli_prefix"] = "bwr"
         if pool is None:
             entry = _single_entry()
             entry.update(
@@ -327,14 +449,97 @@ def build_router(engine: Any, model_name: str, pool: Any = None) -> APIRouter:
         return JSONResponse(body)
 
     @router.get("/api/global-settings")
-    async def api_global_settings() -> JSONResponse:
+    async def api_global_settings(request: Request) -> JSONResponse:
         # auth_enabled False keeps the UI from prompting for an API key it
         # would then send to a server that does not check one.
+        #
+        # The nested `server` block is required, not decoration:
+        # GlobalSettingsDTO.server is non-optional and its own host/port/
+        # log_level/server_aliases are too, so a flat payload decoded to
+        # nothing and left the Server screen empty.
+        host = request.url.hostname or "127.0.0.1"
+        port = request.url.port or 1919
+        model_dirs = [str(pool.model_dir)] if pool is not None else []
         return JSONResponse(
             {
                 "auth_enabled": False,
                 "app_name": "Big White Rabbit",
-                "single_model": True,
+                "single_model": pool is None,
+                "server": {
+                    "host": host,
+                    "port": port,
+                    "log_level": logging.getLevelName(
+                        logging.getLogger("bwr").getEffectiveLevel()
+                    ).lower(),
+                    "server_aliases": _aliases(host),
+                    "sse_keepalive_mode": "chunk",
+                    "auto_start_on_launch": None,
+                    "max_audio_upload_size": None,
+                },
+                "model": {
+                    "model_dirs": model_dirs,
+                    "model_dir": model_dirs[0] if model_dirs else None,
+                    "model_fallback": False,
+                },
+                "scheduler": {
+                    "max_concurrent_requests": getattr(
+                        getattr(engine, "ctx", None), "n_seq_max", 1
+                    ),
+                },
+                # api_key_set is non-optional in AuthSettings; bwr checks no
+                # key, so it is False rather than absent.
+                "auth": {"auth_enabled": False, "api_key_set": False},
+            }
+        )
+
+    # Settings bwr can apply at runtime. Everything else in the patch belongs
+    # to the LAUNCH configuration -- host, port, model directory are fixed by
+    # the argv the process was started with -- and is the macOS app's to
+    # persist in settings.json and apply on the next start.
+    #
+    # This has to answer rather than 404: ServerScreenVM sends the patch and
+    # its local storage/port work in the SAME do-block, so a throw here
+    # aborted changes the user had already confirmed. The response says which
+    # keys took effect so the caller can tell applied from stored.
+    _RUNTIME_APPLIABLE = ("log_level",)
+
+    @router.post("/api/global-settings")
+    async def api_update_global_settings(request: Request) -> JSONResponse:
+        try:
+            patch = await request.json()
+        except Exception:  # noqa: BLE001 - a malformed body is a 400, not a 500
+            return JSONResponse(
+                {"success": False, "message": "body is not JSON"}, status_code=400
+            )
+        if not isinstance(patch, dict):
+            return JSONResponse(
+                {"success": False, "message": "body must be an object"},
+                status_code=400,
+            )
+        applied: list[str] = []
+        level = patch.get("log_level")
+        if isinstance(level, str) and level:
+            resolved = logging.getLevelName(level.upper())
+            if isinstance(resolved, int):
+                logging.getLogger("bwr").setLevel(resolved)
+                applied.append("log_level")
+            else:
+                return JSONResponse(
+                    {"success": False, "message": f"unknown log level {level!r}"},
+                    status_code=400,
+                )
+        stored = [k for k in patch if k not in _RUNTIME_APPLIABLE]
+        return JSONResponse(
+            {
+                "success": True,
+                "runtime_applied": applied,
+                "message": (
+                    "applied " + ", ".join(applied) if applied else
+                    "no runtime-applicable keys in patch"
+                ) + (
+                    f"; {len(stored)} key(s) are launch configuration and take "
+                    "effect when the server restarts" if stored else ""
+                ),
             }
         )
 
@@ -367,6 +572,74 @@ def build_router(engine: Any, model_name: str, pool: Any = None) -> APIRouter:
                 "gpu_cores": caps.gpu_cores,
                 "memory_bytes": caps.mem_bytes,
                 "notes": caps.notes,
+            }
+        )
+
+    @router.get("/api/logs")
+    async def api_logs(lines: int = 200, file: str = "") -> JSONResponse:
+        """The server's own log records, newest last.
+
+        `file` is accepted and ignored: bwr has exactly one stream, so there
+        is nothing to switch between, and rejecting the parameter would make
+        the Logs screen's file picker an error instead of a no-op.
+        """
+        buffered = list(LOG_BUFFER.records)
+        take = max(1, min(int(lines or 200), _LogBuffer.CAPACITY))
+        return JSONResponse(
+            {
+                # One string: LogsDTO declares `logs: String`, and an array
+                # here fails the decode and blanks the screen.
+                "logs": "\n".join(buffered[-take:]),
+                "total_lines": len(buffered),
+                "log_file": "<in-process buffer>",
+                "available_files": [],
+            }
+        )
+
+    @router.get("/api/usage")
+    async def api_usage(range: str = "today", model: str = "") -> JSONResponse:
+        """Token/request totals, optionally for one model.
+
+        `range` is accepted and ignored: the counters are not a time series
+        (see server/stats.py), so every range is the same answer and a 400
+        would only break a screen that has a range picker.
+        """
+        if stats is None:
+            return JSONResponse({
+                "enabled": False, "available": False, "dropped_requests": 0,
+                "totals": {
+                    "model_id": None, "requests": 0, "total_tokens": 0,
+                    "prompt_tokens": 0, "completion_tokens": 0,
+                    "cached_tokens": 0, "generation_tps": None,
+                    "cache_efficiency": 0.0,
+                },
+                "models": [], "heatmap": [],
+            })
+        body = stats.usage()
+        if model:
+            body["models"] = [m for m in body["models"] if m["model_id"] == model]
+        return JSONResponse(body)
+
+    @router.post("/api/reload")
+    async def api_reload() -> JSONResponse:
+        """Pick up models added to the model directory since startup.
+
+        Real work, not a stub: ModelPool.rescan() re-runs discovery and keeps
+        residency, so a model downloaded while the server was up becomes
+        servable without a restart.
+        """
+        if pool is None:
+            return JSONResponse(
+                {"detail": "single-model server: nothing to rescan"}, status_code=409
+            )
+        before = {m["id"] for m in pool.list()}
+        pool.rescan()
+        after = [m["id"] for m in pool.list()]
+        return JSONResponse(
+            {
+                "status": "ok",
+                "models": after,
+                "added": sorted(set(after) - before),
             }
         )
 
@@ -434,6 +707,14 @@ def build_router(engine: Any, model_name: str, pool: Any = None) -> APIRouter:
     # "stats" is safe here even though /api/stats is real: exact routes are
     # registered first and win, so only unmatched subpaths (stats/clear)
     # reach this fallback.
+    # Fallback for everything with no exact route. Heads that DO have a real
+    # handler stay listed on purpose: routes are matched in registration
+    # order and the catch-all is registered last, so `GET /api/stats` reaches
+    # the real handler while `GET /api/stats/clear` -- which the dashboard
+    # polls, and which is POST-only here -- still degrades to an empty body
+    # instead of a 404 the page throws on. Removing a head because it "has a
+    # handler now" silently breaks the method and sub-path variants it does
+    # not have. See test_stats_family_does_not_shadow_the_real_stats_endpoint.
     _UNSUPPORTED = (
         "bench", "hf", "ms", "ane-tune", "profiles", "profile-fields",
         "profile-templates", "grammar", "hot-cache", "logs", "presets",
@@ -478,9 +759,14 @@ def build_router(engine: Any, model_name: str, pool: Any = None) -> APIRouter:
     return router
 
 
-def mount(app: Any, engine: Any, model_name: str, pool: Any = None) -> None:
+def mount(
+    app: Any, engine: Any, model_name: str, pool: Any = None, *, stats: Any = None,
+) -> None:
     """Attach the UI at /admin plus the two /v1 helpers the page polls."""
-    app.include_router(build_router(engine, model_name, pool), prefix="/admin")
+    install_log_buffer()
+    app.include_router(
+        build_router(engine, model_name, pool, stats), prefix="/admin"
+    )
     app.mount(
         "/admin/static", StaticFiles(directory=str(STATIC_DIR)), name="bwr-webui-static"
     )

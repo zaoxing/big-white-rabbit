@@ -1,0 +1,16 @@
+{
+ "active_models": {
+  "models": [
+   {
+    "decode_calls": 8,
+    "id": "Qwen3-30B-A3B-4bit",
+    "in_flight": 0,
+    "loaded": true
+   }
+  ]
+ },
+ "loaded": [
+  "Qwen3-30B-A3B-4bit"
+ ],
+ "status": "ok"
+}

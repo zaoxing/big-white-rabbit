@@ -162,10 +162,17 @@ class _PoolStub:
         self._models = {"a": False, "b": False}
         self.budget_bytes = 64 * 1024**3
         self.unloaded: list[str] = []
+        self.model_dir = "/tmp/models"
+        self.rescans = 0
+
+    def rescan(self):
+        self.rescans += 1
+        self._models.setdefault("c", False)
 
     def list(self):
         return [
-            {"id": k, "loaded": v, "kind": "mlx", "size_bytes": 4 * 1024**3}
+            {"id": k, "loaded": v, "kind": "mlx", "size_bytes": 4 * 1024**3,
+             "path": f"/tmp/models/{k}"}
             for k, v in self._models.items()
         ]
 
@@ -195,9 +202,12 @@ class _PoolStub:
 
 @pytest.fixture
 def pool_client():
+    from bwr.server.stats import ServerStats
+
     app = FastAPI()
     pool = _PoolStub()
-    mount(app, _StubEngine(), "a", pool)
+    stats = ServerStats()
+    mount(app, _StubEngine(), "a", pool, stats=stats)
     return TestClient(app), pool
 
 
@@ -265,7 +275,7 @@ def test_model_settings_are_marked_read_only(client):
 
 @pytest.mark.parametrize(
     "path",
-    ["logs", "hf/models", "bench/active", "grammar/parsers", "ms/recommended"],
+    ["hf/models", "bench/active", "grammar/parsers", "ms/recommended"],
 )
 def test_unsupported_families_answer_empty_not_404(client, path):
     """The vendored dashboard polls ~40 oMLX endpoints. 404-ing them all
@@ -357,10 +367,18 @@ def test_model_settings_carry_mtp_capability_flags(client):
 
 
 def test_usage_family_is_handled(client):
-    """The dashboard polls /admin/api/usage?range=today on load."""
+    """The dashboard polls /admin/api/usage?range=today on load.
+
+    Once a stub; now a real handler backed by the request counters, so the
+    assertion is that it answers a usage SHAPE rather than an empty one. Both
+    branches exist: this `client` fixture mounts without an accumulator, which
+    is what a caller that built the router directly gets.
+    """
     r = client.get("/admin/api/usage?range=today&model=")
     assert r.status_code == 200
-    assert r.json()["supported"] is False
+    body = r.json()
+    assert body["available"] is False, "no accumulator was mounted"
+    assert body["totals"]["requests"] == 0
 
 
 def test_vendored_js_initialises_the_mtp_fields():
@@ -420,3 +438,110 @@ def test_api_status_is_served_at_the_root(client):
     r = client.get("/api/status")
     assert r.status_code == 200
     assert "active_models" in r.json()
+
+
+# -- the macOS app's decode contract -----------------------------------------
+#
+# Swift's Decodable fails the WHOLE value on one missing non-optional key, so
+# a response that is merely incomplete does not degrade a screen -- it blanks
+# it. The Swift side pins this against captured fixtures
+# (apps/bwr-mac/.../BWRBackendContractTests.swift); these assert the same
+# contract from the Python side, where a handler is actually edited.
+
+
+def test_model_entries_carry_the_keys_modeldto_requires(pool_client):
+    client, _ = pool_client
+    for entry in client.get("/admin/api/models").json()["models"]:
+        for key in ("id", "loaded", "is_loading", "estimated_size"):
+            assert key in entry, f"ModelDTO requires {key}; the list decodes to nothing without it"
+
+
+def test_stats_carry_the_keys_statsdto_requires(pool_client):
+    client, _ = pool_client
+    body = client.get("/admin/api/stats").json()
+    for key in ("total_tokens_served", "total_cached_tokens", "cache_efficiency",
+                "total_prompt_tokens", "total_completion_tokens", "total_requests",
+                "avg_prefill_tps", "avg_generation_tps", "uptime_seconds",
+                "active_models"):
+        assert key in body, f"StatsDTO requires {key}"
+
+
+def test_global_settings_carry_the_nested_server_block(pool_client):
+    client, _ = pool_client
+    body = client.get("/admin/api/global-settings").json()
+    assert "server" in body, "GlobalSettingsDTO.server is non-optional"
+    for key in ("host", "port", "log_level", "server_aliases"):
+        assert key in body["server"], f"ServerSettings requires {key}"
+    assert body["auth"]["api_key_set"] is False
+
+
+def test_logs_are_one_string_not_a_list(pool_client):
+    client, _ = pool_client
+    body = client.get("/admin/api/logs").json()
+    # LogsDTO declares `logs: String`. A list here is a type mismatch that
+    # discards the response and blanks the Logs screen.
+    assert isinstance(body["logs"], str)
+    assert isinstance(body["total_lines"], int)
+    assert isinstance(body["log_file"], str)
+    assert isinstance(body["available_files"], list)
+
+
+def test_usage_reports_available_and_totals(pool_client):
+    client, _ = pool_client
+    body = client.get("/admin/api/usage").json()
+    assert body["available"] is True
+    assert body["dropped_requests"] == 0
+    for key in ("requests", "total_tokens", "prompt_tokens", "completion_tokens",
+                "cached_tokens", "cache_efficiency"):
+        assert key in body["totals"]
+    assert isinstance(body["heatmap"], list)
+
+
+# -- settings write path ------------------------------------------------------
+
+
+def test_global_settings_patch_succeeds_instead_of_404(pool_client):
+    """The Server screen sends this patch in the same do-block as its local
+    port/base-path work. A throw here aborted changes the user had already
+    confirmed, so the endpoint has to answer even for keys bwr cannot act on.
+    """
+    client, _ = pool_client
+    r = client.post("/admin/api/global-settings", json={"auto_start_on_launch": True})
+    assert r.status_code == 200
+    assert r.json()["success"] is True
+    assert r.json()["runtime_applied"] == []
+
+
+def test_global_settings_patch_applies_log_level(pool_client):
+    import logging
+    client, _ = pool_client
+    before = logging.getLogger("bwr").level
+    try:
+        r = client.post("/admin/api/global-settings", json={"log_level": "warning"})
+        assert r.json()["runtime_applied"] == ["log_level"]
+        assert logging.getLogger("bwr").level == logging.WARNING
+    finally:
+        logging.getLogger("bwr").setLevel(before)
+
+
+def test_global_settings_patch_rejects_an_unknown_log_level(pool_client):
+    client, _ = pool_client
+    r = client.post("/admin/api/global-settings", json={"log_level": "chatty"})
+    assert r.status_code == 400
+    assert r.json()["success"] is False
+
+
+# -- reload -------------------------------------------------------------------
+
+
+def test_reload_rescans_the_pool(pool_client):
+    client, pool = pool_client
+    r = client.post("/admin/api/reload")
+    assert r.status_code == 200
+    assert pool.rescans == 1
+    assert r.json()["added"] == ["c"]
+
+
+def test_reload_without_a_pool_refuses_clearly(client):
+    r = client.post("/admin/api/reload")
+    assert r.status_code == 409

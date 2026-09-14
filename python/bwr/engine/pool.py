@@ -262,7 +262,17 @@ class ModelPool:
                 f"{incoming.model_id} needs ~{need // 1024**3} GiB but the pool budget "
                 f"is {self.budget_bytes // 1024**3} GiB; it cannot be served on this host"
             )
-        while self._loaded and self.resident_bytes + need > self.budget_bytes:
+        # `budget_bytes == 0` means the RAM size was unreadable, not "no room".
+        # The guard above already reads it that way (it skips on falsy); this
+        # loop used to read the same 0 as a hard cap and evict EVERY resident
+        # model before each load, so a host where `sysctl` is off PATH -- a
+        # GUI app does not inherit a login shell's -- silently degraded to a
+        # one-model pool that reloaded 17 GiB on every switch.
+        while (
+            self.budget_bytes
+            and self._loaded
+            and self.resident_bytes + need > self.budget_bytes
+        ):
             victim_id = next(iter(self._loaded))  # LRU end
             await self._unload_locked(victim_id, reason="evicted for " + incoming.model_id)
 

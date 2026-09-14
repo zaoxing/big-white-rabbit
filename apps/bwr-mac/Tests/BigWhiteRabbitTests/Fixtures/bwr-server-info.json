@@ -1,0 +1,17 @@
+{
+ "aliases": [
+  "localhost",
+  "127.0.0.1",
+  "test-mac"
+ ],
+ "backend": "bwr",
+ "host": "127.0.0.1",
+ "loaded": [
+  "Qwen3-30B-A3B-4bit"
+ ],
+ "model_count": 3,
+ "name": "Big White Rabbit",
+ "port": 1919,
+ "uptime_s": 5.553015947341919,
+ "version": "1.0.0"
+}

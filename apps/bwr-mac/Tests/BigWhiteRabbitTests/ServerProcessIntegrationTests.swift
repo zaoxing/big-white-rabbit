@@ -424,14 +424,36 @@ final class ServerProcessArgumentsTests: XCTestCase {
                        "Spawn must invoke bwr's own CLI module.")
     }
 
-    func testArgvAsksTheServerToPreload() throws {
+    func testArgvOmitsPreloadWhenNoModelIsSelected() throws {
         try requireProductionBranch()
         let argv = makeProcess().makeArguments()
+        XCTAssertFalse(argv.contains("--preload"),
+                       "With no startup model selected the server must load "
+                       + "lazily. An earlier build passed --preload first, so "
+                       + "it warmed whichever model happened to sort first -- "
+                       + "a 17 GiB choice nobody made.")
+    }
+
+    func testArgvCarriesTheSelectedPreloadModel() throws {
+        try requireProductionBranch()
+        let proc = makeProcess()
+        try proc.reconfigure(preloadModel: .some("Qwen3-30B-A3B-4bit"))
+        let argv = proc.makeArguments()
         guard let i = argv.firstIndex(of: "--preload") else {
-            return XCTFail("Spawn dropped --preload, so the first prompt pays "
-                           + "the whole weight load instead of startup.")
+            return XCTFail("A selected startup model never reached the spawn, "
+                           + "so the first prompt pays the whole weight load.")
         }
-        XCTAssertEqual(argv[argv.index(after: i)], "first")
+        XCTAssertEqual(argv[argv.index(after: i)], "Qwen3-30B-A3B-4bit")
+    }
+
+    func testClearingTheSelectionRemovesPreload() throws {
+        try requireProductionBranch()
+        let proc = makeProcess()
+        try proc.reconfigure(preloadModel: .some("Qwen3-30B-A3B-4bit"))
+        // .some(nil) is "the user chose None"; plain nil would mean "leave it
+        // alone" and the old selection would survive being cleared.
+        try proc.reconfigure(preloadModel: .some(nil))
+        XCTAssertFalse(proc.makeArguments().contains("--preload"))
     }
 
     func testArgvDoesNotPassBasePath() throws {

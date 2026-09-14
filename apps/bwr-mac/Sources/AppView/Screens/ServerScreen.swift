@@ -85,13 +85,38 @@ struct ServerScreen: View {
                                   comment: "Row label for automatically starting the managed server when the macOS app launches"),
                     sublabel: String(localized: "server.row.auto_start_on_launch.sub",
                                      defaultValue: "When disabled, the menu bar app opens without starting the server.",
-                                     comment: "Sublabel explaining the auto-start on launch setting"),
-                    isLast: true
+                                     comment: "Sublabel explaining the auto-start on launch setting")
                 ) {
                     RowSwitch(isOn: vm.bind($vm.autoStartOnLaunch, save: {
                         vm.saveAutoStartOnLaunch(services: services)
                     }))
                 }
+
+                Row(
+                    label: String(localized: "server.row.preload_model",
+                                  defaultValue: "Load model on start",
+                                  comment: "Row label for the model warmed during server startup"),
+                    sublabel: String(localized: "server.row.preload_model.sub",
+                                     defaultValue: "Loads the weights while the server starts instead of during the first request. Applies the next time the server starts.",
+                                     comment: "Sublabel explaining the startup model picker"),
+                    isLast: true
+                ) {
+                    Popup(
+                        selection: vm.bind($vm.preloadModel, save: {
+                            vm.savePreloadModel(services: services)
+                        }),
+                        width: .controlMedium,
+                        // "" first so the default reads as a deliberate
+                        // choice rather than an empty selection.
+                        options: [("", String(localized: "server.preload_model.none",
+                                              defaultValue: "None (load on first request)",
+                                              comment: "Startup model picker option for loading nothing"))]
+                            + vm.availableModels.map { ($0, $0) }
+                    )
+                }
+            }
+            .task(id: vm.effectivePort) {
+                await vm.refreshAvailableModels(client: services.client)
             }
 
             SectionHeader(String(localized: "server.section.logging",

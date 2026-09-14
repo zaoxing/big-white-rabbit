@@ -1,0 +1,32 @@
+{
+ "app_name": "Big White Rabbit",
+ "auth": {
+  "api_key_set": false,
+  "auth_enabled": false
+ },
+ "auth_enabled": false,
+ "model": {
+  "model_dir": "/Users/test/src/big-white-rabbit/models",
+  "model_dirs": [
+   "/Users/test/src/big-white-rabbit/models"
+  ],
+  "model_fallback": false
+ },
+ "scheduler": {
+  "max_concurrent_requests": 1
+ },
+ "server": {
+  "auto_start_on_launch": null,
+  "host": "127.0.0.1",
+  "log_level": "info",
+  "max_audio_upload_size": null,
+  "port": 1919,
+  "server_aliases": [
+   "localhost",
+   "127.0.0.1",
+   "test-mac"
+  ],
+  "sse_keepalive_mode": "chunk"
+ },
+ "single_model": false
+}

@@ -1,0 +1,9 @@
+{
+ "chip": "Apple M1 Max",
+ "cpu_count": 10,
+ "gpu_cores": 24,
+ "machine": "MacBookPro18,2",
+ "memory_bytes": 68719476736,
+ "notes": [],
+ "physical_cpus": 10
+}

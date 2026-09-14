@@ -1,0 +1,28 @@
+{
+ "available": true,
+ "dropped_requests": 0,
+ "enabled": true,
+ "heatmap": [],
+ "models": [
+  {
+   "cache_efficiency": 0.0,
+   "cached_tokens": 0,
+   "completion_tokens": 8,
+   "generation_tps": 68.0726986256387,
+   "model_id": "Qwen3-30B-A3B-4bit",
+   "prompt_tokens": 15,
+   "requests": 1,
+   "total_tokens": 23
+  }
+ ],
+ "totals": {
+  "cache_efficiency": 0.0,
+  "cached_tokens": 0,
+  "completion_tokens": 8,
+  "generation_tps": 68.0726986256387,
+  "model_id": null,
+  "prompt_tokens": 15,
+  "requests": 1,
+  "total_tokens": 23
+ }
+}

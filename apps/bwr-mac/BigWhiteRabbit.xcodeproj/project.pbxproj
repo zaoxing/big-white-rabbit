@@ -117,6 +117,7 @@
 		DBB00000000000000000000B /* SystemMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCC00000000000000000000B /* SystemMetricsTests.swift */; };
 		DBB00000000000000000000C /* WelcomeViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCC00000000000000000000C /* WelcomeViewModelTests.swift */; };
 		DBB00000000000000000000D /* DTOFixtureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCC00000000000000000000D /* DTOFixtureTests.swift */; };
+		DBB000000000000000000B01 /* BWRBackendContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCC000000000000000000B01 /* BWRBackendContractTests.swift */; };
 		DBB00000000000000000000E /* ServerProcessIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCC00000000000000000000E /* ServerProcessIntegrationTests.swift */; };
 		DBB00000000000000000000F /* LocalizationSmokeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCC00000000000000000000F /* LocalizationSmokeTests.swift */; };
 		DBB000000000000000000100 /* MenubarControllerPortTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCC000000000000000000100 /* MenubarControllerPortTests.swift */; };
@@ -262,6 +263,7 @@
 		DCC00000000000000000000B /* SystemMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemMetricsTests.swift; sourceTree = "<group>"; };
 		DCC00000000000000000000C /* WelcomeViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomeViewModelTests.swift; sourceTree = "<group>"; };
 		DCC00000000000000000000D /* DTOFixtureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DTOFixtureTests.swift; sourceTree = "<group>"; };
+		DCC000000000000000000B01 /* BWRBackendContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BWRBackendContractTests.swift; sourceTree = "<group>"; };
 		DCC00000000000000000000E /* ServerProcessIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerProcessIntegrationTests.swift; sourceTree = "<group>"; };
 		DCC00000000000000000000F /* LocalizationSmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalizationSmokeTests.swift; sourceTree = "<group>"; };
 		DCC000000000000000000010 /* BigWhiteRabbitTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BigWhiteRabbitTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -336,6 +338,7 @@
 				DCC00000000000000000000B /* SystemMetricsTests.swift */,
 				DCC00000000000000000000C /* WelcomeViewModelTests.swift */,
 				DCC00000000000000000000D /* DTOFixtureTests.swift */,
+				DCC000000000000000000B01 /* BWRBackendContractTests.swift */,
 				DCC00000000000000000000E /* ServerProcessIntegrationTests.swift */,
 				DCC00000000000000000000F /* LocalizationSmokeTests.swift */,
 				DCC000000000000000000100 /* MenubarControllerPortTests.swift */,
@@ -807,6 +810,7 @@
 				DBB00000000000000000000B /* SystemMetricsTests.swift in Sources */,
 				DBB00000000000000000000C /* WelcomeViewModelTests.swift in Sources */,
 				DBB00000000000000000000D /* DTOFixtureTests.swift in Sources */,
+				DBB000000000000000000B01 /* BWRBackendContractTests.swift in Sources */,
 				DBB00000000000000000000E /* ServerProcessIntegrationTests.swift in Sources */,
 				DBB00000000000000000000F /* LocalizationSmokeTests.swift in Sources */,
 				DBB000000000000000000100 /* MenubarControllerPortTests.swift in Sources */,
