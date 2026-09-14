@@ -368,3 +368,104 @@ final class ServerProcessIntegrationTests: XCTestCase {
         return result == 0
     }
 }
+
+// MARK: - Production spawn argv
+
+/// The production spawn argv is the one thing the smoke tests above cannot
+/// cover: every one of them sets `BWR_DEV_SERVER_SCRIPT`, which takes a
+/// different branch of `makeArguments()` entirely. The branch each shipped
+/// launch actually uses therefore had zero coverage — and was broken, in
+/// three separate ways, from the day the app was forked:
+///
+///   • `--base-path` is an oMLX flag. `bwr serve` has never had it, so
+///     argparse killed the child before it bound a port.
+///   • `--host` was dropped, so a user who set a bind address in the app
+///     got 127.0.0.1 regardless.
+///   • no model source was passed, and `bwr serve` refuses to start
+///     without one of --model / --model-dir / --recipe.
+///
+/// These assertions are deliberately written against the flag *names* in
+/// `python/bwr/cli.py`. If that parser is renamed, this fails — which is
+/// the point: the app and the CLI are one contract in two languages.
+final class ServerProcessArgumentsTests: XCTestCase {
+
+    private func makeProcess(
+        bind: String = "127.0.0.1",
+        port: Int = 1919,
+        basePath: String = "/tmp/bwr-argv-test"
+    ) -> ServerProcess {
+        let runtime = PythonRuntime(
+            executable: URL(fileURLWithPath: "/usr/bin/python3"),
+            homebrewPaths: [],
+            pythonPath: [],
+            pythonHome: nil,
+            isBundled: false
+        )
+        return ServerProcess(
+            runtime: runtime,
+            bindAddress: bind,
+            port: port,
+            basePath: URL(fileURLWithPath: basePath, isDirectory: true)
+        )
+    }
+
+    /// Guard the guard: if the env var leaks in from a parent process these
+    /// tests would silently assert the dev branch instead.
+    private func requireProductionBranch() throws {
+        let dev = ProcessInfo.processInfo.environment["BWR_DEV_SERVER_SCRIPT"] ?? ""
+        try XCTSkipUnless(dev.isEmpty,
+                          "BWR_DEV_SERVER_SCRIPT is set; this pins the production branch.")
+    }
+
+    func testArgvInvokesTheBWRCLIModule() throws {
+        try requireProductionBranch()
+        let argv = makeProcess().makeArguments()
+        XCTAssertEqual(Array(argv.prefix(3)), ["-m", "bwr.cli", "serve"],
+                       "Spawn must invoke bwr's own CLI module.")
+    }
+
+    func testArgvDoesNotPassBasePath() throws {
+        try requireProductionBranch()
+        let argv = makeProcess().makeArguments()
+        XCTAssertFalse(argv.contains("--base-path"),
+                       "bwr serve has no --base-path; argparse exits 2 on it.")
+    }
+
+    func testArgvCarriesTheBindAddress() throws {
+        try requireProductionBranch()
+        let argv = makeProcess(bind: "0.0.0.0").makeArguments()
+        guard let i = argv.firstIndex(of: "--host") else {
+            return XCTFail("Spawn dropped --host, so the app's bind address is ignored.")
+        }
+        XCTAssertEqual(argv[argv.index(after: i)], "0.0.0.0")
+    }
+
+    func testArgvCarriesThePort() throws {
+        try requireProductionBranch()
+        let argv = makeProcess(port: 1234).makeArguments()
+        guard let i = argv.firstIndex(of: "--port") else {
+            return XCTFail("Spawn dropped --port.")
+        }
+        XCTAssertEqual(argv[argv.index(after: i)], "1234")
+    }
+
+    func testArgvNamesAModelSource() throws {
+        try requireProductionBranch()
+        let argv = makeProcess(basePath: "/tmp/bwr-argv-test").makeArguments()
+        guard let i = argv.firstIndex(of: "--model-dir") else {
+            return XCTFail("bwr serve refuses to start without a model source.")
+        }
+        XCTAssertEqual(argv[argv.index(after: i)],
+                       AppConfig.defaultModelDir(forBasePath: "/tmp/bwr-argv-test"),
+                       "Model dir should default to <basePath>/models.")
+    }
+
+    func testDevBranchIsUnaffectedByTheProductionFix() {
+        // Documents the contract the smoke tests rely on: when the dev
+        // override is set, argv is <script> --host <addr> --port <n> and
+        // carries none of the bwr.cli flags.
+        let argv = ["/tmp/dev_server.py", "--host", "127.0.0.1", "--port", "1919"]
+        XCTAssertFalse(argv.contains("--model-dir"))
+        XCTAssertFalse(argv.contains("-m"))
+    }
+}

@@ -14,7 +14,7 @@
 //             resets after 60s of stable .running
 //
 // Spawn invocation:
-//   <python> -m bwr.cli serve --base-path <base> --port <port>
+//   <python> -m bwr.cli serve --model-dir <dir> --host <addr> --port <port>
 //   stdout+stderr → ~/Library/Application Support/BigWhiteRabbit/logs/server.log
 //   PATH = parent + Homebrew prefixes
 //
@@ -119,6 +119,13 @@ final class ServerProcess: @unchecked Sendable {
     }
     private(set) var port: Int
     private(set) var basePath: URL
+    /// Model root handed to `bwr serve --model-dir`. `bwr serve` refuses to
+    /// start without a model source, and the app is a pool UI, so this is
+    /// always passed. Resolved from the user's saved settings at `start()`;
+    /// falls back to `<basePath>/models`. A missing or empty directory is
+    /// fine — bwr serves zero models and the dashboard shows an empty list,
+    /// which is exactly the first-launch state.
+    private(set) var modelDir: String
     private let runtime: PythonRuntime
     private var resolver: PortConflictResolver
 
@@ -128,7 +135,8 @@ final class ServerProcess: @unchecked Sendable {
     /// process so a stale resolver / spawn args can never reach a running
     /// uvicorn.
     enum ReconfigureError: Error { case serverIsLive }
-    func reconfigure(bindAddress: String? = nil, port: Int? = nil, basePath: URL? = nil) throws {
+    func reconfigure(bindAddress: String? = nil, port: Int? = nil, basePath: URL? = nil,
+                     modelDir: String? = nil) throws {
         switch state {
         case .running, .starting, .stopping, .unresponsive:
             throw ReconfigureError.serverIsLive
@@ -138,6 +146,7 @@ final class ServerProcess: @unchecked Sendable {
         if let bindAddress { self.bindAddress = bindAddress }
         if let port { self.port = port }
         if let basePath { self.basePath = basePath }
+        if let modelDir, !modelDir.isEmpty { self.modelDir = modelDir }
         self.resolver = PortConflictResolver(host: self.host, port: self.port)
     }
 
@@ -173,6 +182,7 @@ final class ServerProcess: @unchecked Sendable {
         self.bindAddress = bindAddress
         self.port     = port
         self.basePath = basePath
+        self.modelDir = AppConfig.defaultModelDir(forBasePath: basePath.path)
         self.logURL   = ServerProcess.defaultLogURL()
         self.resolver = PortConflictResolver(
             host: AppConfig.connectableHost(for: bindAddress),
@@ -212,7 +222,13 @@ final class ServerProcess: @unchecked Sendable {
         guard (1...65535).contains(nextPort) else {
             throw StartError.invalidPort
         }
-        try reconfigure(bindAddress: nextHost, port: nextPort)
+        // `model_dirs` is the ordered list the dashboard writes; its first
+        // entry is the download target and the only one bwr's pool is told
+        // about. `model_dir` is the older single-value key.
+        let nextModelDir = saved.modelDirs?.first(where: { !$0.isEmpty })
+            ?? saved.modelDir
+            ?? AppConfig.defaultModelDir(forBasePath: basePath.path)
+        try reconfigure(bindAddress: nextHost, port: nextPort, modelDir: nextModelDir)
 
         // Sync probe — fast enough on local connect refused.
         if resolver.isPortInUseSync() {
@@ -504,14 +520,19 @@ final class ServerProcess: @unchecked Sendable {
 
     // MARK: - Internal — helpers
 
-    private func makeArguments() -> [String] {
+    // Internal, not private, so ServerProcessArgumentsTests can pin the
+    // production argv. The integration smoke tests all take the
+    // BWR_DEV_SERVER_SCRIPT branch below, so the branch every shipped
+    // launch uses had no coverage at all until it was found broken.
+    func makeArguments() -> [String] {
         let env = ProcessInfo.processInfo.environment
         if let dev = env["BWR_DEV_SERVER_SCRIPT"], !dev.isEmpty {
             return [dev, "--host", bindAddress, "--port", String(port)]
         }
         return [
             "-m", "bwr.cli", "serve",
-            "--base-path", basePath.path,
+            "--model-dir", modelDir,
+            "--host", bindAddress,
             "--port", String(port),
         ]
     }
