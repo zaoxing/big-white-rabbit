@@ -170,3 +170,52 @@ def test_serve_accepts_every_kwarg_the_cli_passes(monkeypatch, rootdir, tmp_path
     passed = set(kw) - {"model"}  # model is positional
     missing = sorted(passed - real_params)
     assert not missing, f"serve() would TypeError on: {missing}"
+
+
+# -- the same number in three places -------------------------------------------
+
+
+def _serve_help() -> str:
+    """`bwr serve --help` as the user sees it, whitespace-normalised.
+
+    Taken from the rendered output rather than the parser object because
+    each subcommand builds its ArgumentParser inside its own function --
+    there is no module-level parser to introspect. argparse wraps on
+    whitespace, so a token like `15.7` is never split; collapsing runs of
+    whitespace is enough to make the text searchable.
+    """
+    import contextlib
+    import io
+
+    from bwr.cli import _cmd_serve
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.suppress(SystemExit):
+        _cmd_serve(["--help"])
+    return " ".join(buf.getvalue().split())
+
+
+@pytest.mark.parametrize("shorthand", ["27b", "30b"])
+def test_recipe_help_quotes_the_recipes_own_bench(rootdir, shorthand):
+    """The throughput figure lives in three places -- the recipe JSON's
+    `bench.tok_s`, the README table, and this help string -- and it has now
+    drifted twice. T18 caught README vs recipe (13.2 vs 10.9) and fixed the
+    README; the CLI kept saying 13.2 for another five turns because nothing
+    compared them.
+
+    The JSON is the source of truth: it is written by whoever ran the bench.
+    """
+    bench = json.loads(
+        (rootdir / "models" / "recipes" / f"{shorthand}.json").read_text()
+    )["bench"]
+    measured = bench["tok_s"]
+    assert f"{measured}" in _serve_help(), (
+        f"--recipe help does not quote {shorthand}.json's measured "
+        f"{measured} tok/s; one of the two is stale"
+    )
+
+
+def test_recipe_help_does_not_quote_the_retired_27b_figure():
+    """13.2 was the censored Qwen3.8-27B-MLX-4bit, which is not on disk any
+    more and was never comparable to the build the recipe now points at."""
+    assert "13.2" not in _serve_help()

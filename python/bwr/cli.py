@@ -170,7 +170,7 @@ def _cmd_serve(argv: list[str]) -> int:
     )
     _add_model_args(ap, required=False)
     ap.add_argument("--recipe", default=None, metavar="PATH|27b|30b",
-                    help="ready-to-use recipe: path to JSON or shorthand '27b' (MLX 13.2 tok/s) / '30b' (Metal 57 tok/s, prefix-cache 200× on 21k); see models/recipes/")
+                    help="ready-to-use recipe: path to JSON or shorthand '27b' (MLX 15.7 tok/s decode-only) / '30b' (Metal 58.2 tok/s, prefix-cache 200× on 21k); see models/recipes/")
     ap.add_argument("--receipt", default=None, metavar="PATH|27b|30b",
                     help=argparse.SUPPRESS)  # deprecated alias for --recipe
     ap.add_argument("--host", default="127.0.0.1")
