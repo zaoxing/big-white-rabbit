@@ -813,21 +813,43 @@ def test_ane_capability_is_readable_on_its_own(client):
 
 def test_context_bench_surfaces_refuse_clearly_without_a_runner(client):
     """Single-model mode has no runner: there is no "load this again at a
-    different n_ctx" without restarting the process."""
-    r = client.post("/admin/api/bench/context/start", json={})
-    assert r.status_code == 400
-    assert "model directory" in r.json()["detail"]
-    assert client.get("/admin/api/bench/context/nope/results").status_code == 404
-    assert (
-        client.post("/admin/api/bench/context/nope/cancel").json()["status"]
-        == "not_running"
-    )
+    different n_ctx" without restarting the process.
+
+    Every surface says so the same way. A 404 from `results` would read as
+    "that run expired" to a client, not as "this server cannot do this".
+    """
+    for method, path in (
+        ("post", "/admin/api/bench/context/start"),
+        ("get", "/admin/api/bench/context/active"),
+        ("get", "/admin/api/bench/context/nope/results"),
+        ("get", "/admin/api/bench/context/nope/stream"),
+        ("post", "/admin/api/bench/context/nope/cancel"),
+    ):
+        r = getattr(client, method)(path, **({"json": {}} if method == "post" else {}))
+        assert r.status_code == 400, path
+        assert "model directory" in r.json()["detail"], path
 
 
 class _CtxBenchStub:
     def __init__(self):
         self.started: list[tuple[str, int]] = []
         self.cancelled: list[str] = []
+        self.status = "running"
+        self.result = None
+        self.error = None
+        # `get` flips the run to `final_status` after this many reads, so a
+        # stream test sees a run finish without a real runner.
+        self.finish_after: int | None = None
+        self.final_status = "completed"
+        self.reads = 0
+
+    def active_summary(self):
+        if self.status != "running":
+            return None
+        return {
+            "bench_id": "cb1", "model_id": "a", "target_tokens": 65536,
+            "status": "running",
+        }
 
     def start(self, model_id, target_tokens):
         from bwr.server.ctxbench import TARGETS, ContextBenchError
@@ -840,9 +862,18 @@ class _CtxBenchStub:
     def get(self, bench_id):
         if bench_id != "cb1":
             return None
+        self.reads += 1
+        if self.finish_after is not None and self.reads >= self.finish_after:
+            self.status = self.final_status
+            if self.final_status == "completed":
+                self.result = {"measured_tokens": 16384, "capped_by": "target"}
+            elif self.final_status == "error":
+                self.error = "RuntimeError: boom"
+        phase = "searching" if self.status == "running" else "done"
         return {
-            "bench_id": "cb1", "status": "running", "phase": "searching",
-            "progress": 42.0, "message": "probing", "result": None, "error": None,
+            "bench_id": "cb1", "status": self.status, "phase": phase,
+            "progress": 42.0, "message": "probing", "result": self.result,
+            "error": self.error,
         }
 
     def cancel(self, bench_id):
@@ -850,11 +881,16 @@ class _CtxBenchStub:
         return bench_id == "cb1"
 
 
+_POOL_FOR_CTX_CLIENT: _PoolStub
+
+
 @pytest.fixture()
 def ctx_client():
+    global _POOL_FOR_CTX_CLIENT
     app = FastAPI()
     stub = _CtxBenchStub()
-    mount(app, _StubEngine(), "a", _PoolStub(), ctxbench=stub)
+    _POOL_FOR_CTX_CLIENT = _PoolStub()
+    mount(app, _StubEngine(), "a", _POOL_FOR_CTX_CLIENT, ctxbench=stub)
     return TestClient(app), stub
 
 
@@ -902,6 +938,95 @@ def test_context_routes_do_not_shadow_the_throughput_bench(ctx_client):
     # ...and the context start reached the context runner, not the other one.
     c.post("/admin/api/bench/context/start", json={"model_id": "a"})
     assert stub.started == [("a", 131072)]
+
+
+def test_context_bench_start_rejects_an_explicit_zero_target(ctx_client):
+    """`0` is a value, not an absence. Reading it as "use the default" would
+    start a 131k benchmark -- minutes of loads -- on a client bug."""
+    c, stub = ctx_client
+    r = c.post(
+        "/admin/api/bench/context/start",
+        json={"model_id": "a", "target_tokens": 0},
+    )
+    assert r.status_code == 400
+    assert stub.started == []
+
+
+def test_context_bench_active_reports_the_run_in_progress(ctx_client):
+    """What a refreshed dashboard re-attaches from."""
+    c, stub = ctx_client
+    body = c.get("/admin/api/bench/context/active").json()
+    assert body["running"] is True
+    assert body["bench_id"] == "cb1"
+    assert body["model_id"] == "a"
+    assert body["target_tokens"] == 65536
+    stub.status = "completed"
+    assert c.get("/admin/api/bench/context/active").json() == {"running": False}
+
+
+def _sse_events(response) -> list[dict]:
+    return [
+        json.loads(line[len("data: "):])
+        for line in response.iter_lines()
+        if line.startswith("data: ")
+    ]
+
+
+def test_context_bench_stream_emits_progress_then_result_and_done(ctx_client):
+    """The dashboard's `connectContextBenchSSE` opens an EventSource on this
+    and dispatches on `type`; without the route it hit the unsupported
+    catch-all's JSON and showed "connection lost" while the run went on."""
+    c, stub = ctx_client
+    # The route reads the run once to 404 an unknown id before it streams;
+    # the flip must land on the generator's SECOND read, after a progress.
+    stub.finish_after = 3
+    with c.stream("GET", "/admin/api/bench/context/cb1/stream") as r:
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/event-stream")
+        events = _sse_events(r)
+    types = [e["type"] for e in events]
+    assert types[0] == "progress"
+    assert types[-2:] == ["result", "done"]
+    assert events[0]["phase"] == "searching"
+    assert events[-2]["data"]["measured_tokens"] == 16384
+
+
+def test_context_bench_stream_reports_an_error_as_an_error_event(ctx_client):
+    c, stub = ctx_client
+    stub.finish_after = 1
+    stub.final_status = "error"
+    with c.stream("GET", "/admin/api/bench/context/cb1/stream") as r:
+        events = _sse_events(r)
+    assert events[-1]["type"] == "error"
+    assert "boom" in events[-1]["message"]
+
+
+def test_context_bench_stream_404s_for_an_unknown_run(ctx_client):
+    c, _ = ctx_client
+    assert c.get("/admin/api/bench/context/other/stream").status_code == 404
+
+
+def test_configured_n_ctx_is_reported_only_until_it_is_live(ctx_client):
+    """The key means "applied, pending a reload". Once a load has picked the
+    value up `n_ctx` already says so, and the key would claim a reload that
+    is not pending -- forever, since the override never clears."""
+    c, _ = ctx_client
+
+    def entry() -> dict:
+        return next(
+            m for m in c.get("/admin/api/models").json()["models"] if m["id"] == "a"
+        )
+
+    assert "configured_n_ctx" not in entry()
+    _POOL_FOR_CTX_CLIENT.overrides["a"] = 9999
+    # Not resident: whatever loads next will use it, so it is pending.
+    assert entry()["configured_n_ctx"] == 9999
+    c.post("/admin/api/models/a/load")
+    # Resident at the stub engine's own n_ctx, which is not 9999: still pending.
+    assert entry()["configured_n_ctx"] == 9999
+    _POOL_FOR_CTX_CLIENT.overrides["a"] = _StubConfig().n_ctx
+    # Resident at exactly the configured value: nothing is pending.
+    assert "configured_n_ctx" not in entry()
 
 
 def test_pool_entries_report_the_model_s_own_context_length(ctx_client):

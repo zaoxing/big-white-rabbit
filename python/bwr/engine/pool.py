@@ -54,6 +54,7 @@ it:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -163,6 +164,17 @@ class ModelPoolError(RuntimeError):
     """Admission refused: unknown model, or one that cannot ever fit."""
 
 
+class ModelPoolBusy(ModelPoolError):
+    """The pool is being rewritten (a context benchmark is reloading models
+    at probe sizes) and will not admit a load until that finishes.
+
+    A `ModelPoolError` so a caller that only knows the base class still
+    catches it, and its own class so the request surfaces can answer 503 --
+    "try again shortly" -- instead of the 400 an unknown model gets. The
+    condition is temporary and nothing about the request is wrong.
+    """
+
+
 class ModelPool:
     """Owns the engines. One asyncio lock serialises load/evict."""
 
@@ -189,6 +201,15 @@ class ModelPool:
             caps = host.probe()
             self.budget_bytes = max(0, caps.mem_bytes - _OS_RESERVE_BYTES)
         self._ctx_overrides: dict[str, int] = _read_ctx_overrides(self.model_dir)
+        # A model's trained context length cannot change while the server
+        # runs, and /admin/api/models is polled every couple of seconds, so
+        # the config.json read behind `native_ctx` happens once per model.
+        self._native_cache: dict[str, int] = {}
+        # Set while something (the context benchmark) is loading models at
+        # geometries that must not serve. `acquire` refuses with
+        # `ModelPoolBusy` for the duration; the maintainer itself goes
+        # through `reload` / `resident`, which are not gated.
+        self._maintenance: str | None = None
 
     # -- inspection --------------------------------------------------------
 
@@ -245,30 +266,64 @@ class ModelPool:
         the same number in its metadata, but only llama.cpp parses it, so a
         Metal model answers only once it is loaded -- and None before that,
         rather than a guess the caller would have no way to distrust.
+
+        A known value is cached: it cannot change while the server runs, and
+        the models list that reports it is polled continuously. An unknown
+        one is re-asked, so a GGUF answers as soon as it is resident.
         """
+        cached = self._native_cache.get(model_id)
+        if cached:
+            return cached
         entry = self._entries.get(model_id)
         if entry is None:
             return None
         if entry.kind == "mlx":
-            return _native_ctx_from_config(entry.path)
-        raw = self.engine_for(model_id)
-        model = getattr(raw, "model", None)
-        value = getattr(model, "n_ctx_train", None)
-        return int(value) if isinstance(value, int) and value > 0 else None
+            value = _native_ctx_from_config(entry.path)
+        else:
+            value = native_ctx_of(self.engine_for(model_id))
+        if value:
+            self._native_cache[model_id] = value
+        return value
 
-    async def reload(self, model_id: str) -> tuple[str, AsyncEngine]:
+    @property
+    def maintenance(self) -> str | None:
+        """Why loads are refused right now, or None when they are not."""
+        return self._maintenance
+
+    def begin_maintenance(self, reason: str) -> None:
+        """Refuse `acquire` until `end_maintenance`. One holder at a time."""
+        if self._maintenance is not None:
+            raise ModelPoolBusy(f"model pool is busy: {self._maintenance}")
+        self._maintenance = reason
+
+    def end_maintenance(self) -> None:
+        self._maintenance = None
+
+    def resident(self, model_id: str) -> AsyncEngine | None:
+        """The AsyncEngine if resident, else None. No load, no LRU bump."""
+        rec = self._loaded.get(model_id)
+        return rec.engine if rec is not None else None
+
+    async def reload(
+        self, model_id: str, *, config: EngineConfig | None = None
+    ) -> tuple[str, AsyncEngine]:
         """Drop `model_id` if resident, then load it again.
 
         The way a changed `ctx_override` is made to take effect. Unload and
         load are one critical section so a request arriving mid-swap cannot
         acquire the engine that is on its way out.
+
+        `config` loads at an explicit geometry INSTEAD of the pool's config
+        and the persisted override. That is how a probe gets an engine at a
+        trial size without the trial being written to disk as if it were a
+        setting -- the override file only ever holds a value someone chose.
         """
         mid = self.resolve(model_id)
         entry = self._entries[mid]
         async with self._lock:
             await self._unload_locked(mid, reason="reload")
             await self._make_room(entry)
-            rec = await self._load(entry)
+            rec = await self._load(entry, config=config)
             self._loaded.move_to_end(mid)
             self._clock += 1.0
             entry.last_used = self._clock
@@ -303,6 +358,11 @@ class ModelPool:
         """Resolve, load if needed, and mark most-recently-used."""
         mid = self.resolve(model_id)
         entry = self._entries[mid]
+        if self._maintenance is not None:
+            # Checked outside the lock on purpose: the maintainer holds the
+            # lock for whole loads, and a request should hear "busy" now
+            # rather than after minutes of waiting for it.
+            raise ModelPoolBusy(f"model pool is busy: {self._maintenance}")
         async with self._lock:
             rec = self._loaded.get(mid)
             if rec is None:
@@ -348,16 +408,21 @@ class ModelPool:
             victim_id = next(iter(self._loaded))  # LRU end
             await self._unload_locked(victim_id, reason="evicted for " + incoming.model_id)
 
-    async def _load(self, entry: ModelEntry) -> _Loaded:
+    async def _load(
+        self, entry: ModelEntry, *, config: EngineConfig | None = None
+    ) -> _Loaded:
         logger.info("pool: loading %s (%s)", entry.model_id, entry.kind)
-        config = self.config
-        override = self._ctx_overrides.get(entry.model_id)
-        if override:
-            import dataclasses
-
-            config = dataclasses.replace(config, n_ctx=override)
+        if config is None:
+            config = self.config
+            override = self._ctx_overrides.get(entry.model_id)
+            if override:
+                config = dataclasses.replace(config, n_ctx=override)
+                logger.info(
+                    "pool: %s loading with measured n_ctx=%d", entry.model_id, override
+                )
+        else:
             logger.info(
-                "pool: %s loading with measured n_ctx=%d", entry.model_id, override
+                "pool: %s loading at an explicit n_ctx=%d", entry.model_id, config.n_ctx
             )
         raw = await asyncio.to_thread(self._factory, entry, config)
         engine = AsyncEngine(raw)
@@ -390,10 +455,23 @@ class ModelPool:
         rec.entry.loaded = False
         return True
 
-    async def stop_all(self) -> None:
+    async def unload_all(self, *, reason: str = "requested") -> list[str]:
+        """Unload everything under ONE hold of the lock; the ids dropped.
+
+        One critical section, not one `unload` per id: a load in flight
+        holds the lock, so this waits for it to land and then drops it too,
+        where a per-id loop would have listed the residents before the load
+        finished and left the new engine behind.
+        """
         async with self._lock:
+            dropped: list[str] = []
             for mid in list(self._loaded):
-                await self._unload_locked(mid, reason="shutdown")
+                if await self._unload_locked(mid, reason=reason):
+                    dropped.append(mid)
+            return dropped
+
+    async def stop_all(self) -> None:
+        await self.unload_all(reason="shutdown")
 
 
 def _build_engine(entry: ModelEntry, config: EngineConfig) -> Any:
@@ -409,6 +487,22 @@ def _build_engine(entry: ModelEntry, config: EngineConfig) -> Any:
     cfg = _with_engine(config, "metal")
     model = Model(str(entry.path))
     return MetalEngine(model, cfg)
+
+
+def native_ctx_of(engine: Any) -> int | None:
+    """The trained context length a RESIDENT engine exposes, or None.
+
+    MetalEngine carries a llama.cpp `Model` with `n_ctx_train`; MLXEngine
+    does not surface the config value, so it answers None here rather than
+    reporting the serving window as if it were the model's own. Shared by
+    the pool and the single-model models list so the two cannot read the
+    number differently.
+    """
+    model = getattr(engine, "model", None)
+    value = getattr(model, "n_ctx_train", None)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
 
 
 def _native_ctx_from_config(path: Path) -> int | None:

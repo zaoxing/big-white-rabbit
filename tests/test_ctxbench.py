@@ -6,6 +6,12 @@ engines that come and go. That is deliberate -- driving the REAL `_prefill`
 through a fake engine exercises the reload/admission interplay, which is
 where the interesting bugs live, rather than stubbing it out and testing the
 bisection arithmetic against itself.
+
+Admission is PER SEQUENCE, as llama.cpp's is: an engine built with
+`n_seq_max` admits `n_ctx / n_seq_max` tokens to one prompt. A benchmark
+that budgets against `n_ctx` while the engine admits by `n_ctx_seq` comes
+out `n_seq_max` times too small, so the fake refuses exactly the way the
+real thing does.
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from bwr.engine.pool import ModelPoolBusy, ModelPoolError
 from bwr.server.ctxbench import (
     APPLY_GRANULARITY,
     FLOOR_TOKENS,
@@ -24,7 +31,7 @@ from bwr.server.ctxbench import (
     ContextBenchRunner,
 )
 
-# Matches `_FILLER` ("word ") so a prompt of N tokens is 5N characters.
+# Matches bench.py's `_FILLER` ("word ") so a prompt of N tokens is 5N chars.
 _CHARS_PER_TOKEN = 5
 
 
@@ -35,7 +42,24 @@ class _Tokenizer:
 
 @dataclass
 class _Config:
+    """The slice of EngineConfig a probe geometry touches."""
+
     n_ctx: int
+    n_seq_max: int = 8
+    prefix_cache: bool = True
+    mlx_prefix_cache: bool = True
+
+
+@dataclass
+class _Ctx:
+    """The live context geometry, as the real engine's `ctx` reports it."""
+
+    n_ctx: int
+    n_seq_max: int
+
+    @property
+    def n_ctx_seq(self) -> int:
+        return self.n_ctx // self.n_seq_max
 
 
 class _Output:
@@ -45,34 +69,44 @@ class _Output:
 
 
 class _FakeEngine(_Tokenizer):
-    """An engine that admits up to `n_ctx` and prefills up to `prefill_limit`.
+    """An engine that admits up to `n_ctx_seq` and prefills up to
+    `prefill_limit`.
 
     The two limits are separate on purpose: admission is a configured cap
-    (ValueError, the same shape MLXEngine raises) while the prefill limit is
-    the machine running out (RuntimeError). The benchmark must treat both as
-    "this size does not work", and the tests below check it does.
+    (ValueError, the same shape both engines raise) while the prefill limit
+    is the machine running out (RuntimeError). The benchmark must treat both
+    as "this size does not work", and the tests below check it does.
     """
 
-    def __init__(self, n_ctx: int, prefill_limit: int) -> None:
-        self.config = _Config(n_ctx=n_ctx)
-        self.ctx = _Config(n_ctx=n_ctx)
+    def __init__(
+        self, config: _Config, prefill_limit: int, *, pool: "_FakePool"
+    ) -> None:
+        self.config = config
+        self.ctx = _Ctx(n_ctx=config.n_ctx, n_seq_max=config.n_seq_max)
         self._prefill_limit = prefill_limit
+        self._pool = pool
         self.submitted: list[int] = []
 
     async def submit(self, prompt, params):
         n = len(self.tokenize(prompt))
         self.submitted.append(n)
-        if n >= self.config.n_ctx:
-            raise ValueError(f"prompt is {n} tokens, capacity is {self.config.n_ctx}")
+        self._pool.seen_in_maintenance.append(self._pool.maintenance is not None)
+        if n >= self.ctx.n_ctx_seq:
+            raise ValueError(
+                f"prompt is {n} tokens, per-sequence capacity is {self.ctx.n_ctx_seq}"
+            )
         if n > self._prefill_limit:
             raise RuntimeError("metal: failed to allocate")
         return 1
 
     async def stream(self, rid):
+        if self._pool.block_streams is not None:
+            self._pool.streaming.set()
+            await self._pool.block_streams.wait()
         yield _Output()
 
     def release(self, rid) -> None:
-        pass
+        self._pool.released.append(rid)
 
 
 class _FakePool:
@@ -84,13 +118,19 @@ class _FakePool:
         *,
         prefill_limit: int,
         native: int | None = None,
+        native_after_load: bool = False,
         size_bytes: int = 4 * 1024**3,
         load_limit: int | None = None,
     ) -> None:
         self.model_dir = model_dir
         self.model_id = "m"
+        # The SERVING geometry: eight sequences and both caches on, i.e.
+        # the shape a probe must NOT inherit.
+        self.config = _Config(n_ctx=4096)
         self._prefill_limit = prefill_limit
         self._native = native
+        # A GGUF: the trained length is readable only once resident.
+        self._native_after_load = native_after_load
         self._size_bytes = size_bytes
         # A ctx above this cannot be LOADED at all -- llama.cpp's behaviour,
         # where the KV cache is allocated when the context is created.
@@ -98,11 +138,28 @@ class _FakePool:
         self._override: int | None = None
         self._engine: _FakeEngine | None = None
         self.loads: list[int] = []
+        self.load_configs: list[_Config | None] = []
         self.overrides_written: list[int | None] = []
+        self.maintenance: str | None = None
+        self.maintenance_log: list[str] = []
+        self.seen_in_maintenance: list[bool] = []
+        self.acquires = 0
+        self.released: list[int] = []
+        # Set to an Event to make every prefill wait on it (a probe "in
+        # flight" for the cancellation tests).
+        self.block_streams: asyncio.Event | None = None
+        # Set by the engine once a blocked prefill is actually waiting, so a
+        # test cancels a probe that is genuinely in flight.
+        self.streaming = asyncio.Event()
+        # Called on every load with the runner's view of the run; lets a
+        # test observe what a poll would see while the search runs.
+        self.on_load = None
 
     # -- the slice of ModelPool the runner uses ---------------------------
 
     def resolve(self, model_id):
+        if model_id not in (self.model_id, None):
+            raise ModelPoolError(f"unknown model {model_id!r}; available: m")
         return self.model_id
 
     def list(self):
@@ -123,28 +180,57 @@ class _FakePool:
         self.overrides_written.append(n_ctx)
 
     def native_ctx(self, model_id):
+        if self._native_after_load and self._engine is None:
+            return None
         return self._native
 
+    def begin_maintenance(self, reason):
+        if self.maintenance is not None:
+            raise ModelPoolBusy(f"model pool is busy: {self.maintenance}")
+        self.maintenance = reason
+        self.maintenance_log.append("begin")
+
+    def end_maintenance(self):
+        self.maintenance = None
+        self.maintenance_log.append("end")
+
+    def resident(self, model_id):
+        return self._engine
+
     async def acquire(self, model_id):
+        # The runner must never come through here: `acquire` is the gated
+        # serving path, and a probe is not a request.
+        self.acquires += 1
+        if self.maintenance is not None:
+            raise ModelPoolBusy(f"model pool is busy: {self.maintenance}")
         if self._engine is None:
-            self._load()
+            self._load(None)
         return self.model_id, self._engine
 
-    async def reload(self, model_id):
+    async def reload(self, model_id, *, config=None):
         self._engine = None
-        self._load()
+        self._load(config)
         return self.model_id, self._engine
 
     async def unload(self, model_id):
         self._engine = None
         return True
 
-    def _load(self):
-        n_ctx = self._override or 4096
-        self.loads.append(n_ctx)
-        if self._load_limit is not None and n_ctx > self._load_limit:
-            raise RuntimeError(f"cannot allocate KV for n_ctx={n_ctx}")
-        self._engine = _FakeEngine(n_ctx, self._prefill_limit)
+    async def unload_all(self, *, reason="requested"):
+        had = [self.model_id] if self._engine is not None else []
+        self._engine = None
+        return had
+
+    def _load(self, config):
+        if config is None:
+            config = _Config(n_ctx=self._override or 4096)
+        self.loads.append(config.n_ctx)
+        self.load_configs.append(config)
+        if self.on_load is not None:
+            self.on_load()
+        if self._load_limit is not None and config.n_ctx > self._load_limit:
+            raise RuntimeError(f"cannot allocate KV for n_ctx={config.n_ctx}")
+        self._engine = _FakeEngine(config, self._prefill_limit, pool=self)
 
 
 async def _run_to_completion(runner, model_id="m", target=131072):
@@ -262,14 +348,13 @@ def test_an_admission_refusal_counts_the_same_as_running_out_of_memory(tmp_path)
     asyncio.run(go())
 
 
-def test_a_failed_probe_does_not_strand_the_override_and_fail_the_rest(tmp_path):
+def test_a_failed_probe_does_not_strand_the_size_and_fail_the_rest(tmp_path):
     """Regression: the reload condition must read the LIVE engine, not the
-    override we last wrote.
+    size we last asked for.
 
-    A failed load leaves the override naming a size the machine refused. If a
-    smaller probe trusted that value it would reload at the impossible size
-    again and fail forever, reporting a boundary of zero on a machine that
-    manages 24k.
+    A failed load leaves no engine behind. If a smaller probe trusted the
+    size that just failed it would reload at the impossible size again and
+    fail forever, reporting a boundary of zero on a machine that manages 24k.
     """
 
     async def go():
@@ -277,6 +362,127 @@ def test_a_failed_probe_does_not_strand_the_override_and_fail_the_rest(tmp_path)
         runner = ContextBenchRunner(pool, predictor=lambda _m: None)
         body = await _run_to_completion(runner, target=131072)
         assert body["result"]["measured_tokens"] > 0
+
+    asyncio.run(go())
+
+
+def test_probe_engines_are_one_sequence_with_the_caches_off(tmp_path):
+    """The serving geometry is eight sequences with both prefix caches on.
+
+    A probe that inherited it would (a) be refused at n_ctx/8 tokens, since
+    admission is per sequence, and come out eight times too small, and (b)
+    hit its own cache on the verify step, since every probe sends the same
+    text, and time no prefill at all. So every probe load is one sequence,
+    no caches -- and the search reaches the target it should.
+    """
+
+    async def go():
+        pool = _FakePool(tmp_path, prefill_limit=1_000_000)
+        runner = ContextBenchRunner(pool, predictor=lambda _m: None)
+        result = (await _run_to_completion(runner, target=32768))["result"]
+        assert result["measured_tokens"] == 32768
+        assert pool.load_configs, "the search loaded nothing"
+        for cfg in pool.load_configs:
+            assert cfg.n_seq_max == 1
+            assert cfg.prefix_cache is False
+            assert cfg.mlx_prefix_cache is False
+        # ...and the serving config was left alone.
+        assert pool.config.n_seq_max == 8
+        assert pool.config.prefix_cache is True
+
+    asyncio.run(go())
+
+
+def test_probing_never_writes_the_override_file(tmp_path):
+    """Only a completed run that applies writes the file, once.
+
+    Routing each probe's size through the persisted override meant a crash
+    or a kill mid-search left the model configured at a trial size -- quite
+    possibly the one the machine had just refused -- and unservable on the
+    next boot until someone found and deleted the file.
+    """
+
+    async def go():
+        pool = _FakePool(tmp_path, prefill_limit=20_000)
+        runner = ContextBenchRunner(pool, predictor=lambda _m: None)
+        result = (await _run_to_completion(runner, target=131072))["result"]
+        assert result["applied"] is True
+        assert pool.overrides_written == [result["applied_tokens"]]
+
+    asyncio.run(go())
+
+
+def test_the_pool_is_in_maintenance_for_the_run_and_not_after(tmp_path):
+    """No request may be served on a probe engine, and no concurrent load
+    may perturb the memory being measured: the pool refuses loads for the
+    duration, and the runner never goes through the gated path itself."""
+
+    async def go():
+        pool = _FakePool(tmp_path, prefill_limit=1_000_000)
+        runner = ContextBenchRunner(pool, predictor=lambda _m: None)
+        await _run_to_completion(runner, target=16384)
+        assert pool.seen_in_maintenance and all(pool.seen_in_maintenance)
+        assert pool.maintenance is None
+        assert pool.maintenance_log == ["begin", "end"]
+        assert pool.acquires == 0
+        # The last engine standing was a probe engine; it does not serve.
+        assert pool.engine_for("m") is None
+
+    asyncio.run(go())
+
+
+def test_a_gguf_learns_its_native_length_after_the_first_load(tmp_path):
+    """Only llama.cpp parses a GGUF's metadata, so the trained length is
+    unknown until the model is resident -- and the run has just unloaded
+    everything. Asking before any load capped nothing, and a 8k model asked
+    for 128k had 128k applied to it."""
+
+    async def go():
+        pool = _FakePool(
+            tmp_path, prefill_limit=1_000_000, native=8192, native_after_load=True
+        )
+        runner = ContextBenchRunner(pool, predictor=lambda _m: None)
+        result = (await _run_to_completion(runner, target=131072))["result"]
+        assert result["native_context_length"] == 8192
+        assert result["capped_by"] == "native"
+        assert result["measured_tokens"] == 8192
+        assert result["applied_tokens"] == 8192
+
+    asyncio.run(go())
+
+
+def test_the_limit_reason_names_what_refused_the_size(tmp_path):
+    """A reader can tell "the engine said no" from "the machine ran out"."""
+
+    async def go():
+        pool = _FakePool(tmp_path, prefill_limit=20_000)
+        runner = ContextBenchRunner(pool, predictor=lambda _m: None)
+        result = (await _run_to_completion(runner, target=131072))["result"]
+        assert result["capped_by"] == "memory"
+        assert "RuntimeError" in result["limit_reason"]
+        assert "allocate" in result["limit_reason"]
+
+        pool = _FakePool(tmp_path, prefill_limit=1_000_000)
+        runner = ContextBenchRunner(pool, predictor=lambda _m: None)
+        result = (await _run_to_completion(runner, target=16384))["result"]
+        assert result["capped_by"] == "target"
+        assert result["limit_reason"] is None
+
+    asyncio.run(go())
+
+
+def test_verification_runs_on_a_fresh_engine(tmp_path):
+    """The boundary came out of a search whose failed probes each left the
+    allocator in a different state; the verify step reloads even when the
+    resident engine is big enough, so "held on a second run" means it."""
+
+    async def go():
+        pool = _FakePool(tmp_path, prefill_limit=1_000_000)
+        runner = ContextBenchRunner(pool, predictor=lambda _m: 16384)
+        result = (await _run_to_completion(runner, target=16384))["result"]
+        assert result["attempts"] == 2
+        # The probe's load, then the verify's -- not one load reused.
+        assert pool.loads == [16385, 16385]
 
     asyncio.run(go())
 
@@ -314,9 +520,8 @@ def test_the_applied_value_is_floored_to_the_grid_and_written_to_the_pool(tmp_pa
     asyncio.run(go())
 
 
-def test_an_abandoned_run_restores_the_previous_override(tmp_path):
-    """Probing rewrites the override once per probe. A run that does not
-    reach the apply step must not leave the last size tested behind."""
+def test_an_abandoned_run_leaves_the_previous_override_untouched(tmp_path):
+    """A run that does not reach the apply step writes nothing at all."""
 
     async def go():
         pool = _FakePool(tmp_path, prefill_limit=FLOOR_TOKENS - 1)
@@ -324,6 +529,7 @@ def test_an_abandoned_run_restores_the_previous_override(tmp_path):
         runner = ContextBenchRunner(pool, predictor=lambda _m: None)
         await _run_to_completion(runner, target=16384)
         assert pool.ctx_override("m") == 8192
+        assert pool.overrides_written == [8192]  # the test's own write only
 
     asyncio.run(go())
 
@@ -357,6 +563,135 @@ def test_cancel_stops_the_run_and_applies_nothing(tmp_path):
         # finished measuring, and the screen renders that as a conclusion.
         assert body["result"] is None
         assert pool.ctx_override("m") is None
+
+    asyncio.run(go())
+
+
+def test_cancel_during_a_probe_interrupts_it(tmp_path):
+    """Cancel used to set a flag the search read between probes, so a cancel
+    during a minutes-long probe waited the probe out -- and `start` refused
+    a new run the whole time."""
+
+    async def go():
+        pool = _FakePool(tmp_path, prefill_limit=1_000_000)
+        pool.block_streams = asyncio.Event()  # every prefill hangs
+        runner = ContextBenchRunner(pool, predictor=lambda _m: None)
+        handle = runner.start("m", 16384)
+        task = runner._runs[handle["bench_id"]]._task
+        await asyncio.wait_for(pool.streaming.wait(), timeout=1.0)  # in flight
+        assert runner.cancel(handle["bench_id"]) is True
+        await asyncio.wait_for(task, timeout=1.0)
+        body = runner.get(handle["bench_id"])
+        assert body["status"] == "cancelled"
+        assert body["result"] is None
+        assert pool.released, "the interrupted request was not released"
+        assert pool.maintenance is None
+        assert pool.engine_for("m") is None
+        # ...and a new run is accepted at once.
+        runner.start("m", 16384)
+        runner.cancel(runner.active)
+        await asyncio.wait_for(runner._runs[runner.active]._task, timeout=1.0)
+
+    asyncio.run(go())
+
+
+def test_shutdown_cancels_the_active_run_and_waits_for_its_cleanup(tmp_path):
+    """Lifespan teardown: a task left pending at loop close never runs its
+    `finally`, leaving the pool in maintenance with a probe engine resident."""
+
+    async def go():
+        pool = _FakePool(tmp_path, prefill_limit=1_000_000)
+        pool.block_streams = asyncio.Event()
+        runner = ContextBenchRunner(pool, predictor=lambda _m: None)
+        handle = runner.start("m", 16384)
+        await asyncio.wait_for(pool.streaming.wait(), timeout=1.0)
+        await asyncio.wait_for(runner.shutdown(), timeout=1.0)
+        assert runner.get(handle["bench_id"])["status"] == "cancelled"
+        assert pool.maintenance is None
+        assert runner.active is None
+        # Idempotent, and a no-op with nothing running.
+        await runner.shutdown()
+
+    asyncio.run(go())
+
+
+def test_an_unknown_model_is_a_start_error_not_a_crash(tmp_path):
+    """`resolve` raising ModelPoolError out of `start` reached the route as
+    a 500; it is the caller's mistake, the same as a bad target."""
+    runner = ContextBenchRunner(_FakePool(tmp_path, prefill_limit=10_000))
+    with pytest.raises(ContextBenchError) as exc:
+        runner.start("typo", 16384)
+    assert "unknown model" in str(exc.value)
+
+
+def test_no_result_is_published_while_the_run_is_measuring(tmp_path):
+    """A half-filled result has defaults that read as findings, and the
+    clients copy whatever result a poll hands them. Nothing until a
+    conclusion."""
+
+    async def go():
+        pool = _FakePool(tmp_path, prefill_limit=20_000)
+        runner = ContextBenchRunner(pool, predictor=lambda _m: None)
+        seen: list[object] = []
+        handle = runner.start("m", 131072)
+        pool.on_load = lambda: seen.append(runner.get(handle["bench_id"])["result"])
+        await runner._runs[handle["bench_id"]]._task
+        assert len(seen) > 1
+        assert all(r is None for r in seen)
+        assert runner.get(handle["bench_id"])["result"] is not None
+
+    asyncio.run(go())
+
+
+def test_an_error_publishes_no_result(tmp_path):
+    """The same for a run that dies: `status` and `error` say what happened;
+    a partial result would say "limited by memory, measured 0" instead."""
+
+    async def go():
+        pool = _FakePool(tmp_path, prefill_limit=1_000_000)
+
+        def boom(_model_id):
+            raise RuntimeError("host probe exploded")
+
+        runner = ContextBenchRunner(pool, predictor=boom)
+        body = await _run_to_completion(runner, target=16384)
+        assert body["status"] == "error"
+        assert "host probe exploded" in body["error"]
+        assert body["result"] is None
+        assert pool.maintenance is None
+
+    asyncio.run(go())
+
+
+def test_a_busy_pool_is_an_error_run_not_a_crash(tmp_path):
+    async def go():
+        pool = _FakePool(tmp_path, prefill_limit=1_000_000)
+        pool.begin_maintenance("someone else")
+        runner = ContextBenchRunner(pool, predictor=lambda _m: None)
+        body = await _run_to_completion(runner, target=16384)
+        assert body["status"] == "error"
+        assert "busy" in body["error"]
+        assert runner.active is None
+        assert pool.maintenance == "someone else"  # not ours to clear
+
+    asyncio.run(go())
+
+
+def test_active_summary_reports_the_running_run(tmp_path):
+    async def go():
+        pool = _FakePool(tmp_path, prefill_limit=1_000_000)
+        pool.block_streams = asyncio.Event()
+        runner = ContextBenchRunner(pool, predictor=lambda _m: None)
+        assert runner.active_summary() is None
+        handle = runner.start("m", 32768)
+        summary = runner.active_summary()
+        assert summary == {
+            "bench_id": handle["bench_id"], "model_id": "m",
+            "target_tokens": 32768, "status": "running",
+        }
+        pool.block_streams.set()
+        await runner._runs[handle["bench_id"]]._task
+        assert runner.active_summary() is None
 
     asyncio.run(go())
 
@@ -415,6 +750,7 @@ def test_the_result_payload_always_carries_the_client_s_required_fields(tmp_path
         ):
             assert result[key] is not None, key
         assert result["capped_by"] in ("memory", "target", "native")
+        assert "limit_reason" in result  # optional on the client, always present
 
     asyncio.run(go())
 

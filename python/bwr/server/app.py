@@ -35,7 +35,7 @@ from ..engine.config import (
     normalize_stops,
 )
 from ..engine.metal_engine import MetalEngine
-from ..engine.pool import ModelPoolError
+from ..engine.pool import ModelPoolBusy, ModelPoolError
 from ..engine.mlx_engine import MLXEngine
 from .bench import BenchRunner
 from .ctxbench import ContextBenchRunner
@@ -346,7 +346,14 @@ def build_app(
             requested, overlay = profile_store.resolve_overlay(requested)
         if pool is None:
             return model_name, async_engine, renderer, overlay
-        mid, eng = await pool.acquire(requested)
+        try:
+            mid, eng = await pool.acquire(requested)
+        except ModelPoolBusy as exc:
+            # The pool is being rewritten (a context benchmark is reloading
+            # models at probe sizes). Nothing about the request is wrong and
+            # the condition is temporary, which is what 503 says; a 400 here
+            # would tell the client to fix a request that is fine.
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         raw = pool.engine_for(mid)
         # MetalEngine delegates tokenization to its Model; MLXEngine owns it.
         return mid, eng, (getattr(raw, "model", None) or raw), overlay
@@ -384,6 +391,13 @@ def build_app(
         try:
             yield
         finally:
+            # Before the pool goes: a run left pending at loop close never
+            # runs its own cleanup, which would leave the pool in
+            # maintenance with a probe engine resident. Waiting here is what
+            # makes that cleanup happen.
+            runner = getattr(app.state, "ctxbench", None)
+            if runner is not None:
+                await runner.shutdown()
             if pool is not None:
                 await pool.stop_all()
             if async_engine is not None:

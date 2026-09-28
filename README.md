@@ -207,9 +207,14 @@ because the formula does not know about heap fragmentation, what else holds
 memory right now, or a hybrid model's real KV cost per token.
 
 Pool mode only (`--model-dir`), because each probe reloads the model at a
-different `n_ctx`. The result is persisted per model in
-`<model-dir>/.bwr-context.json`, so a window that took minutes to measure
-survives a restart; delete the file to go back to the shared `--ctx-size`.
+different `n_ctx`. While a run is in progress the pool is in maintenance:
+requests that would load a model get a 503 rather than being served on an
+engine sized for a probe. The measured value is the total context (what
+`--ctx-size` sets); it is persisted per model in
+`<model-dir>/.bwr-context.json` only once a run completes and applies, so a
+window that took minutes to measure survives a restart and an interrupted
+run leaves nothing behind. Delete the file to go back to the shared
+`--ctx-size`.
 Measured here: SmolLM2-360M reaches its full native 8192 in 9.2 s, 2905 tok/s
 prefill. Details in `python/bwr/server/ctxbench.py`.
 

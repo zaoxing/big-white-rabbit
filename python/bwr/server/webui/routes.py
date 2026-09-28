@@ -33,6 +33,8 @@ a stub waiting to be filled.
 from __future__ import annotations
 
 import json
+import asyncio
+import json
 import logging
 import time
 from collections import deque
@@ -48,9 +50,17 @@ from starlette.requests import Request
 from . import PACKAGE_DIR, STATIC_DIR, TEMPLATES_DIR
 from ..ane import probe as ane_probe
 from ..bench import BenchError
+from ..common import sse_response
 from ..ctxbench import ContextBenchError
 from ..downloads import DownloadError
+from ...engine.pool import native_ctx_of
 from ..profiles import ProfileError
+
+
+#: How often the context-bench SSE stream re-reads the run. Progress moves
+#: once per probe (seconds to minutes apart), so a faster poll would only
+#: re-send the same event.
+_CTXBENCH_STREAM_POLL_S = 0.5
 
 
 class _Unavailable(RuntimeError):
@@ -312,17 +322,6 @@ def build_router(
     # ModelDTO declares id/loaded/is_loading/estimated_size non-optional, and
     # Swift's Decodable fails the WHOLE list on one missing key -- omitting
     # `is_loading` blanked the Models screen rather than dimming one badge.
-    def _native_ctx_single() -> int | None:
-        """The served model's trained context length, if the engine exposes it.
-
-        MetalEngine carries a llama.cpp `Model` with `n_ctx_train`; MLXEngine
-        does not surface the config value, so this answers None there rather
-        than reporting the serving window as if it were the model's own.
-        """
-        model = getattr(engine, "model", None)
-        value = getattr(model, "n_ctx_train", None)
-        return int(value) if isinstance(value, int) and value > 0 else None
-
     def _single_entry() -> dict[str, Any]:
         return {
             "id": model_name,
@@ -342,7 +341,7 @@ def build_router(
             # this server admits). The Context Bench screen filters its target
             # presets by it, so reporting the serving window here would hide
             # every target above it on a model that can reach them.
-            "model_context_length": _native_ctx_single(),
+            "model_context_length": native_ctx_of(engine),
         }
 
     def _pool_entry(m: dict[str, Any]) -> dict[str, Any]:
@@ -378,9 +377,13 @@ def build_router(
         if native:
             out["model_context_length"] = native
         override = pool.ctx_override(m["id"])
-        if override:
-            # A measured window that is configured but not yet live -- the
-            # engine resident right now was built before it was applied.
+        live = getattr(getattr(raw, "config", None), "n_ctx", None)
+        if override and live != override:
+            # A measured window that is configured but not yet live: either
+            # nothing is resident, or the engine that is was built before
+            # the value was applied. Once a load has picked it up, `n_ctx`
+            # already says so and this key would only claim a pending reload
+            # that is not pending.
             out["configured_n_ctx"] = override
         return out
 
@@ -684,38 +687,112 @@ def build_router(
     # `{bench_id}` placeholder is exactly the kind of ordering that works
     # until someone reorders the file. See server/ctxbench.py.
 
+    _NO_CTXBENCH = JSONResponse(
+        {"detail": "the context benchmark needs a model directory"},
+        status_code=400,
+    )
+
+    def _first_present(body: dict[str, Any], *keys: str) -> Any:
+        """The first of `keys` the body carries, by presence -- not truth.
+
+        `a or b or default` would read an explicit 0 as absent and quietly
+        substitute the default; a caller that sent 0 sent something wrong
+        and must hear so.
+        """
+        for key in keys:
+            if key in body and body[key] is not None:
+                return body[key]
+        return None
+
     @router.post("/api/bench/context/start")
     async def api_ctxbench_start(request: Request) -> JSONResponse:
         if ctxbench is None:
-            return JSONResponse(
-                {"detail": "the context benchmark needs a model directory"},
-                status_code=400,
-            )
+            return _NO_CTXBENCH
         body = await _json_body(request)
+        target = _first_present(body, "target_tokens", "targetTokens")
         try:
             return JSONResponse(ctxbench.start(
-                body.get("model_id") or body.get("modelId") or model_name,
-                int(
-                    body.get("target_tokens")
-                    or body.get("targetTokens")
-                    or 131072
-                ),
+                _first_present(body, "model_id", "modelId") or model_name,
+                int(target) if target is not None else 131072,
             ))
         except (ContextBenchError, ValueError, TypeError) as exc:
             return JSONResponse({"detail": str(exc)}, status_code=400)
 
+    @router.get("/api/bench/context/active")
+    async def api_ctxbench_active() -> JSONResponse:
+        """The run in progress, if any -- what a page re-attaches to."""
+        if ctxbench is None:
+            return _NO_CTXBENCH
+        summary = ctxbench.active_summary()
+        if summary is None:
+            return JSONResponse({"running": False})
+        return JSONResponse({"running": True, **summary})
+
     @router.get("/api/bench/context/{bench_id}/results")
     async def api_ctxbench_results(bench_id: str) -> JSONResponse:
-        body = ctxbench.get(bench_id) if ctxbench is not None else None
+        if ctxbench is None:
+            return _NO_CTXBENCH
+        body = ctxbench.get(bench_id)
         if body is None:
             return JSONResponse(
                 {"detail": "unknown context benchmark"}, status_code=404
             )
         return JSONResponse(body)
 
+    @router.get("/api/bench/context/{bench_id}/stream")
+    async def api_ctxbench_stream(bench_id: str) -> Any:
+        """Progress as server-sent events, in the shape the dashboard's
+        `connectContextBenchSSE` consumes: `progress` while the run goes,
+        then `result` (when there is one) and `done` or `error`.
+
+        Polls the run rather than hooking the runner: the runner already
+        keeps the state a poll needs, and a second delivery path would be
+        a second thing to keep in step with the status payload.
+        """
+        if ctxbench is None:
+            return _NO_CTXBENCH
+        if ctxbench.get(bench_id) is None:
+            return JSONResponse(
+                {"detail": "unknown context benchmark"}, status_code=404
+            )
+
+        def event(payload: dict[str, Any]) -> bytes:
+            return f"data: {json.dumps(payload)}\n\n".encode()
+
+        async def events() -> Any:
+            last: tuple[Any, ...] | None = None
+            while True:
+                body = ctxbench.get(bench_id)
+                if body is None:
+                    yield event({"type": "error", "message": "unknown context benchmark"})
+                    return
+                key = (body["phase"], body["progress"], body["message"])
+                if key != last:
+                    last = key
+                    yield event({
+                        "type": "progress", "phase": body["phase"],
+                        "progress": body["progress"], "message": body["message"],
+                    })
+                if body["status"] != "running":
+                    if body.get("result") is not None:
+                        yield event({"type": "result", "data": body["result"]})
+                    if body["status"] == "error":
+                        yield event({
+                            "type": "error",
+                            "message": body.get("error") or "context benchmark failed",
+                        })
+                    else:
+                        yield event({"type": "done", "status": body["status"]})
+                    return
+                await asyncio.sleep(_CTXBENCH_STREAM_POLL_S)
+
+        return sse_response(events())
+
     @router.post("/api/bench/context/{bench_id}/cancel")
     async def api_ctxbench_cancel(bench_id: str) -> JSONResponse:
-        ok = ctxbench.cancel(bench_id) if ctxbench is not None else False
+        if ctxbench is None:
+            return _NO_CTXBENCH
+        ok = ctxbench.cancel(bench_id)
         return JSONResponse(
             {"status": "cancelling" if ok else "not_running", "bench_id": bench_id}
         )

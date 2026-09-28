@@ -11,7 +11,15 @@ import asyncio
 import pytest
 
 from bwr.engine.config import EngineConfig
-from bwr.engine.pool import ModelEntry, ModelPool, ModelPoolError, discover
+import bwr.engine.pool as pool_module
+from bwr.engine.pool import (
+    ModelEntry,
+    ModelPool,
+    ModelPoolBusy,
+    ModelPoolError,
+    discover,
+    native_ctx_of,
+)
 
 GIB = 1024**3
 
@@ -362,6 +370,145 @@ def test_reload_is_how_a_new_override_becomes_live(tmp_path, monkeypatch):
     asyncio.run(p.reload("a"))
     assert seen == [4096, 40960]
     assert p.loaded_ids == ["a"]
+
+
+def test_reload_with_an_explicit_config_ignores_the_override_and_writes_nothing(
+    tmp_path, monkeypatch
+):
+    """A probe asks for a geometry; it does not choose a setting. The
+    persisted override is untouched, and the next plain load still uses it."""
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "config.json").write_text("{}")
+    seen: list[int] = []
+
+    def fake_build(entry, config):
+        seen.append(config.n_ctx)
+        return _StubRaw(entry)
+
+    monkeypatch.setattr("bwr.engine.pool.AsyncEngine", _StubAsync)
+    p = ModelPool(tmp_path, EngineConfig(n_ctx=4096), budget_bytes=64 * GIB,
+                  engine_factory=fake_build)
+    p.set_ctx_override("a", 8192)
+    before = (tmp_path / ".bwr-context.json").read_text()
+
+    async def go():
+        mid, eng = await p.reload("a", config=EngineConfig(n_ctx=1234, n_seq_max=1))
+        assert mid == "a"
+        assert p.resident("a") is eng
+        assert p.loaded_ids == ["a"]
+        await p.reload("a")
+
+    asyncio.run(go())
+    assert seen == [1234, 8192]
+    assert p.ctx_override("a") == 8192
+    assert (tmp_path / ".bwr-context.json").read_text() == before
+
+
+def test_unload_all_drops_every_resident_model(tmp_path, monkeypatch):
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "config.json").write_text("{}")
+    monkeypatch.setattr("bwr.engine.pool.AsyncEngine", _StubAsync)
+    p = ModelPool(tmp_path, EngineConfig(), budget_bytes=64 * GIB,
+                  engine_factory=lambda e, c: _StubRaw(e))
+
+    async def go():
+        await p.acquire("a")
+        await p.acquire("b")
+        assert sorted(await p.unload_all()) == ["a", "b"]
+        assert p.loaded_ids == []
+        assert p.resident("a") is None
+        assert await p.unload_all() == []
+
+    asyncio.run(go())
+
+
+def test_acquire_is_refused_during_maintenance_and_reload_is_not(tmp_path, monkeypatch):
+    """The gate protects requests from probe-sized engines; the maintainer
+    itself keeps working through the ungated path."""
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "config.json").write_text("{}")
+    monkeypatch.setattr("bwr.engine.pool.AsyncEngine", _StubAsync)
+    p = ModelPool(tmp_path, EngineConfig(), budget_bytes=64 * GIB,
+                  engine_factory=lambda e, c: _StubRaw(e))
+
+    async def go():
+        p.begin_maintenance("a benchmark")
+        assert p.maintenance == "a benchmark"
+        with pytest.raises(ModelPoolBusy, match="busy"):
+            await p.acquire("a")
+        # A second maintainer is refused rather than silently sharing.
+        with pytest.raises(ModelPoolBusy):
+            p.begin_maintenance("another")
+        await p.reload("a", config=EngineConfig(n_ctx=2049, n_seq_max=1))
+        assert p.loaded_ids == ["a"]
+        p.end_maintenance()
+        assert p.maintenance is None
+        await p.acquire("a")
+
+    asyncio.run(go())
+    # Busy IS a pool error, so an unprepared caller still sees a pool error.
+    assert issubclass(ModelPoolBusy, ModelPoolError)
+
+
+def test_native_ctx_is_read_once_per_model_and_unknowns_are_re_asked(
+    tmp_path, monkeypatch
+):
+    """/admin/api/models is polled every couple of seconds; a config.json
+    read per model per poll is disk I/O on the event loop for a number that
+    cannot change. An UNKNOWN answer is not cached: a GGUF answers only once
+    resident, and must be asked again then."""
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "config.json").write_text('{"max_position_embeddings": 8192}')
+    (tmp_path / "g.gguf").write_bytes(b"GGUF")
+    reads = {"n": 0}
+    real = pool_module._native_ctx_from_config
+
+    def counting(path):
+        reads["n"] += 1
+        return real(path)
+
+    monkeypatch.setattr(pool_module, "_native_ctx_from_config", counting)
+    monkeypatch.setattr(pool_module.host, "model_bytes", lambda _p: 1)
+    p = ModelPool(tmp_path, EngineConfig(), budget_bytes=64 * GIB,
+                  engine_factory=lambda e, c: _StubRaw(e))
+    assert p.native_ctx("a") == 8192
+    assert p.native_ctx("a") == 8192
+    assert reads["n"] == 1
+    # The GGUF is unknown while unloaded...
+    assert p.native_ctx("g") is None
+    assert p.native_ctx("g") is None
+
+    class _Model:
+        n_ctx_train = 4096
+
+    class _Raw(_StubRaw):
+        model = _Model()
+
+    monkeypatch.setattr("bwr.engine.pool.AsyncEngine", _StubAsync)
+    p._factory = lambda e, c: _Raw(e)
+    asyncio.run(p.acquire("g"))
+    # ...and known -- then remembered -- once it has been loaded.
+    assert p.native_ctx("g") == 4096
+    asyncio.run(p.unload("g"))
+    assert p.native_ctx("g") == 4096
+
+
+def test_native_ctx_of_reads_only_a_real_positive_int(tmp_path):
+    class _Model:
+        def __init__(self, v):
+            self.n_ctx_train = v
+
+    class _Engine:
+        def __init__(self, v):
+            self.model = _Model(v)
+
+    assert native_ctx_of(_Engine(8192)) == 8192
+    assert native_ctx_of(_Engine(0)) is None
+    assert native_ctx_of(_Engine(True)) is None
+    assert native_ctx_of(_Engine("8192")) is None
+    assert native_ctx_of(object()) is None
+    assert native_ctx_of(None) is None
 
 
 def test_reload_leaves_nothing_loaded_when_the_new_load_fails(tmp_path, monkeypatch):
