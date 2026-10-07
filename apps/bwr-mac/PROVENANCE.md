@@ -33,11 +33,13 @@ small surface, all of it implemented there:
 | `/admin/auto-login`, `/admin/api/login` | no-ops; bwr has no auth |
 | `/admin/api/activity` | empty — bwr keeps counters, not a request log |
 
-Features the app inherited from oMLX that bwr has no equivalent for
-(benchmark suites, ANE tuning, HuggingFace/ModelScope downloads, prompt
-profiles, preset bundles, cluster) answer `supported: false` on GET and 501
-on write, so those panels render empty rather than throwing. See the
-`_UNSUPPORTED` list in `routes.py`.
+The throughput and context benchmarks, ANE tuning, Hugging Face and
+ModelScope downloads, and prompt profiles are implemented in `routes.py`
+too. Features the app inherited from oMLX that bwr has no equivalent for
+(accuracy benchmarks, oQ quantization and upload, sub-keys, preset bundles,
+cluster) answer `supported: false` on GET and 501 on write, so those panels
+render empty rather than throwing. See the `_UNSUPPORTED` list in
+`routes.py`.
 
 ## Building
 

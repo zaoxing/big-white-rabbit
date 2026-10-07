@@ -221,6 +221,26 @@ def test_cancelling_a_finished_benchmark_is_a_no_op():
     _run(main())
 
 
+def test_active_summary_reports_the_running_run_and_nothing_after():
+    """What `/api/bench/active` hands a refreshed dashboard."""
+    async def main():
+        engine = _StubEngine(tokens=50, delay=0.01)
+        runner = BenchRunner(_resolver(engine))
+        assert runner.active_summary() is None
+        started = runner.start("m", prompt_lengths=[8, 16], batch_sizes=[1],
+                               generation_length=50)
+        summary = runner.active_summary()
+        assert summary["bench_id"] == started["bench_id"]
+        assert summary["model_id"] == "m"
+        assert summary["status"] == "running"
+        assert (summary["completed_tests"], summary["total_tests"]) == (0, 2)
+        runner.cancel(started["bench_id"])
+        await _drain(runner, started["bench_id"])
+        assert runner.active_summary() is None
+
+    _run(main())
+
+
 def test_a_run_finishing_frees_the_slot_for_the_next_one():
     async def main():
         runner = BenchRunner(_resolver(_StubEngine()))

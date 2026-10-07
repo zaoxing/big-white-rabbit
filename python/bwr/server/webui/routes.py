@@ -32,7 +32,6 @@ a stub waiting to be filled.
 
 from __future__ import annotations
 
-import json
 import asyncio
 import json
 import logging
@@ -60,6 +59,7 @@ from ..profiles import ProfileError
 #: How often the context-bench SSE stream re-reads the run. Progress moves
 #: once per probe (seconds to minutes apart), so a faster poll would only
 #: re-send the same event.
+_BENCH_STREAM_POLL_S = 0.5
 _CTXBENCH_STREAM_POLL_S = 0.5
 
 
@@ -796,6 +796,75 @@ def build_router(
         return JSONResponse(
             {"status": "cancelling" if ok else "not_running", "bench_id": bench_id}
         )
+
+    @router.get("/api/bench/active")
+    async def api_bench_active() -> JSONResponse:
+        """The throughput run in progress, if any -- what a refreshed
+        dashboard re-attaches to (`checkActiveBenchmark`)."""
+        if bench is None:
+            return JSONResponse({"running": False})
+        summary = bench.active_summary()
+        if summary is None:
+            return JSONResponse({"running": False})
+        return JSONResponse({"running": True, **summary})
+
+    @router.get("/api/bench/{bench_id}/stream")
+    async def api_bench_stream(bench_id: str) -> Any:
+        """Progress as server-sent events, in the shape the dashboard's
+        `connectBenchSSE` dispatches on: `progress` as tests complete, a
+        `result` per finished test, then `done` + `upload_skipped` on
+        completion or `error` on failure and cancel.
+
+        Replays on subscribe: every row so far is re-sent to a fresh
+        subscriber, which is what the page's dedupe-by-key expects.
+
+        bwr has nowhere to upload results to, and the page cannot leave the
+        upload phase without an upload event, so a completed run says the
+        upload was skipped and why rather than spinning on "uploading".
+        A cancel ends in `error`: the page has no cancel event and would
+        otherwise keep the run marked as live.
+        """
+        if bench is None or bench.get(bench_id) is None:
+            return JSONResponse({"detail": "unknown benchmark"}, status_code=404)
+
+        def event(payload: dict[str, Any]) -> bytes:
+            return f"data: {json.dumps(payload)}\n\n".encode()
+
+        async def events() -> Any:
+            sent, first = 0, True
+            while True:
+                body = bench.get(bench_id)
+                if body is None:
+                    yield event({"type": "error", "message": "unknown benchmark"})
+                    return
+                rows = body["results"]
+                if first or len(rows) != sent:
+                    yield event({
+                        "type": "progress", "phase": "running",
+                        "message": f"{len(rows)}/{body['total_tests']} tests complete",
+                        "current": len(rows), "total": body["total_tests"],
+                    })
+                for row in rows[sent:]:
+                    yield event({"type": "result", "data": row})
+                sent, first = len(rows), False
+                if body["status"] != "running":
+                    if body["status"] == "completed":
+                        yield event({"type": "done"})
+                        yield event({
+                            "type": "upload_skipped",
+                            "reason": "no_upload_service", "features": [],
+                        })
+                    elif body["status"] == "cancelled":
+                        yield event({"type": "error", "message": "benchmark cancelled"})
+                    else:
+                        yield event({
+                            "type": "error",
+                            "message": body.get("error") or "benchmark failed",
+                        })
+                    return
+                await asyncio.sleep(_BENCH_STREAM_POLL_S)
+
+        return sse_response(events())
 
     @router.get("/api/bench/{bench_id}/results")
     async def api_bench_results(bench_id: str) -> JSONResponse:

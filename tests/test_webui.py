@@ -289,7 +289,7 @@ def test_model_settings_are_marked_read_only(client):
     "path",
     # Families with no real handler. `ms/recommended` used to be here and
     # has one now, so it moved out -- see the ModelScope tests below.
-    ["hf/models", "bench/active", "grammar/parsers", "oq/models"],
+    ["hf/models", "bench/accuracy/queue/status", "grammar/parsers", "oq/models"],
 )
 def test_unsupported_families_answer_empty_not_404(client, path):
     """The vendored dashboard polls ~40 oMLX endpoints. 404-ing them all
@@ -806,6 +806,123 @@ def test_ane_results_answer_200_with_a_status_rather_than_404(client):
 def test_ane_capability_is_readable_on_its_own(client):
     body = client.get("/admin/api/bench/ane-tune/capability").json()
     assert set(body) >= {"available", "reason", "checks", "candidates"}
+
+
+# -- throughput benchmark stream -----------------------------------------------
+
+
+class _BenchStub:
+    """A throughput run that completes one test per `get`, so a stream test
+    sees results arrive and a run finish without an engine."""
+
+    def __init__(self):
+        self.status = "running"
+        self.rows: list[dict] = []
+        self.error = None
+        self.total = 2
+        self.reads = 0
+        self.final_status = "completed"
+
+    def active_summary(self):
+        if self.status != "running":
+            return None
+        return {
+            "bench_id": "b1", "model_id": "a", "status": "running",
+            "total_tests": self.total, "completed_tests": len(self.rows),
+        }
+
+    def get(self, bench_id):
+        if bench_id != "b1":
+            return None
+        self.reads += 1
+        if self.reads > 1 and len(self.rows) < self.total:
+            n = len(self.rows)
+            self.rows.append({"test_type": "single", "pp": 128 * (n + 1), "tg": 64})
+        if len(self.rows) == self.total:
+            self.status = self.final_status
+            if self.final_status == "failed":
+                self.error = "RuntimeError: boom"
+        return {
+            "bench_id": "b1", "status": self.status, "model_id": "a",
+            "total_tests": self.total, "completed_tests": len(self.rows),
+            "results": list(self.rows), "error": self.error,
+        }
+
+
+@pytest.fixture()
+def bench_client():
+    app = FastAPI()
+    stub = _BenchStub()
+    mount(app, _StubEngine(), "a", _PoolStub(), bench=stub)
+    return TestClient(app), stub
+
+
+def test_bench_active_reports_the_run_in_progress(bench_client):
+    """`checkActiveBenchmark` re-attaches from this on page load. Without
+    the route it fell to the unsupported catch-all, whose body has no
+    `running` key, so a refresh forgot every run."""
+    c, stub = bench_client
+    body = c.get("/admin/api/bench/active").json()
+    assert body["running"] is True
+    assert body["bench_id"] == "b1"
+    assert body["total_tests"] == 2
+    stub.status = "completed"
+    assert c.get("/admin/api/bench/active").json() == {"running": False}
+
+
+def test_bench_active_is_not_running_without_a_runner(client):
+    assert client.get("/admin/api/bench/active").json() == {"running": False}
+
+
+def test_bench_stream_delivers_each_result_then_done_and_upload_skipped(bench_client):
+    """`connectBenchSSE` dispatches on `type`; `done` alone parks the page in
+    an "uploading" spinner, so a completed run must also say the upload was
+    skipped -- bwr has no service to upload to."""
+    c, _ = bench_client
+    with c.stream("GET", "/admin/api/bench/b1/stream") as r:
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/event-stream")
+        events = _sse_events(r)
+    types = [e["type"] for e in events]
+    assert types[0] == "progress"
+    assert types.count("result") == 2
+    assert [e["data"]["pp"] for e in events if e["type"] == "result"] == [128, 256]
+    assert types[-2:] == ["done", "upload_skipped"]
+    assert events[-1]["reason"] == "no_upload_service"
+    last_progress = [e for e in events if e["type"] == "progress"][-1]
+    assert (last_progress["current"], last_progress["total"]) == (2, 2)
+
+
+def test_bench_stream_reports_a_failure_as_an_error_event(bench_client):
+    c, stub = bench_client
+    stub.final_status = "failed"
+    with c.stream("GET", "/admin/api/bench/b1/stream") as r:
+        events = _sse_events(r)
+    assert events[-1]["type"] == "error"
+    assert "boom" in events[-1]["message"]
+
+
+def test_bench_stream_ends_a_cancelled_run_as_an_error(bench_client):
+    """The page has no cancel event: anything but `error` leaves the run
+    marked live after the user cancelled it."""
+    c, stub = bench_client
+    stub.final_status = "cancelled"
+    with c.stream("GET", "/admin/api/bench/b1/stream") as r:
+        events = _sse_events(r)
+    assert events[-1] == {"type": "error", "message": "benchmark cancelled"}
+
+
+def test_bench_stream_404s_for_an_unknown_run(bench_client):
+    c, _ = bench_client
+    assert c.get("/admin/api/bench/other/stream").status_code == 404
+
+
+def test_bench_active_does_not_shadow_a_run_named_like_it(bench_client):
+    """`active` is a literal segment next to `{bench_id}`; the per-run routes
+    still take two segments, so neither can capture the other."""
+    c, _ = bench_client
+    assert c.get("/admin/api/bench/active/results").status_code == 404
+    assert c.get("/admin/api/bench/b1/results").status_code == 200
 
 
 # -- context benchmark --------------------------------------------------------

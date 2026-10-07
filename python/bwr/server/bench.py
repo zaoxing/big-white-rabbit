@@ -149,6 +149,20 @@ class BenchRunner:
     def active(self) -> str | None:
         return self._active
 
+    def active_summary(self) -> dict[str, Any] | None:
+        """The run in progress, in the shape a client re-attaches from, or
+        None. What `/api/bench/active` reports."""
+        run = self._runs.get(self._active) if self._active is not None else None
+        if run is None or run.status != "running":
+            return None
+        return {
+            "bench_id": run.bench_id,
+            "model_id": run.model_id,
+            "status": run.status,
+            "total_tests": run.total_tests,
+            "completed_tests": len(run.results),
+        }
+
     # -- lifecycle ---------------------------------------------------------
 
     def start(
