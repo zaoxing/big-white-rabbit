@@ -289,7 +289,12 @@ def test_model_settings_are_marked_read_only(client):
     "path",
     # Families with no real handler. `ms/recommended` used to be here and
     # has one now, so it moved out -- see the ModelScope tests below.
-    ["hf/models", "bench/accuracy/queue/status", "grammar/parsers", "oq/models"],
+    [
+        "hf/models", "bench/accuracy/queue/status", "grammar/parsers", "oq/models",
+        # Would be captured by `/api/bench/{bench_id}/results` and 404 as an
+        # unknown run without its own route.
+        "bench/accuracy/results",
+    ],
 )
 def test_unsupported_families_answer_empty_not_404(client, path):
     """The vendored dashboard polls ~40 oMLX endpoints. 404-ing them all
@@ -806,6 +811,22 @@ def test_ane_results_answer_200_with_a_status_rather_than_404(client):
 def test_ane_capability_is_readable_on_its_own(client):
     body = client.get("/admin/api/bench/ane-tune/capability").json()
     assert set(body) >= {"available", "reason", "checks", "candidates"}
+
+
+def test_accuracy_writes_are_501_not_a_throughput_cancel(client):
+    r = client.post("/admin/api/bench/accuracy/cancel")
+    assert r.status_code == 501
+    assert r.json()["supported"] is False
+
+
+def test_presets_refresh_rereads_the_bundled_file(client):
+    """The page's refresh button expects `{presets: [...]}` and replaces its
+    localStorage copy with the answer. A 501 left the button a no-op."""
+    body = client.post("/admin/api/presets/refresh").json()
+    assert isinstance(body["presets"], list) and body["presets"]
+    assert {"name", "settings"} <= set(body["presets"][0])
+    # Byte-for-byte what the static route serves: one source of truth.
+    assert body == client.get("/admin/static/bwr_preset.json").json()
 
 
 # -- throughput benchmark stream -----------------------------------------------

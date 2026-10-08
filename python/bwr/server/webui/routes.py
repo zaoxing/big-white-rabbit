@@ -653,6 +653,32 @@ def build_router(
             }
         )
 
+    # -- sampling presets ---------------------------------------------------
+
+    @router.post("/api/presets/refresh")
+    async def api_presets_refresh() -> JSONResponse:
+        """Re-read the bundled preset file.
+
+        The page loads `/admin/static/bwr_preset.json` once and caches it in
+        localStorage; this is the button that replaces that cache. oMLX
+        fetched a fresh copy from its servers here. bwr's presets are the
+        file on disk, so a refresh re-reads it, which is what makes an edit
+        to the file reach the page without a restart.
+        """
+        path = STATIC_DIR / "bwr_preset.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            return JSONResponse(
+                {"detail": f"{path.name} could not be read: {exc}"},
+                status_code=500,
+            )
+        if not isinstance(data.get("presets"), list):
+            return JSONResponse(
+                {"detail": f"{path.name} has no `presets` list"}, status_code=500
+            )
+        return JSONResponse(data)
+
     # -- throughput benchmarks --------------------------------------------
     #
     # Runs go through the ordinary serving path, so the numbers include what
@@ -796,6 +822,18 @@ def build_router(
         return JSONResponse(
             {"status": "cancelling" if ok else "not_running", "bench_id": bench_id}
         )
+
+    @router.api_route("/api/bench/accuracy/{path:path}", methods=["GET", "POST"])
+    async def api_bench_accuracy(path: str, request: Request) -> JSONResponse:
+        """The accuracy suite is unsupported (its datasets were removed on
+        licence grounds). Registered here because `/api/bench/accuracy/results`
+        would otherwise be captured by `/api/bench/{bench_id}/results` and
+        answer 404 "unknown benchmark" -- a different empty from the one the
+        catch-all gives the rest of the family, and the panel reads the two
+        differently."""
+        if request.method == "GET":
+            return await unsupported_get(f"bench/accuracy/{path}")
+        return await unsupported_write(f"bench/accuracy/{path}")
 
     @router.get("/api/bench/active")
     async def api_bench_active() -> JSONResponse:
