@@ -87,6 +87,9 @@ class BenchRun:
     context_profile: str | None = None
     started_at: float = field(default_factory=time.time)
     _cancel: asyncio.Event | None = field(default=None, repr=False)
+    # Held so the event loop's weak task set is not the only reference:
+    # a task nobody holds can be collected mid-run.
+    _task: asyncio.Task[None] | None = field(default=None, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -193,18 +196,28 @@ class BenchRunner:
         if generation_length <= 0:
             raise BenchError("generation_length must be positive")
 
+        # Two kinds of test, because that is what both clients render. A
+        # `single` row is one request at a prompt length; the page keys
+        # those by (pp, tg). A `batch` row is N concurrent requests; the
+        # page keys those by batch size ALONE, so every batch size runs
+        # once, at the longest requested prompt, rather than once per
+        # prompt length -- a second row for the same size would be dropped
+        # on arrival and the run would look shorter than it was. A row
+        # tagged anything else is dropped by both the web page and the Mac
+        # app, which is how every bwr run used to render as empty.
+        tests = [(pp, 1, "single") for pp in prompts]
+        tests += [(max(prompts), bs, "batch") for bs in batches if bs > 1]
+
         run = BenchRun(
             bench_id=uuid.uuid4().hex[:12],
             model_id=model_id,
-            total_tests=len(prompts) * len(batches),
+            total_tests=len(tests),
             context_profile=context_profile,
         )
         run._cancel = asyncio.Event()
         self._runs[run.bench_id] = run
         self._active = run.bench_id
-        asyncio.create_task(
-            self._run(run, prompts, batches, generation_length)
-        )
+        run._task = asyncio.create_task(self._run(run, tests, generation_length))
         return {
             "bench_id": run.bench_id,
             "status": run.status,
@@ -222,15 +235,16 @@ class BenchRunner:
     # -- worker ------------------------------------------------------------
 
     async def _run(
-        self, run: BenchRun, prompts: list[int], batches: list[int], gen: int
+        self, run: BenchRun, tests: list[tuple[int, int, str]], gen: int
     ) -> None:
         try:
-            for pp in prompts:
-                for bs in batches:
-                    if run._cancel is not None and run._cancel.is_set():
-                        run.status = "cancelled"
-                        return
-                    run.results.append(await self._one(run.model_id, pp, gen, bs))
+            for pp, bs, kind in tests:
+                if run._cancel is not None and run._cancel.is_set():
+                    run.status = "cancelled"
+                    return
+                run.results.append(
+                    await self._one(run.model_id, pp, gen, bs, kind)
+                )
             run.status = "completed"
         except asyncio.CancelledError:
             run.status = "cancelled"
@@ -243,11 +257,13 @@ class BenchRunner:
             if self._active == run.bench_id:
                 self._active = None
 
-    async def _one(self, model_id: str, pp: int, gen: int, batch: int) -> BenchResult:
+    async def _one(
+        self, model_id: str, pp: int, gen: int, batch: int, kind: str
+    ) -> BenchResult:
         from ..engine.config import RequestParams
         from .common import submit_request
 
-        result = BenchResult(test_type="throughput", pp=pp, tg=gen, batch_size=batch)
+        result = BenchResult(test_type=kind, pp=pp, tg=gen, batch_size=batch)
         try:
             _served, engine, renderer, _overlay = await self._resolve(model_id)
         except Exception as exc:  # noqa: BLE001 - an unknown model is a result

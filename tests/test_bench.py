@@ -80,18 +80,38 @@ async def _drain(runner, bench_id, timeout=5.0):
 # -- the test matrix ---------------------------------------------------------
 
 
-def test_every_prompt_length_times_batch_size_is_run():
+def test_singles_run_at_every_prompt_length_and_batches_once_at_the_longest():
+    """The two clients render two tables. Singles are keyed by (pp, tg);
+    batch rows by batch size ALONE, so a size that ran at two prompt
+    lengths would show once and the run would look short. Rows tagged
+    anything but `single`/`batch` are dropped by both clients -- a live run
+    through the dashboard was the only thing that caught this."""
     async def main():
         engine = _StubEngine()
         runner = BenchRunner(_resolver(engine))
-        started = runner.start("m", prompt_lengths=[8, 16], batch_sizes=[1, 2],
+        started = runner.start("m", prompt_lengths=[8, 16], batch_sizes=[1, 2, 4],
                                generation_length=4)
         assert started["total_tests"] == 4
         body = await _drain(runner, started["bench_id"])
         assert body["status"] == "completed"
-        assert len(body["results"]) == 4
-        matrix = {(r["pp"], r["batch_size"]) for r in body["results"]}
-        assert matrix == {(8, 1), (8, 2), (16, 1), (16, 2)}
+        rows = {(r["test_type"], r["pp"], r["batch_size"]) for r in body["results"]}
+        assert rows == {
+            ("single", 8, 1), ("single", 16, 1),
+            ("batch", 16, 2), ("batch", 16, 4),
+        }
+
+    _run(main())
+
+
+def test_a_run_with_only_batch_sizes_still_has_its_singles():
+    """The Mac app's defaults are batch sizes [2, 4] with no 1: the single
+    table must not come back empty for the default request."""
+    async def main():
+        runner = BenchRunner(_resolver(_StubEngine()))
+        body = await _drain(runner, runner.start(
+            "m", prompt_lengths=[8], batch_sizes=[2], generation_length=2
+        )["bench_id"])
+        assert [r["test_type"] for r in body["results"]] == ["single", "batch"]
 
     _run(main())
 
@@ -117,7 +137,8 @@ def test_every_request_is_released():
         started = runner.start("m", prompt_lengths=[8], batch_sizes=[3],
                                generation_length=2)
         await _drain(runner, started["bench_id"])
-        assert engine.released == engine.submitted == 3
+        # One single plus a batch of three.
+        assert engine.released == engine.submitted == 4
 
     _run(main())
 
@@ -156,9 +177,10 @@ def test_prefill_rate_counts_every_row_in_the_batch():
         four = await _drain(runner, runner.start(
             "m", prompt_lengths=[100], batch_sizes=[4], generation_length=2
         )["bench_id"])
+        batch = next(r for r in four["results"] if r["test_type"] == "batch")
         # Same per-row work, four times the prompt tokens: the reported
         # prefill rate must scale, not stay flat.
-        assert four["results"][0]["processing_tps"] > one["results"][0]["processing_tps"]
+        assert batch["processing_tps"] > one["results"][0]["processing_tps"]
 
     _run(main())
 
