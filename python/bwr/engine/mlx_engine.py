@@ -17,6 +17,7 @@ at ``import bwr`` time.
 from __future__ import annotations
 
 import logging
+import time
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator, Sequence
 from copy import deepcopy
@@ -235,6 +236,11 @@ class MLXEngine:
         self.spec_accepted = 0
         self.spec_recomputes = 0
         self.spec_fallbacks = 0
+        # Engine-wide: drafts only while a drafting step measures more
+        # tokens per second than a plain one on THIS engine. See spec_gate.
+        from .spec_gate import SpecThroughputGate
+
+        self.spec_gate = SpecThroughputGate()
         # Exact-prefix prompt cache: prompt tokens -> (cache snapshot, base
         # token). OrderedDict as bounded LRU (move_to_end on hit, popitem
         # oldest on overflow). Entries are prompt-boundary snapshots: the
@@ -693,9 +699,16 @@ class MLXEngine:
         # Drafting only when speculation is on; mlx_kv_bits alone rides the
         # manual loop with zero drafts (single-row forward, same as plain
         # decode but through the owned, possibly quantized, cache).
+        # The gate is asked once per step, whatever the draft source: an
+        # MTP head's rows cost the forward exactly what n-gram rows do.
+        gate_open = self.spec_gate.wants_drafts()
         max_drafts = (
             self.config.spec_max_drafts
-            if (self.config.speculative and self._spec_ok.get(req.request_id, True))
+            if (
+                self.config.speculative
+                and gate_open
+                and self._spec_ok.get(req.request_id, True)
+            )
             else 0
         )
         allow = max(0, min(max_drafts, remaining - 1))
@@ -703,11 +716,12 @@ class MLXEngine:
         assert base is not None
         rid = req.request_id
         mtp = self._mtp
+        t_start = time.perf_counter()
         if mtp is not None:
             # The head drafts from the trunk hidden row that pairs with
             # `base`; propose() trims its own speculative entries, so the
             # head cache still mirrors only confirmed tokens on return.
-            allow = max(0, min(mtp.depth, remaining - 1))
+            allow = max(0, min(mtp.depth, remaining - 1)) if gate_open else 0
             h_prev = self._mtp_hidden[rid]
             drafts = mtp.propose(self._mtp_caches[rid], h_prev, base, allow)
         elif table is None or allow == 0:
@@ -793,6 +807,11 @@ class MLXEngine:
                 h_seq = mx.concatenate([h_prev, hidden[:, :n, :]], axis=1)
             mtp.accept(self._mtp_caches[rid], h_seq, [base, *accepted[:n]])
             self._mtp_hidden[rid] = hidden[:, -1:, :]
+        # Measured here, after any mismatch re-feed and before the token
+        # bookkeeping: the forwards are the cost the gate is weighing.
+        self.spec_gate.record(
+            bool(drafts), len(accepted), time.perf_counter() - t_start
+        )
         self._feed_table(req, accepted)
         drafted, accepted_n, recomputed = stats
         if (
