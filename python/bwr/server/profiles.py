@@ -412,7 +412,7 @@ def _apply_changes(p: Profile, changes: dict[str, Any]) -> Profile:
     fields, and a settings-only update must not clear the display name or
     reset exposure state set from the web dashboard.
     """
-    out = Profile(**{**p.__dict__})
+    out = Profile(**p.__dict__)
     if changes.get("new_name"):
         out.name = changes["new_name"]
     for key in ("display_name", "description"):

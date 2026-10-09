@@ -244,12 +244,12 @@ class BenchRunner:
                 self._active = None
 
     async def _one(self, model_id: str, pp: int, gen: int, batch: int) -> BenchResult:
-        from .common import submit_request
         from ..engine.config import RequestParams
+        from .common import submit_request
 
         result = BenchResult(test_type="throughput", pp=pp, tg=gen, batch_size=batch)
         try:
-            served, engine, renderer, _overlay = await self._resolve(model_id)
+            _served, engine, renderer, _overlay = await self._resolve(model_id)
         except Exception as exc:  # noqa: BLE001 - an unknown model is a result
             result.error = f"{type(exc).__name__}: {exc}"
             return result

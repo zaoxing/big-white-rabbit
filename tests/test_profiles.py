@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from bwr.server.profiles import (
     ENGINE_FIELDS,
     ProfileError,

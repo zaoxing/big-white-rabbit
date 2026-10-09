@@ -13,7 +13,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from bwr.engine import mtp
 
 MODEL = Path("models/Qwen3.8-27B-MTPLX-Optimized-Speed")
@@ -163,7 +162,7 @@ def test_propose_depth_zero_is_noop(head):
     draft, target, tok = head
     ids = tok.encode("hello world")
     cache = target.make_cache()
-    logits, hidden = draft.trunk_forward(mx.array(ids)[None], cache)
+    _logits, hidden = draft.trunk_forward(mx.array(ids)[None], cache)
     mcache = draft.make_cache()
     before = mcache[0].offset
     assert draft.propose(mcache, hidden[:, -1:, :], 5, depth=0) == []

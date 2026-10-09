@@ -10,9 +10,8 @@ from __future__ import annotations
 
 import os
 
+import bwr
 import pytest
-
-import bwr as bwr
 from bwr.engine import EngineConfig, MetalEngine
 from bwr.engine.kv_snapshot import KVSnapStore
 
@@ -37,7 +36,7 @@ def test_snapshot_save_load_identical(tmp_path) -> None:
     rid = engine.add_request(PROMPT, bwr.RequestParams(max_tokens=N_TOKENS, stop_at_eog=False, temp=0.0))
     engine.step()  # prefill
     store.save("snap", rid)
-    ref_out = list(engine.drain())
+    list(engine.drain())
     ref_tokens = engine.tokens_of(rid)
 
     # New request via snapshot restore (same prompt, same params)
@@ -45,7 +44,7 @@ def test_snapshot_save_load_identical(tmp_path) -> None:
     # Instead, restore as a new rid in same engine after original retired (original's seq freed, but snapshot seq still holds KV)
     rid2 = store.load("snap")
     # rid2's seq already has prompt KV; drain should generate same output without re-prefill
-    out2 = list(engine.drain())
+    list(engine.drain())
     assert engine.tokens_of(rid2) == ref_tokens
     assert engine.state(rid2).finish_reason == engine.state(rid).finish_reason
 
@@ -104,7 +103,7 @@ def test_snapshot_binary_roundtrip_identical(tmp_path) -> None:
     # bin should exist (T12c)
     assert (tmp_path / "snap_bin.bin").exists()
     assert (tmp_path / "snap_bin.bin").stat().st_size > 0
-    ref_out = list(engine.drain())
+    list(engine.drain())
     ref_tokens = engine.tokens_of(rid)
 
     # New engine, same dir — load via binary

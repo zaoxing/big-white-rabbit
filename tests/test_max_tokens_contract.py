@@ -47,11 +47,10 @@ from __future__ import annotations
 import json
 import os
 
+import bwr
 import pytest
-
-import bwr as bwr
 from bwr.server.anthropic_api import _STOP_REASONS
-from bwr.server.app import DEFAULT_MAX_TOKENS, _FINISH_REASONS
+from bwr.server.app import _FINISH_REASONS, DEFAULT_MAX_TOKENS
 from bwr.server.schemas import ChatCompletionRequest, max_tokens_error
 
 MODEL_PATH = os.environ.get("BWR_TEST_MODEL")

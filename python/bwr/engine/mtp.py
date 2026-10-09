@@ -26,8 +26,9 @@ measurement rather than from the runtime metadata (see the spec):
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 SIDECAR = "mtp.safetensors"
 RUNTIME = "mtplx_runtime.json"
@@ -101,7 +102,7 @@ class MTPDraft:
 
     def __init__(self, target: Any, model_path: str | Path, depth: int) -> None:
         import mlx.core as mx
-        import mlx.nn as nn
+        from mlx import nn
 
         self._mx = mx
         self.model_path = Path(model_path)

@@ -1,7 +1,6 @@
 """Weight-free tests for host probing + ctx fit adaptation (no hardware needed)."""
 
 import pytest
-
 from bwr.host import (
     CTX_LADDER,
     HostCaps,
@@ -123,7 +122,7 @@ def test_ctx_explicit_forms():
 
 
 def test_no_adapt_skips_probe(monkeypatch):
-    import bwr.cli as cli
+    from bwr import cli
 
     def boom(*a, **k):
         raise AssertionError("probe must not run with --no-adapt")

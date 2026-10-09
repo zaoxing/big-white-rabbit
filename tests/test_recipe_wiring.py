@@ -9,7 +9,6 @@ explicit flags clobbered, draft+spec conflict).
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 
 import pytest
@@ -25,7 +24,7 @@ def rootdir(monkeypatch):
 
 def _serve_kwargs(monkeypatch, argv):
     """Run _cmd_serve with serve() mocked; return (rc, kwargs)."""
-    import bwr.server.launch as launch
+    from bwr.server import launch
 
     captured = {}
 
@@ -160,7 +159,7 @@ def test_serve_accepts_every_kwarg_the_cli_passes(monkeypatch, rootdir, tmp_path
     """
     import inspect
 
-    import bwr.server.launch as launch
+    from bwr.server import launch
 
     real_params = set(inspect.signature(launch.serve).parameters)
     _rc, kw = _serve_kwargs(

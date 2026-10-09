@@ -18,8 +18,8 @@ from __future__ import annotations
 import asyncio
 import queue
 import threading
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Sequence
 
 from .config import RequestParams
 from .metal_engine import MetalEngine, StepOutput
@@ -34,8 +34,8 @@ class _Command:
     worker and awaited (via asyncio.wrap_future) by the caller."""
 
     kind: str  # "submit" | "cancel"
-    future: "asyncio.Future | None" = None
-    prompt: "str | Sequence[int] | None" = None
+    future: asyncio.Future | None = None
+    prompt: str | Sequence[int] | None = None
     params: RequestParams | None = None
     request_id: int | None = None
     add_special: bool = True
@@ -45,7 +45,7 @@ class _Command:
 class _Stream:
     """One request's delivery channel, owned by the event loop."""
 
-    queue: "asyncio.Queue[object]" = field(default_factory=asyncio.Queue)
+    queue: asyncio.Queue[object] = field(default_factory=asyncio.Queue)
     done: bool = False
     # True only when the ENGINE retired the request itself (a StepOutput with
     # finished=True reached _deliver). `done` is weaker: it is also set when the stream
@@ -60,7 +60,7 @@ class AsyncEngine:
     def __init__(self, engine: MetalEngine, *, idle_poll_s: float = 0.05) -> None:
         self.engine = engine
         self._idle_poll_s = idle_poll_s
-        self._commands: "queue.Queue[_Command | None]" = queue.Queue()
+        self._commands: queue.Queue[_Command | None] = queue.Queue()
         self._streams: dict[int, _Stream] = {}
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None

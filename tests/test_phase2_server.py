@@ -6,9 +6,8 @@ import asyncio
 import json
 import os
 
+import bwr
 import pytest
-
-import bwr as bwr
 
 MODEL_PATH = os.environ.get("BWR_TEST_MODEL")
 
@@ -302,7 +301,7 @@ def test_server_process_exits_cleanly() -> None:
         model.close()
     """)
     proc = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, timeout=300
+        [sys.executable, "-c", script], capture_output=True, timeout=300, check=False,
     )
     assert proc.returncode == 0, (
         f"server process exited {proc.returncode} "

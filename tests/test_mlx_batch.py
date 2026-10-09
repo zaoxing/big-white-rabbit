@@ -12,7 +12,6 @@ from __future__ import annotations
 import pathlib
 
 import pytest
-
 from bwr.engine.config import EngineConfig
 
 MODEL = pathlib.Path("models/Qwen3.8-27B-Uncensored-MLX-4bit/4-bit")
@@ -122,7 +121,7 @@ def test_step_on_empty_batch_is_an_error(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "kw", [dict(speculative=True), dict(mlx_mtp=True)],
+    "kw", [{"speculative": True}, {"mlx_mtp": True}],
 )
 def test_batch_refuses_to_combine_with_per_request_features(kw, tmp_path):
     """Those features own a per-request cache; batching owns one shared
@@ -155,10 +154,9 @@ def test_incremental_join_matches_mlx_lm_merge():
     merge would. Getting the offset/left_padding convention wrong here
     corrupts only the SHORTER rows, which is how it hides."""
     import mlx.core as mx
+    from bwr.engine.mlx_batch import _concat_batched
     from mlx_lm import load
     from mlx_lm.models.cache import ArraysCache
-
-    from bwr.engine.mlx_batch import _concat_batched
 
     model, tok = load(str(MODEL))
     tgt = model.language_model
@@ -203,10 +201,9 @@ def test_batched_decode_is_output_identical():
     path -- that one uses mlx-lm's stream generator, whose numeric drift
     looks like a batching bug and already caused one false alarm."""
     import mlx.core as mx
-    from mlx_lm import load
-
     from bwr.engine.config import RequestParams
     from bwr.engine.mlx_engine import MLXEngine
+    from mlx_lm import load
 
     prompts = ["Explain in one sentence what a B-tree is.\n",
                "Name three sorting algorithms.\n",
@@ -254,10 +251,9 @@ def test_prefix_cache_composes_with_batching():
     import time
 
     import mlx.core as mx
-    from mlx_lm import load
-
     from bwr.engine.config import RequestParams
     from bwr.engine.mlx_engine import MLXEngine
+    from mlx_lm import load
 
     long_prompt = ("Review this module and continue it.\n\n" + "".join(
         f"def helper_{i}(x):\n    return x * {i} + 1\n\n" for i in range(120)))
@@ -355,7 +351,7 @@ def test_quantized_kv_still_works_without_batching():
 
 @needs_weights
 @pytest.mark.parametrize(
-    "kw", [{}, dict(mlx_prefix_cache=True), dict(mlx_batch=True)],
+    "kw", [{}, {"mlx_prefix_cache": True}, {"mlx_batch": True}],
 )
 def test_eog_marker_never_reaches_the_response_text(kw):
     """The end-of-turn token is a control token, not text.

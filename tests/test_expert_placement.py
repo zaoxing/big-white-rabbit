@@ -13,9 +13,8 @@ from __future__ import annotations
 import os
 import time
 
+import bwr
 import pytest
-
-import bwr as bwr
 from bwr.engine import EngineConfig, MetalEngine, RequestParams
 
 MOE_PATH = os.environ.get("BWR_MOE_MODEL")

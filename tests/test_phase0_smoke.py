@@ -8,9 +8,8 @@ from __future__ import annotations
 
 import os
 
+import bwr
 import pytest
-
-import bwr as bwr
 
 MODEL_PATH = os.environ.get("BWR_TEST_MODEL")
 

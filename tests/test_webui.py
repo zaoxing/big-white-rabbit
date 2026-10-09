@@ -16,11 +16,10 @@ import pytest
 fastapi = pytest.importorskip("fastapi")
 pytest.importorskip("jinja2")
 
-from fastapi import FastAPI  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
-
 from bwr.server.webui import STATIC_DIR, TEMPLATES_DIR  # noqa: E402
 from bwr.server.webui.routes import mount  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 
 PKG = pathlib.Path(TEMPLATES_DIR).parent
 
@@ -224,7 +223,7 @@ def pool_client(tmp_path):
 
 
 def test_pool_models_list_reflects_residency(pool_client):
-    client, pool = pool_client
+    client, _pool = pool_client
     before = {m["id"]: m["loaded"] for m in client.get("/admin/api/models").json()["models"]}
     assert before == {"a": False, "b": False}
     client.post("/admin/api/models/b/load")

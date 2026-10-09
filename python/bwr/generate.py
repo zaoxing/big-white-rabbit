@@ -7,7 +7,7 @@ step across many sequences instead of one token at a time down a single sequence
 
 from __future__ import annotations
 
-from typing import Iterator
+from collections.abc import Iterator
 
 from ._bwr_metal import Context, Model
 

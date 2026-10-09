@@ -60,9 +60,10 @@ import logging
 import os
 import tempfile
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .. import host
 from .async_engine import AsyncEngine

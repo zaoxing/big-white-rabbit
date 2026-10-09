@@ -11,8 +11,8 @@ the next batch is the ``AdmissionPolicy``'s call, not this class's.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Iterable, Sequence
 
 from .._bwr_metal import Batch, Context, Model
 from .batching import AdmissionPolicy, FCFSPolicy, RequestState, StepBudget, StepPlan

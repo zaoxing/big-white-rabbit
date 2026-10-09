@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-
 from bwr.server.bench import BenchError, BenchRunner, _prompt_of_length
 
 

@@ -23,7 +23,7 @@ valid -- never call `propose` twice without an intervening `sync`, and never
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 from .._bwr_metal import Batch, Context, ContextParams, Model, SamplerParams
 

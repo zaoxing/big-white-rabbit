@@ -45,7 +45,7 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = PACKAGE_DIR / "templates"
 STATIC_DIR = PACKAGE_DIR / "static"
 
-__all__ = ["PACKAGE_DIR", "TEMPLATES_DIR", "STATIC_DIR", "build_router"]
+__all__ = ["PACKAGE_DIR", "STATIC_DIR", "TEMPLATES_DIR", "build_router"]
 
 
 def build_router(*args, **kwargs):

@@ -18,9 +18,8 @@ import json
 import os
 import re
 
+import bwr
 import pytest
-
-import bwr as bwr
 from bwr.server import tools as T
 
 MODEL_PATH = os.environ.get("BWR_TEST_MODEL")

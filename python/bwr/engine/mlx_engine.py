@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
+from collections.abc import Iterable, Iterator, Sequence
 from copy import deepcopy
-from typing import Iterable, Iterator, Sequence
 
 from .batching import RequestState
 from .config import EngineConfig, RequestParams, StopSequenceFilter
@@ -83,7 +83,7 @@ class _MLXContext:
     closest analog to llama.cpp's counter.
     """
 
-    def __init__(self, engine: "MLXEngine") -> None:
+    def __init__(self, engine: MLXEngine) -> None:
         self._engine = engine
         self._closed = False
 
@@ -262,8 +262,7 @@ class MLXEngine:
         for QuantizedKVCache. Order is preserved positionally, which the
         model relies on (cache[i] belongs to layer i).
         """
-        from mlx_lm.models.cache import QuantizedKVCache
-        from mlx_lm.models.cache import KVCache
+        from mlx_lm.models.cache import KVCache, QuantizedKVCache
 
         cache = self._model.make_cache()
         bits = getattr(self, "_kv_bits", self.config.mlx_kv_bits)
@@ -579,7 +578,6 @@ class MLXEngine:
 
     def _restore_cache(self, cache: list, snap: list) -> None:
         """Undo one verify round's writes. Exact: same arrays, same offsets."""
-        from mlx_lm.models.cache import ArraysCache
 
         for c, (kind, val) in zip(cache, snap):
             if kind == "arrays":

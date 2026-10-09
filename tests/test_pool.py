@@ -8,12 +8,10 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-
-from bwr.engine.config import EngineConfig
 import bwr.engine.pool as pool_module
+import pytest
+from bwr.engine.config import EngineConfig
 from bwr.engine.pool import (
-    ModelEntry,
     ModelPool,
     ModelPoolBusy,
     ModelPoolError,

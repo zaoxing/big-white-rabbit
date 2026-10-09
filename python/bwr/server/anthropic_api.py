@@ -18,17 +18,28 @@ serialisations.
 from __future__ import annotations
 
 import json
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
 from .._bwr_metal import Model
 from ..engine.async_engine import AsyncEngine
-from ..engine.mlx_engine import MLXEngine
 from ..engine.config import RequestParams, StopSequenceFilter, normalize_stops
+from ..engine.mlx_engine import MLXEngine
 from . import anthropic_schemas as A
-from .common import block_text, count_tokens, sse_response, submit_request, text_from_blocks
+from .common import (
+    block_text,
+    count_tokens,
+    sse_response,
+    submit_request,
+    text_from_blocks,
+)
 from .params import build_params
+
+# Single source -- see server/reasons.py. Re-exported so
+# `from server.anthropic_api import _STOP_REASONS` keeps working.
+from .reasons import STOP_REASONS as _STOP_REASONS  # noqa: F401
 from .schemas import max_tokens_error
 from .tools import (
     ParsedToolCall,
@@ -40,10 +51,6 @@ from .tools import (
     resolve_tool_choice,
     tool_names,
 )
-
-# Single source -- see server/reasons.py. Re-exported so
-# `from server.anthropic_api import _STOP_REASONS` keeps working.
-from .reasons import STOP_REASONS as _STOP_REASONS  # noqa: F401
 
 
 def _system_text(system: str | list[dict[str, Any]] | None) -> str:

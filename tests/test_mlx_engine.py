@@ -15,8 +15,6 @@ import importlib.util
 import os
 
 import pytest
-
-import bwr as bwr
 from bwr.engine import EngineConfig, RequestParams
 from bwr.engine.mlx_engine import MLXEngine
 
@@ -146,9 +144,8 @@ def test_async_engine_compat() -> None:
 def test_chat_completion_end_to_end() -> None:
     """The reported default-serve 500: chat rendering needs the tokenizer,
     not the llama Model. Proves a completion serves over HTTP."""
-    from fastapi.testclient import TestClient
-
     from bwr.server.app import build_app
+    from fastapi.testclient import TestClient
 
     app = build_app(
         None, EngineConfig(n_ctx=4096, engine="mlx"),
@@ -174,9 +171,8 @@ def test_chat_completion_end_to_end() -> None:
 def test_health_geometry() -> None:
     """The exact /health failure: geometry + counters must exist so serve
     boots (default engine) instead of 500ing."""
-    from fastapi.testclient import TestClient
-
     from bwr.server.app import build_app
+    from fastapi.testclient import TestClient
 
     engine = MLXEngine(MODEL_PATH, EngineConfig(n_ctx=4096))
     assert engine.ctx.n_ctx == 4096
@@ -184,7 +180,7 @@ def test_health_geometry() -> None:
     assert engine.ctx.n_seq_max == 8
     assert engine.ctx.decode_calls == 0
     assert engine.n_free_seq_slots == 8
-    rid = engine.add_request("hi", greedy())
+    engine.add_request("hi", greedy())
     list(engine.drain())
     assert engine.ctx.decode_calls == N_TOKENS
 

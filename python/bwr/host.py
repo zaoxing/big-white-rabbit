@@ -27,7 +27,6 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 
-
 # Down the ladder until it fits; 512 is the floor (below that llama.cpp's
 # own n_batch clamping makes the context useless anyway).
 CTX_LADDER = (8192, 4096, 2048, 1024, 512)
@@ -84,14 +83,14 @@ def probe(
         if _sysctl_runner is not None:
             return _sysctl_runner(args)
         return subprocess.run(
-            args, capture_output=True, text=True, timeout=10
+            args, capture_output=True, text=True, timeout=10, check=False,
         ).stdout
 
     def sysprof(args: list[str]) -> str:
         if _sp_runner is not None:
             return _sp_runner(args)
         return subprocess.run(
-            args, capture_output=True, text=True, timeout=30
+            args, capture_output=True, text=True, timeout=30, check=False,
         ).stdout
 
     caps.machine_model = _sysctl(sysctl, "hw.model")
@@ -198,9 +197,11 @@ def adapt_ctx(
     for rung in CTX_LADDER:
         if rung < want_ctx and fits(rung):
             return AdaptResult(rung, notes=[
-                f"host adapt ({caps.chip or 'unknown Mac'}, "
-                f"{mem / 1024**3:.0f}GiB RAM): n_ctx {want_ctx}->{rung} to fit "
-                f"weights + KV in memory (--no-adapt to override)",
+                (
+                    f"host adapt ({caps.chip or 'unknown Mac'}, "
+                    f"{mem / 1024**3:.0f}GiB RAM): n_ctx {want_ctx}->{rung} to fit "
+                    f"weights + KV in memory (--no-adapt to override)"
+                ),
             ])
     raise HostFitError(
         f"no usable n_ctx fits a {model_b / 1024**3:.1f}GiB model on a "

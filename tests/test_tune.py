@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from bwr.tune import depth_name, parse_depths, pick_winner, render
 
 
@@ -59,7 +58,7 @@ def test_render_verdict_lines():
 def test_cmd_tune_mocked_end_to_end(monkeypatch, capsys):
     """_cmd_tune with model + bench mocked: exercises wiring, no weights."""
     import bwr
-    import bwr.tune as tune
+    from bwr import tune
 
     monkeypatch.setattr(bwr, "Model", lambda *a, **k: object())
     monkeypatch.setattr(
@@ -101,7 +100,7 @@ def test_cmd_tune_mlx_needs_dir(capsys):
 def test_cmd_tune_mlx_mocked_end_to_end(monkeypatch, capsys, tmp_path):
     """MLX path wires the weights dir through with no GGUF involved."""
     import bwr.engine as engine_mod
-    import bwr.tune as tune
+    from bwr import tune
 
     assert tune is not None
 

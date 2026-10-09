@@ -49,7 +49,7 @@ def _apple_silicon_chip() -> str | None:
     try:
         res = subprocess.run(
             [_SYSCTL, "-n", "machdep.cpu.brand_string"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, check=False,
         )
         chip = res.stdout.strip()
         return chip if chip.startswith("Apple") else None

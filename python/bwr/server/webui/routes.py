@@ -46,15 +46,14 @@ from fastapi.templating import Jinja2Templates
 from jinja2 import ChainableUndefined, Undefined
 from starlette.requests import Request
 
-from . import PACKAGE_DIR, STATIC_DIR, TEMPLATES_DIR
+from ...engine.pool import native_ctx_of
 from ..ane import probe as ane_probe
 from ..bench import BenchError
 from ..common import sse_response
 from ..ctxbench import ContextBenchError
 from ..downloads import DownloadError
-from ...engine.pool import native_ctx_of
 from ..profiles import ProfileError
-
+from . import PACKAGE_DIR, STATIC_DIR, TEMPLATES_DIR
 
 #: How often the context-bench SSE stream re-reads the run. Progress moves
 #: once per probe (seconds to minutes apart), so a faster poll would only

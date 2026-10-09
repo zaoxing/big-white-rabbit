@@ -11,9 +11,8 @@ from __future__ import annotations
 import json
 import os
 
+import bwr
 import pytest
-
-import bwr as bwr
 
 MODEL_PATH = os.environ.get("BWR_TEST_MODEL")
 
@@ -63,9 +62,9 @@ def test_prompt_matches_openai_surface_for_equivalent_request(model: bwr.Model) 
     equivalent OpenAI request must render the IDENTICAL prompt. If these diverge, one of
     the two surfaces is feeding the model text it was not trained on."""
     from bwr.server import anthropic_api as AA
+    from bwr.server.anthropic_schemas import MessagesRequest
     from bwr.server.app import _message_pairs as oai_pairs
     from bwr.server.app import render_pairs
-    from bwr.server.anthropic_schemas import MessagesRequest
     from bwr.server.schemas import ChatCompletionRequest
     from bwr.server.tools import inject_tools
 

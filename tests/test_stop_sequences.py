@@ -38,9 +38,8 @@ import asyncio
 import json
 import os
 
+import bwr
 import pytest
-
-import bwr as bwr
 from bwr.engine.config import (
     StopSequenceFilter,
     first_stop_match,
@@ -508,7 +507,7 @@ def test_engine_stops_decoding_at_a_stop_sequence(model: bwr.Model) -> None:
     and `ctx.decode_calls` -- the C++-side count of real llama_decode calls -- because
     no assertion about the response text can tell "stopped" from "cut down afterwards".
     """
-    params = dict(temp=0.0, max_tokens=ENGINE_MAX_TOKENS, stop_at_eog=False)
+    params = {"temp": 0.0, "max_tokens": ENGINE_MAX_TOKENS, "stop_at_eog": False}
 
     engine = _fresh_engine(model)
     try:

@@ -13,9 +13,8 @@ from __future__ import annotations
 import math
 import os
 
+import bwr
 import pytest
-
-import bwr as bwr
 from bwr.engine import EngineConfig, MetalEngine, RequestParams
 
 MODEL_PATH = os.environ.get("BWR_MOE_MODEL")
@@ -81,7 +80,7 @@ def test_frames_shape_and_softmax(model: bwr.Model) -> None:
     assert frames, "no router frames recorded"
     # Frames accumulate across every decode since the drain (prefill plus one
     # per step), so layers repeat -- distinct coverage is the assertion.
-    layers = sorted(set(f["layer"] for f in frames))
+    layers = sorted({f["layer"] for f in frames})
     assert layers == list(range(model.n_layer)), "every layer must report"
     widths = set()
     for frame in frames:

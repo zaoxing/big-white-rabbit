@@ -82,7 +82,7 @@ def test_wire_reports_error_as_generic_via_canned_engine() -> None:
 
     import os
 
-    import bwr as bwr
+    import bwr
     import pytest
 
     path = os.environ.get("BWR_TEST_MODEL")

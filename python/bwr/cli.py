@@ -256,7 +256,8 @@ def _cmd_serve(argv: list[str]) -> int:
     # --recipe shorthand: 27b → models/recipes/27b.json, 30b → 30b.json (with --receipt deprecated alias)
     recipe_arg = args.recipe if args.recipe is not None else args.receipt
     if recipe_arg is not None:
-        import json, pathlib
+        import json
+        import pathlib
         recipe_path = recipe_arg
         if recipe_path in ("27b", "27B", "qwen27b", "27"):
             recipe_path = "models/recipes/27b.json"

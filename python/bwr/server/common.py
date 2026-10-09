@@ -25,7 +25,8 @@ prompt is rendered) and delegate only the shared tail.
 
 from __future__ import annotations
 
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse

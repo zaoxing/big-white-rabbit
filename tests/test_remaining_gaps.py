@@ -14,13 +14,11 @@ Gaps covered:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 
+import bwr
 import pytest
-
-import bwr as bwr
 
 MODEL_PATH = os.environ.get("BWR_TEST_MODEL")
 pytestmark = pytest.mark.skipif(not MODEL_PATH or not os.path.exists(MODEL_PATH), reason="BWR_TEST_MODEL required")

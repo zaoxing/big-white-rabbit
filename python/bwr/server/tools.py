@@ -32,8 +32,9 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any
 
 from ..engine.config import partial_stop_len
 

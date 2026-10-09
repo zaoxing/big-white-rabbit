@@ -18,8 +18,8 @@ so the shared rule belongs on this side of the boundary.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Iterable, Sequence
 
 from .._bwr_metal import ContextParams, SamplerParams
 

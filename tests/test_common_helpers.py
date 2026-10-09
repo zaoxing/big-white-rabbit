@@ -68,9 +68,8 @@ def test_count_tokens_uses_special_flags() -> None:
 def test_submit_request_maps_errors() -> None:
     import asyncio
 
-    from fastapi import HTTPException
-
     from bwr.server.common import submit_request
+    from fastapi import HTTPException
 
     class OkEngine:
         async def submit(self, prompt, params):

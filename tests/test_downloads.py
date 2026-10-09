@@ -15,7 +15,6 @@ import threading
 import time
 
 import pytest
-
 from bwr.server import downloads as dl
 from bwr.server.downloads import (
     DownloadError,
@@ -338,6 +337,7 @@ def test_ms_file_listing_keeps_blobs_and_drops_ignored_formats(monkeypatch):
 
 def test_ms_download_streams_files_and_reports_progress(monkeypatch, tmp_path):
     import io
+
     from bwr.server.downloads import DownloadManager, MSFetcher
 
     monkeypatch.setattr("bwr.server.downloads._ms_json", lambda *a, **k: {

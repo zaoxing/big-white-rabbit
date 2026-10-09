@@ -18,9 +18,8 @@ output whose piece is empty and reason is eog) toward `completion_tokens` /
 
 from __future__ import annotations
 
+import bwr
 import pytest
-
-import bwr as bwr
 from bwr.engine.metal_engine import StepOutput
 
 # Use a tiny canned generation: two real pieces + one empty eog terminal.

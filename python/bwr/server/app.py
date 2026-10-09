@@ -17,14 +17,10 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
-
-from .anthropic_api import register_anthropic_routes
-from .common import count_tokens, sse_response, submit_request, text_from_blocks
-from .params import build_params
 
 from .._bwr_metal import Model
 from ..engine.async_engine import AsyncEngine
@@ -35,13 +31,15 @@ from ..engine.config import (
     normalize_stops,
 )
 from ..engine.metal_engine import MetalEngine
-from ..engine.pool import ModelPoolBusy, ModelPoolError
 from ..engine.mlx_engine import MLXEngine
+from ..engine.pool import ModelPoolBusy, ModelPoolError
+from .anthropic_api import register_anthropic_routes
 from .bench import BenchRunner
+from .common import count_tokens, sse_response, submit_request, text_from_blocks
 from .ctxbench import ContextBenchRunner
-from .downloads import DownloadManager, HubIndex, MSFetcher, ModelScopeIndex
+from .downloads import DownloadManager, HubIndex, ModelScopeIndex, MSFetcher
+from .params import build_params
 from .profiles import ProfileStore
-from .stats import ServerStats
 from .schemas import (
     ChatCompletion,
     ChatCompletionChunk,
@@ -60,6 +58,7 @@ from .schemas import (
     Usage,
     _rid,
 )
+from .stats import ServerStats
 from .tools import (
     ParsedToolCall,
     ToolCallStreamParser,
@@ -642,7 +641,7 @@ def _prefix_tokens(engine: object) -> int:
 
 
 def _record(
-    stats: "ServerStats",
+    stats: ServerStats,
     engine: object,
     *,
     n_prompt: int,
@@ -682,7 +681,7 @@ async def _sse(
     known_tools: set[str] | None = None,
     stops: tuple[str, ...] = (),
     *,
-    stats: "ServerStats | None" = None,
+    stats: ServerStats | None = None,
     n_prompt: int = 0,
     t_submit: float = 0.0,
     cached_before: int = 0,

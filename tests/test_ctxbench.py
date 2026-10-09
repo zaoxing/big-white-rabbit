@@ -21,7 +21,6 @@ import json
 from dataclasses import dataclass
 
 import pytest
-
 from bwr.engine.pool import ModelPoolBusy, ModelPoolError
 from bwr.server.ctxbench import (
     APPLY_GRANULARITY,
@@ -79,7 +78,7 @@ class _FakeEngine(_Tokenizer):
     """
 
     def __init__(
-        self, config: _Config, prefill_limit: int, *, pool: "_FakePool"
+        self, config: _Config, prefill_limit: int, *, pool: _FakePool
     ) -> None:
         self.config = config
         self.ctx = _Ctx(n_ctx=config.n_ctx, n_seq_max=config.n_seq_max)

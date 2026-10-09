@@ -13,9 +13,8 @@ from __future__ import annotations
 
 import os
 
+import bwr
 import pytest
-
-import bwr as bwr
 from bwr.engine import EngineConfig, MetalEngine, RequestParams
 
 MODEL_PATH = os.environ.get("BWR_TEST_MODEL")
