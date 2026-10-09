@@ -50,10 +50,14 @@ xcodebuild -project apps/bwr-mac/BigWhiteRabbit.xcodeproj -list
 xcodebuild -project apps/bwr-mac/BigWhiteRabbit.xcodeproj -scheme BigWhiteRabbit build
 ```
 
-**Not verified in this repository.** It has only been checked structurally —
-all 129 project file references resolve and no `bwrx`/`omlx` identifiers
-remain. Nobody has compiled or run it here, because this machine has only
-CommandLineTools installed. Treat "it builds" as untested.
+It builds and its unit tests pass here (Xcode 27.0 on macOS 27, 2026-10-09:
+335 tests, 5 skipped). `Scripts/build.sh` is the full bundle pipeline; for
+the Swift target alone:
+
+```bash
+xcodebuild -project apps/bwr-mac/BigWhiteRabbit.xcodeproj -scheme BigWhiteRabbit \
+  -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO test
+```
 
 Then start the server it expects:
 

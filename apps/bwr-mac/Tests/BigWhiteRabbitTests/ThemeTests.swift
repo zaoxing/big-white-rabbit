@@ -9,12 +9,15 @@ final class ThemeTests: XCTestCase {
         let actual = resolvedRGBA(BWRTheme.light.windowBg, appearance: .aqua)
         let expected = resolvedRGBA(Color(nsColor: .windowBackgroundColor),
                                     appearance: .aqua)
-        let underPage = resolvedRGBA(Color(nsColor: .underPageBackgroundColor),
-                                     appearance: .aqua)
 
+        // The theme's light window colour IS the system window colour, and
+        // that colour is near-white. No assertion against
+        // .underPageBackgroundColor here: on macOS 26 and earlier it was a
+        // mid grey in light mode, and on macOS 27 it is near-white too, so
+        // its distance from the window colour is a fact about the OS, not
+        // about the theme.
         assertClose(actual, expected)
         XCTAssertGreaterThan(actual.red, 0.95)
-        XCTAssertGreaterThan(abs(actual.red - underPage.red), 0.25)
     }
 
     func testDarkWindowBackgroundKeepsUnderPageColor() {
