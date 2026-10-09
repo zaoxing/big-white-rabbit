@@ -77,7 +77,7 @@ DEFAULT_MAX_TOKENS = 512
 # Single source for engine->protocol reason mapping (see server/reasons.py).
 # Re-exported here so `from server.app import _FINISH_REASONS` keeps working
 # for tests and so the two surfaces cannot drift.
-from .reasons import FINISH_REASONS as _FINISH_REASONS  # noqa: F401
+from .reasons import FINISH_REASONS as _FINISH_REASONS  # noqa: F401, E402
 
 
 def _openai_finish_reason(reason: str | None) -> str:

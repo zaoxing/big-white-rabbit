@@ -232,7 +232,10 @@ class ModelPool:
 
     @property
     def resident_bytes(self) -> int:
-        return sum(int(l.entry.size_bytes * _LOAD_OVERHEAD) for l in self._loaded.values())
+        return sum(
+            int(loaded.entry.size_bytes * _LOAD_OVERHEAD)
+            for loaded in self._loaded.values()
+        )
 
     def ctx_override(self, model_id: str) -> int | None:
         """The per-model `n_ctx` this pool will load `model_id` with, if any."""

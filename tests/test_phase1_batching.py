@@ -259,7 +259,7 @@ def test_partial_seq_cp_without_kv_unified_raises(model: bwr.Model) -> None:
     # A partial range onto the SAME sequence never reaches the assert, so it stays legal.
     ctx.memory_seq_cp(0, 0, 0, 3)
     # Still alive and still holding seq 0's KV: the refused copies changed nothing.
-    assert prefill(ctx, tokens + [expected], seq_id=0, start=len(tokens)) > 0
+    assert prefill(ctx, [*tokens, expected], seq_id=0, start=len(tokens)) > 0
 
 
 def test_partial_seq_cp_with_kv_unified_forks_a_prefix(model: bwr.Model) -> None:

@@ -475,7 +475,7 @@ class ModelScopeIndex:
         total = sum(f["size"] for f in files)
         return {
             "repo_id": repo_id,
-            "name": info.get("Name") or repo_id.split("/")[-1],
+            "name": info.get("Name") or repo_id.rsplit("/", maxsplit=1)[-1],
             "downloads": info.get("Downloads"),
             "likes": info.get("Stars"),
             "size": total,

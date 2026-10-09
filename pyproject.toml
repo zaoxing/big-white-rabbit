@@ -41,5 +41,41 @@ cmake.version = ">=3.21"
 cmake.build-type = "Release"
 build-dir = "build/{wheel_tag}"
 
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+extend-exclude = ["vendor", "third_party", "build", "outputs"]
+
+[tool.ruff.lint]
+# The set the tree is clean against. Families, not cherry-picked codes, so a
+# ruff upgrade that adds a rule shows up here rather than nowhere.
+select = [
+    "E4", "E7", "E9", "F", "I", "UP", "B", "C4", "SIM", "RUF",
+    "PLC", "PLE", "PLW", "ASYNC", "BLE", "PIE", "ISC", "PGH",
+    "YTT", "FLY", "DTZ", "LOG", "G",
+]
+ignore = [
+    # `# noqa: BLE001 - reason` goes on EVERY broad except, enforced by
+    # tests/test_noqa_markers_extended.py; ruff's own view of whether BLE001
+    # would fire there does not override that.
+    "RUF100",
+    # Lazy imports inside functions are how heavy backends (mlx, llama) stay
+    # optional at import time.
+    "PLC0415",
+    # Nested ifs with comments between the levels, and explicit
+    # except-pass with a reason, read better than the one-liners proposed.
+    "SIM102", "SIM105",
+    # Ambiguous-unicode checks fire on prose in docstrings (arrows, dashes).
+    "RUF001", "RUF002", "RUF003",
+    # zip(strict=...) on every call is noise; the few that matter are
+    # checked at the call site.
+    "B905",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests catch broadly on purpose (proving no exception escapes) and use a
+# module global to hand a fixture-built pool to a route stub.
+"tests/*" = ["BLE001", "PLW0603"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

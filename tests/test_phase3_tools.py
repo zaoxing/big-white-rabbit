@@ -174,7 +174,7 @@ def test_prompt_injection_appends_to_existing_system(model: bwr.Model) -> None:
     assert system == expected
     # And the module constants are the template's own strings, so a future edit to them
     # fails here instead of quietly changing what the model is shown.
-    assert (T.TOOLS_PREFIX, T.TOOLS_SUFFIX) == (prefix, suffix)
+    assert (prefix, suffix) == (T.TOOLS_PREFIX, T.TOOLS_SUFFIX)
 
 
 def test_prompt_injection_creates_system_when_absent() -> None:
@@ -704,7 +704,7 @@ def client(model: bwr.Model):
 
 
 def _check_tool_calls_shape(calls: list[dict]) -> None:
-    for i, call in enumerate(calls):
+    for call in calls:
         assert call["type"] == "function"
         assert isinstance(call["id"], str) and call["id"]
         fn = call["function"]

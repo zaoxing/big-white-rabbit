@@ -33,8 +33,8 @@ DEFAULT_DEPTHS = ("off", "2", "4")
 def parse_depths(raw: str) -> list[int | None]:
     """``"off,2,4"`` -> ``[None, 2, 4]``. Raises ValueError on bad entries."""
     out: list[int | None] = []
-    for tok in raw.split(","):
-        tok = tok.strip().lower()
+    for raw_tok in raw.split(","):
+        tok = raw_tok.strip().lower()
         if tok in ("off", "ar", "none"):
             out.append(None)
         else:

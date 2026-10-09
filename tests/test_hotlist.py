@@ -123,7 +123,7 @@ def test_live_determinism() -> None:
         rid = engine.add_request("Count: 1 2 3", bwr.RequestParams(max_tokens=16, stop_at_eog=False, temp=0.0))
         # Drain in steps so we interleave hotlist updates with decodes (real usage)
         while engine._states:
-            for out in engine.step():
+            for _out in engine.step():
                 pass
             hl.update(engine.expert_activations(rid) if rid in engine._states or rid in engine._retired else [])
         # Final drain for last decode's frames (retired request still readable)

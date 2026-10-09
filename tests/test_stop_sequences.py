@@ -493,7 +493,7 @@ def _pick_delimiter(text: str, size: int = 5) -> tuple[str, int]:
         first = text.find(candidate)
         # Must leave real text before it (so truncation is observable) and real text
         # after it (so stopping early is observable).
-        if 2 <= first and first + size <= len(text) - 3:
+        if first >= 2 and first + size <= len(text) - 3:
             return candidate, first
     pytest.fail(f"no usable delimiter inside the model's output: {text!r}")
 
