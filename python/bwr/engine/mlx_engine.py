@@ -100,6 +100,7 @@ class _MLXContext:
         eng._spec_tables.clear()
         eng._spec_ok.clear()
         eng._spec_stats.clear()
+        eng._pending.clear()
         eng._mtp_caches.clear()
         eng._mtp_hidden.clear()
         eng._mtp = None
@@ -232,6 +233,10 @@ class MLXEngine:
         self._caches: dict[int, list] = {}
         self._spec_ok: dict[int, bool] = {}
         self._spec_stats: dict[int, list[int]] = {}
+        # Lookahead per request (see _lookahead): when present, the owned
+        # cache already holds next_token, and this is (argmax, logits) for
+        # the position after it, queued together but not necessarily done.
+        self._pending: dict[int, tuple[object, object]] = {}
         self.spec_drafted = 0
         self.spec_accepted = 0
         self.spec_recomputes = 0
@@ -308,6 +313,7 @@ class MLXEngine:
         self._streams.pop(req.request_id, None)
         self._spec_tables.pop(req.request_id, None)
         self._caches.pop(req.request_id, None)
+        self._pending.pop(req.request_id, None)
         self._spec_ok.pop(req.request_id, None)
         self._spec_stats.pop(req.request_id, None)
         self._mtp_caches.pop(req.request_id, None)
@@ -642,16 +648,18 @@ class MLXEngine:
             if self.config.mlx_prefix_cache:
                 hit = self._prefix_hit(req)
                 if hit is not None:
+                    self._lookahead(req, req.next_token)
                     return hit
             mx = _mx()
             logits = self._prefill_owned(req.request_id, req.prompt)
             cache = self._caches[req.request_id]
             base = int(mx.argmax(logits[0, -1]).item())
             req.next_token = base
-            out = [self._feed(req, base, self._tokenizer.decode([base]))]
             if self.config.mlx_prefix_cache:
+                # Snapshot covers exactly the prompt: before the lookahead.
                 self._prefix_insert(req, cache, base)
-            return out
+            self._lookahead(req, base)
+            return [self._feed(req, base, self._tokenizer.decode([base]))]
         except BaseException:  # noqa: BLE001 - re-raised; must retire slot on any failure
             try:
                 self._retire(req, "error")
@@ -679,6 +687,35 @@ class MLXEngine:
         tokens = req.prompt + req.output_tokens + list(extra)
         logits = self._prefill_owned(req.request_id, tokens)
         req.next_token = int(mx.argmax(logits[0, -1]).item())
+
+    def _lookahead(self, req: RequestState, token: int) -> None:
+        """Queue the forward for `token` now, so the GPU computes it while
+        Python decodes the piece, runs stop filters and builds outputs.
+
+        This is what mlx-lm's generate_step does (async_eval of the next
+        step before yielding the current token) and the manual loop did not,
+        which left it ~10% behind the stream path on a 27B. The cache then
+        holds `prompt + output` rather than `prompt + output[:-1]`; the next
+        verify step takes the row from `_pending` instead of recomputing it
+        and appends only its draft rows -- the base row was always going to
+        be forwarded, so nothing is wasted when drafts follow. Not used on
+        the MTP path, whose head needs the trunk's hidden state per row.
+        """
+        if self._mtp is not None or req.finished:
+            return
+        mx = _mx()
+        # `token` may be a lazy scalar: the argmax queued with the PREVIOUS
+        # lookahead. Its own argmax is queued here with its logits, in one
+        # batch, so that forcing the token later waits only on that batch
+        # and never on the forward queued after it. Queue the argmax
+        # separately and MLX commits it with the next forward, and forcing
+        # it then waits for both: the loop serialises and the overlap is
+        # gone (measured: 78 ms/step against the stream path's 69).
+        tok = token if isinstance(token, mx.array) else mx.array(token)
+        logits = self._model(tok.reshape(1, 1), cache=self._caches[req.request_id])
+        nxt = mx.argmax(logits[0, -1])
+        mx.async_eval(nxt, logits)
+        self._pending[req.request_id] = (nxt, logits)
 
     def _verify(self, req: RequestState) -> list[StepOutput]:
         """Verify one request's drafts; same retire-on-failure contract as
@@ -732,29 +769,57 @@ class MLXEngine:
             context = history[-(table.order - 1) :] if table.order > 1 else []
             drafts = table.predict(context, allow)
         rows = [base, *drafts]
+        # With a lookahead pending, the cache already holds `base` and its
+        # logits are queued: forward only the draft rows and put the two
+        # together as if one (1 + drafts)-row forward had run.
+        pending_tok, pending = self._pending.pop(rid, (None, None))
         # Rewind point for the mismatch path (free: see _snapshot_cache).
-        # Only worth taking when there is something to reject.
+        # Only worth taking when there is something to reject. Taken after
+        # the lookahead's write, which is confirmed either way.
         snap = self._snapshot_cache(self._caches[rid]) if drafts else None
         msnap = (
             self._mtp_caches[rid][0].offset
             if (mtp is not None and drafts)
             else None
         )
+        lookahead_queued = False
         if mtp is not None:
             logits, hidden = mtp.trunk_forward(
                 mx.array(rows)[None], self._caches[rid]
             )
-        else:
+            mx.eval(logits)
+        elif not drafts:
+            # Plain step, mlx-lm's generate_step shape: the token stays a
+            # lazy array (queued with the previous lookahead) while the NEXT
+            # forward is built from it and queued, and only then is it
+            # forced. Forcing first would leave the GPU idle for the graph
+            # build of 64 layers every step.
+            if pending is None:
+                logits = self._model(mx.array(rows)[None], cache=self._caches[rid])
+                tok_arr = mx.argmax(logits[0, -1])
+            else:
+                logits, tok_arr = pending, pending_tok
+            self._lookahead(req, tok_arr)
+            lookahead_queued = True
+        elif pending is None:
             logits = self._model(
                 mx.array(rows)[None], cache=self._caches[rid]
             )
-        mx.eval(logits)
+            mx.eval(logits)
+        else:
+            logits = mx.concatenate([
+                pending,
+                self._model(mx.array(drafts)[None], cache=self._caches[rid]),
+            ], axis=1)
+            mx.eval(logits)
         self.spec_drafted += len(drafts)
         stats = self._spec_stats[req.request_id]
         stats[0] += len(drafts)
         accepted: list[int] = []
         matched = 0
-        for k in range(len(rows)):
+        if lookahead_queued:
+            accepted.append(int(tok_arr.item()))
+        for k in range(0 if not lookahead_queued else len(rows), len(rows)):
             token = int(mx.argmax(logits[0, k]).item())
             accepted.append(token)
             if k < len(drafts):
@@ -779,6 +844,9 @@ class MLXEngine:
             self._restore_cache(self._caches[rid], snap)
             keep = rows[: len(accepted)]
             n = len(keep) - 1
+            if pending is not None:
+                # The restored cache already holds `base`.
+                keep = keep[1:]
             if mtp is not None:
                 self._mtp_caches[rid][0].offset = msnap
                 logits, hidden = mtp.trunk_forward(
@@ -790,7 +858,7 @@ class MLXEngine:
                     h_seq = mx.concatenate([h_prev, hidden[:, :n, :]], axis=1)
                 mtp.accept(self._mtp_caches[rid], h_seq, [base, *accepted[:n]])
                 self._mtp_hidden[rid] = hidden[:, -1:, :]
-            else:
+            elif keep:
                 logits = self._model(
                     mx.array(keep)[None], cache=self._caches[rid]
                 )
@@ -812,6 +880,10 @@ class MLXEngine:
         self.spec_gate.record(
             bool(drafts), len(accepted), time.perf_counter() - t_start
         )
+        # Queue the next row before the bookkeeping below, so it overlaps
+        # (the plain step queued it before forcing its token, above).
+        if not lookahead_queued:
+            self._lookahead(req, accepted[-1])
         self._feed_table(req, accepted)
         drafted, accepted_n, recomputed = stats
         if (

@@ -31,12 +31,29 @@ def test_alternates_until_both_modes_have_evidence():
     assert gate.probes == 0
 
 
-def test_probes_the_other_mode_on_schedule():
-    gate = SpecThroughputGate(probe_every=4, min_samples=1)
-    chosen = _steps(gate, 12, draft_tps=10, plain_tps=10)
-    # Steps 0-1 alternate for evidence; then 4 and 8 are probes.
-    assert [i for i, d in enumerate(chosen) if not d] == [1, 4, 8]
-    assert gate.probes == 2
+def test_probes_back_off_while_the_verdict_holds():
+    """A probe costs several plain steps on MLX; one in sixteen forever
+    would give back a tenth of what the gate saves. Confirmed verdicts
+    double the wait, capped."""
+    gate = SpecThroughputGate(probe_every=4, min_samples=1, max_probe_every=16)
+    chosen = _steps(gate, 40, draft_tps=10, plain_tps=10)
+    # Steps 0-1 alternate for evidence. Then a probe at 4; the counter
+    # restarts when the probe records, so the next comes 8 steps later at
+    # 13, then 16 later (capped) at 30, and the one after would be 47.
+    assert [i for i, d in enumerate(chosen) if not d] == [1, 4, 13, 30]
+    assert gate.probes == 3
+
+
+def test_a_probe_that_flips_the_verdict_resets_the_cadence():
+    gate = SpecThroughputGate(probe_every=4, min_samples=1, max_probe_every=64, alpha=1.0)
+    _steps(gate, 20, draft_tps=10, plain_tps=5)   # drafting; cadence grows
+    assert gate.drafting is True
+    assert gate._cadence > 4
+    # Plain is now much faster: the next probe flips the verdict.
+    while gate.probes < 3:
+        _steps(gate, 1, draft_tps=10, plain_tps=50)
+    assert gate.drafting is False
+    assert gate._cadence == 4
 
 
 def test_switches_to_plain_when_drafting_measures_slower():
@@ -46,8 +63,8 @@ def test_switches_to_plain_when_drafting_measures_slower():
     _steps(gate, 12, draft_tps=8, plain_tps=11)
     assert gate.drafting is False
     assert gate.plain_tps > gate.draft_tps
-    # And stays plain on non-probe steps (step 12 is a probe; 13-15 are not).
-    assert _steps(gate, 4, draft_tps=8, plain_tps=11)[1:] == [False, False, False]
+    # And stays plain apart from the occasional probe.
+    assert _steps(gate, 8, draft_tps=8, plain_tps=11).count(True) <= 1
 
 
 def test_switches_back_when_drafts_start_paying():
@@ -78,6 +95,7 @@ def test_record_counts_the_step_even_when_it_is_not_evidence():
 
 @pytest.mark.parametrize("kwargs", [
     {"alpha": 0}, {"alpha": 1.5}, {"probe_every": 1}, {"min_samples": 0},
+    {"probe_every": 8, "max_probe_every": 4},
 ])
 def test_rejects_degenerate_parameters(kwargs):
     with pytest.raises(ValueError):
