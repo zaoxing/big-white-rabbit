@@ -46,6 +46,21 @@ Context::Context(std::shared_ptr<Model> model, const ContextParams & cp, const S
     lp.n_rs_seq        = cp.n_rs_seq;
     lp.flash_attn_type = cp.flash_attn ? LLAMA_FLASH_ATTN_TYPE_AUTO
                                        : LLAMA_FLASH_ATTN_TYPE_DISABLED;
+    {
+        ggml_type kv;
+        if      (cp.kv_type == "f16")  kv = GGML_TYPE_F16;
+        else if (cp.kv_type == "q8_0") kv = GGML_TYPE_Q8_0;
+        else if (cp.kv_type == "q4_0") kv = GGML_TYPE_Q4_0;
+        else throw std::invalid_argument(
+            "kv_type must be f16, q8_0 or q4_0; got '" + cp.kv_type + "'");
+        if (kv != GGML_TYPE_F16 && !cp.flash_attn) {
+            throw std::invalid_argument(
+                "kv_type=" + cp.kv_type + " needs flash attention (llama.cpp cannot "
+                "attend over a quantized V without it); drop --no-flash-attn");
+        }
+        lp.type_k = kv;
+        lp.type_v = kv;
+    }
     if (cp.record_experts) {
         // Token columns cannot be attributed to requests past one sequence,
         // so multi-seq recording is refused loudly rather than misattributed

@@ -68,6 +68,11 @@ class EngineConfig:
     # One shared KV buffer instead of one stream per sequence. Off = llama.cpp's own
     # default; on is what a partial-range ctx.memory_seq_cp (prefix fork) needs.
     kv_unified: bool = False
+    # Metal KV cache tensor type: "f16", "q8_0" or "q4_0" (llama.cpp's type_k /
+    # type_v). Quantized KV is a context-length lever, not a speed one: it
+    # halves or quarters the cache's bytes per token. Needs flash_attn.
+    # The MLX backend has its own knob (mlx_kv_bits).
+    kv_type: str = "f16"
     # Greedy n-gram speculative decoding (SPEC-speculative-ngram.md). Off by
     # default: drafts cost batch rows, which only pays when the acceptance
     # rate is high. Greedy requests only by default; with
@@ -131,6 +136,7 @@ class EngineConfig:
         cp.n_threads_batch = self.n_threads_batch
         cp.flash_attn = self.flash_attn
         cp.kv_unified = self.kv_unified
+        cp.kv_type = self.kv_type
         cp.record_experts = self.record_experts
         return cp
 

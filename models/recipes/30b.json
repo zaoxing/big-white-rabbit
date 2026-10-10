@@ -25,6 +25,36 @@
     "prefix_cache_hit": "0.62s",
     "spec_rep": "+7.5% drafts=4 accept=70%",
     "notes": "flash_attn on is +20% vs off; n_threads_batch!=0 is -7%; n_threads 10 was +1% (noise) so 0=auto for portability; geometry deltas otherwise within +-5% noise; drafts=8 collapses (accept 15%)",
-    "vs_mlx_2026_10_10": 56.1
+    "vs_mlx_2026_10_10": 56.1,
+    "kv_type_2026_10_10": {
+      "f16_prose": [
+        37.5,
+        35.3
+      ],
+      "q8_0_prose": [
+        32.8,
+        32.1
+      ],
+      "q4_0_prose": [
+        33.4,
+        32.9
+      ],
+      "note": "speculation off, 128 tok incl. prefill; session was thermally loaded (f16 rep drifted 37.8 -> 30.6), so the ratios are the result, not the absolutes"
+    },
+    "as_shipped_2026_10_10": {
+      "prose": [
+        45.5,
+        44.8
+      ],
+      "rep": [
+        71.0,
+        74.1
+      ],
+      "concurrent_2_agg": [
+        62.2,
+        54.6
+      ],
+      "note": "same loaded session; GGUF re-downloaded today"
+    }
   }
 }

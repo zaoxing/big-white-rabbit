@@ -63,7 +63,9 @@ PYBIND11_MODULE(_bwr_metal, m) {
         .def_readwrite("n_rs_seq",        &bwr::ContextParams::n_rs_seq)
         // MoE router distribution recording (one graph split per MoE layer
         // per decode while on -- profile, don't serve, with it).
-        .def_readwrite("record_experts",  &bwr::ContextParams::record_experts);
+        .def_readwrite("record_experts",  &bwr::ContextParams::record_experts)
+        // KV cache tensor type by ggml name: f16 (default), q8_0, q4_0.
+        .def_readwrite("kv_type",         &bwr::ContextParams::kv_type);
 
     py::class_<bwr::ExpertFrame>(m, "ExpertFrame")
         .def_readonly("layer", &bwr::ExpertFrame::layer)

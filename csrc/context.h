@@ -52,6 +52,12 @@ struct ContextParams {
     // Single-sequence contexts only; the constructor refuses anything else
     // because token columns cannot be attributed to requests past that.
     bool     record_experts  = false;
+    // KV cache tensor type, by ggml name: "f16" (llama.cpp's default), "q8_0" or
+    // "q4_0". A quantized KV halves (q8_0) or quarters (q4_0) the cache's bytes per
+    // token, which is the lever for a longer context in the same RAM; llama.cpp
+    // needs flash attention on for a quantized V, so the constructor refuses the
+    // combination rather than letting llama.cpp quietly switch the type back.
+    std::string kv_type      = "f16";
 };
 
 struct SamplerParams {

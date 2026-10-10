@@ -40,6 +40,19 @@ def _serve_kwargs(monkeypatch, argv):
     return rc, captured
 
 
+def test_kv_type_flag_and_recipe_key_reach_serve(monkeypatch, rootdir, tmp_path):
+    """--kv-type is llama.cpp's type_k/type_v; the default stays f16, a
+    recipe can set it, and an explicit flag wins over the recipe."""
+    rc, kw = _serve_kwargs(monkeypatch, ["--recipe", "30b"])
+    assert rc == 0 and kw["kv_type"] == "f16"
+    rc, kw = _serve_kwargs(monkeypatch, ["--recipe", "30b", "--kv-type", "q8_0"])
+    assert rc == 0 and kw["kv_type"] == "q8_0"
+    recipe = tmp_path / "r.json"
+    recipe.write_text('{"model": "models/x.gguf", "engine": "metal", "kv_type": "q4_0"}')
+    rc, kw = _serve_kwargs(monkeypatch, ["--recipe", str(recipe)])
+    assert rc == 0 and kw["kv_type"] == "q4_0"
+
+
 def test_30b_recipe_forwards_tuned_knobs(monkeypatch, rootdir):
     rc, kw = _serve_kwargs(monkeypatch, ["--recipe", "30b"])
     assert rc == 0

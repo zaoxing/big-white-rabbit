@@ -219,6 +219,11 @@ def _cmd_serve(argv: list[str]) -> int:
                          "(agent-loop TTFT; 2K 28s->~1s measured)")
     ap.add_argument("--mlx-prefix-cache-size", type=int, default=2,
                     help="max cached MLX prompt snapshots, LRU (default 2)")
+    ap.add_argument("--kv-type", choices=("f16", "q8_0", "q4_0"), default="f16",
+                    help="Metal KV cache type (llama.cpp type_k/type_v). q8_0 halves "
+                         "KV bytes per token, q4_0 quarters them: a longer context in "
+                         "the same RAM, measured for its decode cost in the recipe "
+                         "notes. Needs flash attention")
     ap.add_argument("--kv-unified", action="store_true",
                     help="share one KV buffer across sequences; required for partial "
                          "prefix copies (see docs/llamacpp-notes.md)")
@@ -278,6 +283,7 @@ def _cmd_serve(argv: list[str]) -> int:
             "n_ctx": "ctx_size", "n_batch": "n_batch", "n_ubatch": "n_ubatch",
             "n_seq_max": "n_seq_max", "n_threads": "n_threads",
             "n_threads_batch": "n_threads_batch", "kv_unified": "kv_unified",
+            "kv_type": "kv_type",
             "flash_attn": "no_flash_attn",
             "speculative": "speculative", "spec_max_drafts": "spec_max_drafts",
             "prefix_cache": "prefix_cache",
@@ -374,6 +380,7 @@ def _cmd_serve(argv: list[str]) -> int:
         n_threads_batch=args.n_threads_batch,
         flash_attn=not args.no_flash_attn,
         kv_unified=args.kv_unified,
+        kv_type=args.kv_type,
         served_model_name=args.served_model_name,
         log_level=args.log_level,
         draft_model_path=args.draft_model,
