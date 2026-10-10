@@ -266,10 +266,18 @@ class MTPDraft:
                 cache[0].trim(appended)
         return drafts
 
-    def accept(self, cache: list, hidden: Any, tokens: Sequence[int]) -> None:
-        """Advance the head cache by tokens the target actually accepted."""
+    def accept(
+        self, cache: list, hidden: Any, tokens: Sequence[int], *, sync: bool = True
+    ) -> None:
+        """Advance the head cache by tokens the target actually accepted.
+
+        `sync=False` leaves the new state lazy, for a caller that is about
+        to queue it in an async batch with the trunk's next forward; an
+        eval here would wait on the forward that produced `hidden`.
+        """
         if not tokens:
             return
         mx = self._mx
         self._forward(hidden, mx.array(list(tokens))[None], cache, want_logits=False)
-        mx.eval(cache[0].state)
+        if sync:
+            mx.eval(cache[0].state)

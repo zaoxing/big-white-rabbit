@@ -235,9 +235,10 @@ class MLXEngine:
         self._spec_ok: dict[int, bool] = {}
         self._spec_stats: dict[int, list[int]] = {}
         # Lookahead per request (see _lookahead): when present, the owned
-        # cache already holds next_token, and this is (argmax, logits) for
-        # the position after it, queued together but not necessarily done.
-        self._pending: dict[int, tuple[object, object]] = {}
+        # cache already holds next_token, and this is (argmax, logits,
+        # hidden) for the position after it, queued together but not
+        # necessarily done. `hidden` is None without an MTP head.
+        self._pending: dict[int, tuple[object, object, object]] = {}
         # The batch path's equivalent: per row, the lazy token sampled from
         # the forward queued at the end of the previous step.
         self._batch_pending: dict[int, object] = {}
@@ -702,10 +703,11 @@ class MLXEngine:
         holds `prompt + output` rather than `prompt + output[:-1]`; the next
         verify step takes the row from `_pending` instead of recomputing it
         and appends only its draft rows -- the base row was always going to
-        be forwarded, so nothing is wasted when drafts follow. Not used on
-        the MTP path, whose head needs the trunk's hidden state per row.
+        be forwarded, so nothing is wasted when drafts follow. With an MTP
+        head the trunk's hidden row rides along, and the head cache's lazy
+        state is queued in the same batch so no later step waits on it.
         """
-        if self._mtp is not None or req.finished:
+        if req.finished:
             return
         mx = _mx()
         # `token` may be a lazy scalar: the argmax queued with the PREVIOUS
@@ -716,10 +718,18 @@ class MLXEngine:
         # it then waits for both: the loop serialises and the overlap is
         # gone (measured: 78 ms/step against the stream path's 69).
         tok = token if isinstance(token, mx.array) else mx.array(token)
-        logits = self._model(tok.reshape(1, 1), cache=self._caches[req.request_id])
+        rid = req.request_id
+        if self._mtp is None:
+            logits = self._model(tok.reshape(1, 1), cache=self._caches[rid])
+            nxt = mx.argmax(logits[0, -1])
+            mx.async_eval(nxt, logits)
+            self._pending[rid] = (nxt, logits, None)
+            return
+        logits, hidden = self._mtp.trunk_forward(tok.reshape(1, 1), self._caches[rid])
         nxt = mx.argmax(logits[0, -1])
-        mx.async_eval(nxt, logits)
-        self._pending[req.request_id] = (nxt, logits)
+        head_state = [a for a in self._mtp_caches[rid][0].state if a is not None]
+        mx.async_eval(nxt, logits, hidden, *head_state)
+        self._pending[rid] = (nxt, logits, hidden)
 
     def _verify(self, req: RequestState) -> list[StepOutput]:
         """Verify one request's drafts; same retire-on-failure contract as
@@ -776,7 +786,9 @@ class MLXEngine:
         # With a lookahead pending, the cache already holds `base` and its
         # logits are queued: forward only the draft rows and put the two
         # together as if one (1 + drafts)-row forward had run.
-        pending_tok, pending = self._pending.pop(rid, (None, None))
+        pending_tok, pending, pending_hidden = self._pending.pop(
+            rid, (None, None, None)
+        )
         # Rewind point for the mismatch path (free: see _snapshot_cache).
         # Only worth taking when there is something to reject. Taken after
         # the lookahead's write, which is confirmed either way.
@@ -787,7 +799,23 @@ class MLXEngine:
             else None
         )
         lookahead_queued = False
-        if mtp is not None:
+        if mtp is not None and not drafts and pending is not None:
+            # Plain MTP step, pipelined like the n-gram one below. The head
+            # pairs (h_prev, base) lazily; its state is queued with the
+            # lookahead, so nothing here waits on the forward in flight.
+            logits, hidden, tok_arr = pending, pending_hidden, pending_tok
+            mtp.accept(self._mtp_caches[rid], h_prev, [base], sync=False)
+            self._mtp_hidden[rid] = hidden[:, -1:, :]
+            self._lookahead(req, tok_arr)
+            lookahead_queued = True
+        elif mtp is not None and pending is not None:
+            logits_d, hidden_d = mtp.trunk_forward(
+                mx.array(drafts)[None], self._caches[rid]
+            )
+            logits = mx.concatenate([pending, logits_d], axis=1)
+            hidden = mx.concatenate([pending_hidden, hidden_d], axis=1)
+            mx.eval(logits)
+        elif mtp is not None:
             logits, hidden = mtp.trunk_forward(
                 mx.array(rows)[None], self._caches[rid]
             )
@@ -853,10 +881,17 @@ class MLXEngine:
                 keep = keep[1:]
             if mtp is not None:
                 self._mtp_caches[rid][0].offset = msnap
-                logits, hidden = mtp.trunk_forward(
-                    mx.array(keep)[None], self._caches[rid]
-                )
-                mx.eval(logits)
+                if keep:
+                    logits, hidden = mtp.trunk_forward(
+                        mx.array(keep)[None], self._caches[rid]
+                    )
+                    mx.eval(logits)
+                    if pending is not None:
+                        hidden = mx.concatenate([pending_hidden, hidden], axis=1)
+                else:
+                    # Only the base row survives, and its hidden row was the
+                    # lookahead's.
+                    hidden = pending_hidden
                 h_seq = h_prev
                 if n:
                     h_seq = mx.concatenate([h_prev, hidden[:, :n, :]], axis=1)
@@ -867,7 +902,7 @@ class MLXEngine:
                     mx.array(keep)[None], cache=self._caches[rid]
                 )
                 mx.eval(logits)
-        elif mtp is not None:
+        elif mtp is not None and not lookahead_queued:
             # Full match: the trunk cache already holds the accepted stream,
             # so advance the head by the same span. Entries run from the
             # position of `base` through the last accepted token's
