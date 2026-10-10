@@ -88,3 +88,108 @@ def test_short_prompt_below_min_tokens_not_cached():
     _once(eng)
     assert len(eng._prefix) == 0
     eng.ctx.close()
+
+
+def test_a_sampled_hit_does_not_replay_the_greedy_first_token() -> None:
+    """A prefix entry stores the argmax AND the last logits. A greedy repeat
+    replays the argmax; a sampled repeat draws from the logits. Before this,
+    every temp>0 repeat of a cached prompt opened with the greedy token."""
+    import mlx.core as mx
+    from bwr.engine.mlx_engine import MLXEngine
+
+    prompt = "Count: " + " ".join(str(i % 10) for i in range(300))
+    eng = MLXEngine(MODEL_PATH, EngineConfig(
+        n_ctx=4096, mlx_prefix_cache=True, prefix_cache_min_tokens=16,
+    ))
+    try:
+        greedy = RequestParams(temp=0.0, max_tokens=4, stop_at_eog=False)
+        rid = eng.add_request(prompt, greedy)
+        list(eng.drain())
+        first_greedy = eng.tokens_of(rid)[0]
+        assert eng.prefix_misses == 1
+        # A hot entry carries the logits row the sampled path draws from.
+        entry = next(iter(eng._prefix.values()))
+        assert isinstance(entry[4], mx.array)
+        # Greedy repeat: hit, same first token.
+        rid = eng.add_request(prompt, greedy)
+        list(eng.drain())
+        assert eng.prefix_hits == 1 and eng.tokens_of(rid)[0] == first_greedy
+        # Sampled repeats: hit, drawn from the logits -- they must at least
+        # run, and with a hot temperature not all land on the argmax.
+        hot = RequestParams(temp=2.0, top_k=0, top_p=1.0, max_tokens=4, stop_at_eog=False)
+        firsts = set()
+        for _ in range(12):
+            rid = eng.add_request(prompt, hot)
+            list(eng.drain())
+            firsts.add(eng.tokens_of(rid)[0])
+        assert eng.prefix_hits == 13
+        assert len(firsts) > 1, firsts
+    finally:
+        eng.ctx.close()
+
+
+def _cold_tokens(prompt: str, n: int) -> list[int]:
+    from bwr.engine.mlx_engine import MLXEngine
+
+    eng = MLXEngine(MODEL_PATH, EngineConfig(n_ctx=4096))
+    try:
+        rid = eng.add_request(prompt, RequestParams(temp=0.0, max_tokens=n, stop_at_eog=False))
+        list(eng.drain())
+        return list(eng.tokens_of(rid))
+    finally:
+        eng.ctx.close()
+
+
+def test_a_prompt_that_extends_a_stored_one_prefills_only_the_new_part() -> None:
+    """Partial hit: the stored cache covers a prefix of the new prompt, so
+    only the remainder is prefilled. Output must match a cold prefill."""
+    from bwr.engine.mlx_engine import MLXEngine
+
+    base = "Count: " + " ".join(str(i % 10) for i in range(300))
+    longer = base + " Now continue the count:"
+    eng = MLXEngine(MODEL_PATH, EngineConfig(
+        n_ctx=4096, mlx_prefix_cache=True, prefix_cache_min_tokens=16,
+    ))
+    try:
+        greedy = RequestParams(temp=0.0, max_tokens=6, stop_at_eog=False)
+        rid = eng.add_request(base, greedy)
+        list(eng.drain())
+        n_base = len(eng.tokens_of(rid))
+        assert eng.prefix_misses == 1 and eng.prefix_partial_hits == 0
+        rid = eng.add_request(longer, greedy)
+        list(eng.drain())
+        assert eng.prefix_partial_hits == 1
+        # The finished first request stored prompt + its answer, which is
+        # the longest stored prefix of `longer` only if the answer happens
+        # to match -- it does not here, so the match is the base prompt.
+        assert eng.prefix_hit_tokens >= len(eng.ctx.tokenize(base)) if hasattr(eng.ctx, "tokenize") else True
+        assert list(eng.tokens_of(rid)) == _cold_tokens(longer, 6)
+    finally:
+        eng.ctx.close()
+
+
+def test_the_next_chat_turn_extends_the_finished_conversation() -> None:
+    """A finished request stores its cache under prompt + answer. A prompt
+    that continues that exact sequence (the next turn) is a partial hit
+    covering the whole previous conversation."""
+    from bwr.engine.mlx_engine import MLXEngine
+
+    base = "Count: " + " ".join(str(i % 10) for i in range(300))
+    eng = MLXEngine(MODEL_PATH, EngineConfig(
+        n_ctx=4096, mlx_prefix_cache=True, prefix_cache_min_tokens=16,
+    ))
+    try:
+        rid = eng.add_request(base, RequestParams(temp=0.0, max_tokens=8, stop_at_eog=False))
+        list(eng.drain())
+        answer = list(eng.tokens_of(rid))
+        prompt_ids = list(eng._tokenizer.encode(base))
+        conversation = prompt_ids + answer
+        assert tuple(conversation) in eng._prefix, "retire did not store the conversation"
+        extra = list(eng._tokenizer.encode(" and then some more"))
+        rid = eng.add_request(conversation + extra, RequestParams(temp=0.0, max_tokens=4, stop_at_eog=False))
+        list(eng.drain())
+        assert eng.prefix_partial_hits == 1
+        assert eng.prefix_hit_tokens == len(conversation)
+        assert list(eng.tokens_of(rid)) == _cold_tokens(conversation + extra, 4)
+    finally:
+        eng.ctx.close()

@@ -19,8 +19,9 @@ from __future__ import annotations
 import logging
 import time
 from collections import OrderedDict
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from copy import deepcopy
+from typing import Any
 
 from .batching import RequestState
 from .config import EngineConfig, RequestParams, StopSequenceFilter
@@ -95,13 +96,13 @@ class _MLXContext:
         eng = self._engine
         eng._states.clear()
         eng._retired.clear()
-        eng._streams.clear()
         eng._caches.clear()
         eng._spec_tables.clear()
         eng._spec_ok.clear()
         eng._spec_stats.clear()
         eng._pending.clear()
         eng._batch_pending.clear()
+        eng._cache_tokens.clear()
         eng._mtp_caches.clear()
         eng._mtp_hidden.clear()
         eng._mtp = None
@@ -220,7 +221,6 @@ class MLXEngine:
             target = getattr(self._model, "language_model", self._model)
             self._mtp = _mtp_mod.MTPDraft(target, model_path, depth)
         self.ctx = _MLXContext(self)
-        self._streams: dict[int, Iterator] = {}
         self._stop_filters: dict[int, StopSequenceFilter] = {}
         self._states: dict[int, RequestState] = {}
         self._retired: dict[int, RequestState] = {}
@@ -258,8 +258,13 @@ class MLXEngine:
         # prefill's last logits row, so a hit replays deterministically.
         self._prefix: OrderedDict[tuple[int, ...], tuple[list, int]] = OrderedDict()
         self.prefix_hits = 0
+        self.prefix_partial_hits = 0
         self.prefix_hit_tokens = 0
         self.prefix_misses = 0
+        # Tokens each owned cache actually holds (prompt + every token fed
+        # since, including a lookahead's). The key an end-of-request prefix
+        # entry is stored under: what the next turn of a chat extends.
+        self._cache_tokens: dict[int, list[int]] = {}
         self._next_request_id = 0
 
     # --- helpers ------------------------------------------------------------
@@ -321,8 +326,10 @@ class MLXEngine:
         req.finished = True
         req.finish_reason = reason
         req.next_token = None
+        if reason != "error" and self.config.mlx_prefix_cache:
+            self._prefix_insert_final(req)
+        self._cache_tokens.pop(req.request_id, None)
         self._stop_filters.pop(req.request_id, None)
-        self._streams.pop(req.request_id, None)
         self._spec_tables.pop(req.request_id, None)
         self._caches.pop(req.request_id, None)
         self._pending.pop(req.request_id, None)
@@ -439,7 +446,7 @@ class MLXEngine:
         # speculation is on; the MTP head sources its own drafts.
         self._spec_ok[request_id] = True
         self._spec_stats[request_id] = [0, 0, 0]
-        if self.config.speculative and self._mtp is None:
+        if self.config.speculative and self._mtp is None and rp.temp <= 0:
             table = NgramTable()
             table.update_stream(tokens)
             self._spec_tables[request_id] = table
@@ -461,18 +468,6 @@ class MLXEngine:
             temp=params.temp, top_p=params.top_p, top_k=params.top_k
         )
 
-    def _start(self, req: RequestState) -> None:
-        """Create the mlx generator on first step (needs the live request)."""
-        from mlx_lm import stream_generate
-
-        self._streams[req.request_id] = stream_generate(
-            self._model,
-            self._tokenizer,
-            prompt=req.prompt,
-            max_tokens=req.params.max_tokens,
-            sampler=self._sampler_for(req.params),
-        )
-
     def step(self) -> list[StepOutput]:
         """Advance every in-flight request by one step (one token, or one
         verify round for speculating requests)."""
@@ -483,38 +478,19 @@ class MLXEngine:
         for req in list(self._states.values()):
             if req.finished:
                 continue
-            if self._use_manual(req):
-                if req.request_id not in self._caches:
-                    outputs.extend(self._start_spec(req))
-                    if req.finished:
-                        continue
-                outputs.extend(self._verify(req))
-            else:
-                outputs.extend(self._step_stream(req))
+            if req.request_id not in self._caches:
+                outputs.extend(self._start_spec(req))
+                if req.finished:
+                    continue
+            outputs.extend(self._verify(req))
         return outputs
 
-    def _use_manual(self, req: RequestState) -> bool:
-        """Manual-loop ownership is sticky: once a request owns a cache it
-        stays manual. Falling back to the stream path would restart
-        generation from the prompt (a fresh generator knows nothing of
-        emitted tokens), so fallback only ever disables DRAFTING, never the
-        loop.
-
-        Every greedy request takes the manual loop. It used to be the
-        price of speculation, quantized KV or the prefix cache, and the
-        stream path was the fast default; with its lookahead (see
-        _lookahead) the loop outruns mlx-lm's stream_generate by ~5% on a
-        27B, so greedy decoding has no reason to pay for a generator.
-        Sampled requests (temp > 0) still take the stream path, which owns
-        the sampler, unless a quantized KV setting needs the owned cache
-        (the stream path builds its own f16 cache internally)."""
-        if req.request_id in self._caches:
-            return True
-        if self.config.mlx_kv_bits is not None:
-            return True
-        if self.config.mlx_prefix_cache:
-            return True
-        return req.params.temp <= 0
+    # Every request runs the manual loop (`_start_spec` + `_verify`). It used
+    # to be the price of speculation, quantized KV or the prefix cache, with
+    # mlx-lm's stream_generate as the fast default; with its lookahead (see
+    # _lookahead) the loop outruns the generator by ~5% on a 27B, greedy or
+    # sampled, so the generator path is gone. Sampling is per request and
+    # lazy (`_sample_row_lazy`), drafting is greedy-only.
 
     def _prefix_lookup(self, req: RequestState):
         """Shared exact-prefix probe: `(cache_copy, base, entry)` or None.
@@ -526,17 +502,41 @@ class MLXEngine:
         """
         key = tuple(req.prompt)
         entry = self._prefix.get(key)
-        if entry is None:
+        if entry is not None:
+            self._prefix.move_to_end(key)
+            self.prefix_hits += 1
+            self.prefix_hit_tokens += len(req.prompt)
+            return deepcopy(entry[0]), self._first_token(req, entry), entry, len(key)
+        # No exact entry: the longest stored sequence this prompt EXTENDS.
+        # A chat turn is the previous prompt + the answer + the new message,
+        # and the previous request stored exactly that cache when it
+        # retired; only the new message needs prefilling. Only extension,
+        # never truncation: the recurrent layers' state cannot be rewound
+        # to an earlier position.
+        best = None
+        for stored in self._prefix:
+            n = len(stored)
+            if n < len(key) and key[:n] == stored and (best is None or n > len(best)):
+                best = stored
+        if best is None:
             self.prefix_misses += 1
             return None
-        self._prefix.move_to_end(key)
+        entry = self._prefix[best]
+        self._prefix.move_to_end(best)
         self.prefix_hits += 1
-        # The cache is exact-match, so a hit covers the WHOLE prompt: the
-        # token count reused is len(prompt), not some matched prefix of it.
-        # /admin/api/stats reports cache efficiency in tokens, which a hit
-        # COUNT cannot produce.
-        self.prefix_hit_tokens += len(req.prompt)
-        return deepcopy(entry[0]), entry[1], entry
+        self.prefix_partial_hits += 1
+        self.prefix_hit_tokens += len(best)
+        return deepcopy(entry[0]), None, entry, len(best)
+
+    def _first_token(self, req: RequestState, entry: tuple) -> int:
+        """A hit's first token: the stored argmax for a greedy request, a
+        fresh draw from the stored last-position logits for a sampled one.
+        Replaying the argmax into a sampled request would hand every repeat
+        of a prompt the same first token, which is not what temp > 0 asked
+        for; the KV is sampling-independent and is what the hit reuses."""
+        if req.params.temp <= 0:
+            return entry[1]
+        return self._sample_row(req, entry[4])
 
     def _prefix_hit(self, req: RequestState) -> list[StepOutput] | None:
         """Exact-prefix hit: install the snapshot and replay its base token.
@@ -548,34 +548,79 @@ class MLXEngine:
         found = self._prefix_lookup(req)
         if found is None:
             return None
-        cache, base, entry = found
-        self._caches[req.request_id] = cache
+        cache, base, entry, matched = found
+        rid = req.request_id
+        self._caches[rid] = cache
+        self._cache_tokens[rid] = list(req.prompt[:matched])
         if self._mtp is not None:
             # The head cache is part of the snapshot: restoring only the trunk
             # would leave the head cold and silently halve draft quality
             # (0.906 -> 0.479 at depth 1). hidden rows are immutable mx
             # arrays, so only the cache needs copying.
-            self._mtp_caches[req.request_id] = deepcopy(entry[2])
-            self._mtp_hidden[req.request_id] = entry[3]
+            self._mtp_caches[rid] = deepcopy(entry[2])
+            self._mtp_hidden[rid] = entry[3]
+        if base is None:
+            # Partial hit: prefill only what this prompt adds, then store
+            # the whole prompt so the next extension starts from here.
+            logits = self._prefill_owned(rid, req.prompt, start=matched)
+            base = self._sample_row(req, logits[0, -1])
+            self._prefix_insert(req, self._caches[rid], base, logits[0, -1])
         req.next_token = base
         return [self._feed(req, base, self._tokenizer.decode([base]))]
 
-    def _prefix_insert(self, req: RequestState, cache: list, base: int) -> None:
-        """Snapshot a freshly prefilled prompt for future exact repeats."""
+    def _prefix_insert(
+        self, req: RequestState, cache: list, base: int, last_logits: Any
+    ) -> None:
+        """Snapshot a freshly prefilled prompt for future exact repeats.
+        `last_logits` is the final position's logits row, kept so a sampled
+        repeat can draw its own first token (see _first_token)."""
         if len(req.prompt) < self.config.prefix_cache_min_tokens:
             return
-        key = tuple(req.prompt)
+        self._prefix_store(tuple(req.prompt), req.request_id, cache, base, last_logits)
+
+    def _prefix_store(
+        self, key: tuple[int, ...], rid: int, cache: list, base: int | None,
+        last_logits: Any, hidden: Any = None,
+    ) -> None:
         if key in self._prefix:
+            self._prefix.move_to_end(key)
             return
-        mcache = self._mtp_caches.get(req.request_id)
+        # A shorter entry this one extends is NOT redundant: an exact repeat
+        # of that prompt still needs it, because the longer cache cannot be
+        # cut back (recurrent state). LRU eviction by size decides.
+        mcache = self._mtp_caches.get(rid)
         self._prefix[key] = (
             deepcopy(cache),
             base,
             deepcopy(mcache) if mcache is not None else None,
-            self._mtp_hidden.get(req.request_id),
+            self._mtp_hidden.get(rid) if hidden is None else hidden,
+            last_logits,
         )
         while len(self._prefix) > max(1, self.config.mlx_prefix_cache_size):
             self._prefix.popitem(last=False)
+
+    def _prefix_insert_final(self, req: RequestState) -> None:
+        """At retire: store the cache as it stands, under the tokens it
+        holds (prompt + answer + the end token, if one was fed). That is the
+        sequence the next turn of a chat extends, so the next prompt is a
+        partial hit that prefills only the new message. Needs the lookahead
+        that fed the last token: its logits are the entry's last row."""
+        rid = req.request_id
+        cache = self._caches.get(rid)
+        tokens = self._cache_tokens.get(rid)
+        pending = self._pending.get(rid)
+        if cache is None or tokens is None or pending is None:
+            return
+        if len(tokens) < self.config.prefix_cache_min_tokens:
+            return
+        nxt, logits, hidden = pending
+        key = tuple(int(t.item()) if not isinstance(t, int) else t for t in tokens)
+        if self._mtp is not None:
+            # The head pairs a token only when the step after it runs; the
+            # last fed token never got its step, so pair it now, and the
+            # entry's hidden row is the lookahead's (the last position).
+            self._mtp.accept(self._mtp_caches[rid], self._mtp_hidden[rid], [key[-1]])
+        self._prefix_store(key, rid, cache, int(nxt.item()), logits[0, -1], hidden)
 
     def _snapshot_cache(self, cache: list) -> list:
         """A rewind point for one verify round, at effectively zero cost.
@@ -609,8 +654,15 @@ class MLXEngine:
             else:
                 c.offset = val
 
-    def _prefill_owned(self, rid: int, tokens: Sequence[int]) -> object:
-        """Prefill `tokens` into a fresh owned cache; return the last logits.
+    def _prefill_owned(
+        self, rid: int, tokens: Sequence[int], *, start: int = 0
+    ) -> object:
+        """Prefill `tokens` into an owned cache; return the last logits.
+
+        `start > 0` continues the cache already installed for `rid` (a
+        partial prefix hit) from that position; the MTP head, if any, is
+        continued the same way, pairing its stored last hidden row with
+        `tokens[start]` first.
 
         Shared by `_start_spec` and `_refill` so the trunk cache and the MTP
         head cache can never drift apart -- every rebuild of one rebuilds the
@@ -624,11 +676,17 @@ class MLXEngine:
         pair as position `len(tokens)-1` and trims it back.
         """
         mx = _mx()
-        cache = self._make_cache()
         mtp = self._mtp
-        mcache = mtp.make_cache() if mtp is not None else None
+        if start:
+            cache = self._caches[rid]
+            mcache = self._mtp_caches.get(rid)
+            if mtp is not None:
+                mtp.accept(mcache, self._mtp_hidden[rid], [tokens[start]])
+        else:
+            cache = self._make_cache()
+            mcache = mtp.make_cache() if mtp is not None else None
         logits = hidden = None
-        for i in range(0, len(tokens), _PREFILL_CHUNK):
+        for i in range(start, len(tokens), _PREFILL_CHUNK):
             chunk = list(tokens[i : i + _PREFILL_CHUNK])
             if mtp is None:
                 logits = self._model(mx.array(chunk)[None], cache=cache)
@@ -641,6 +699,7 @@ class MLXEngine:
                 mtp.accept(mcache, hidden[:, : len(nxt), :], nxt)
         mx.eval(logits)
         self._caches[rid] = cache
+        self._cache_tokens[rid] = list(tokens)
         if mtp is not None:
             self._mtp_caches[rid] = mcache
             self._mtp_hidden[rid] = hidden[:, -1:, :]
@@ -662,14 +721,13 @@ class MLXEngine:
                 if hit is not None:
                     self._lookahead(req, req.next_token)
                     return hit
-            mx = _mx()
             logits = self._prefill_owned(req.request_id, req.prompt)
             cache = self._caches[req.request_id]
-            base = int(mx.argmax(logits[0, -1]).item())
+            base = self._sample_row(req, logits[0, -1])
             req.next_token = base
             if self.config.mlx_prefix_cache:
                 # Snapshot covers exactly the prompt: before the lookahead.
-                self._prefix_insert(req, cache, base)
+                self._prefix_insert(req, cache, base, logits[0, -1])
             self._lookahead(req, base)
             return [self._feed(req, base, self._tokenizer.decode([base]))]
         except BaseException:  # noqa: BLE001 - re-raised; must retire slot on any failure
@@ -726,14 +784,20 @@ class MLXEngine:
         # gone (measured: 78 ms/step against the stream path's 69).
         tok = token if isinstance(token, mx.array) else mx.array(token)
         rid = req.request_id
+        fed = self._cache_tokens.get(rid)
+        if fed is not None:
+            # Lazy tokens are appended as arrays and resolved when the key
+            # is built (see _prefix_insert_final); forcing here would undo
+            # the pipelining this lookahead exists for.
+            fed.append(tok)
         if self._mtp is None:
             logits = self._model(tok.reshape(1, 1), cache=self._caches[rid])
-            nxt = mx.argmax(logits[0, -1])
+            nxt = self._sample_row_lazy(req, logits[0, -1])
             mx.async_eval(nxt, logits)
             self._pending[rid] = (nxt, logits, None)
             return
         logits, hidden = self._mtp.trunk_forward(tok.reshape(1, 1), self._caches[rid])
-        nxt = mx.argmax(logits[0, -1])
+        nxt = self._sample_row_lazy(req, logits[0, -1])
         head_state = [a for a in self._mtp_caches[rid][0].state if a is not None]
         mx.async_eval(nxt, logits, hidden, *head_state)
         self._pending[rid] = (nxt, logits, hidden)
@@ -759,7 +823,8 @@ class MLXEngine:
         # decode but through the owned, possibly quantized, cache).
         # The gate is asked once per step, whatever the draft source: an
         # MTP head's rows cost the forward exactly what n-gram rows do.
-        gate_open = self.spec_gate.wants_drafts()
+        greedy = req.params.temp <= 0
+        gate_open = greedy and self.spec_gate.wants_drafts()
         max_drafts = (
             self.config.spec_max_drafts
             if (
@@ -835,7 +900,7 @@ class MLXEngine:
             # build of 64 layers every step.
             if pending is None:
                 logits = self._model(mx.array(rows)[None], cache=self._caches[rid])
-                tok_arr = mx.argmax(logits[0, -1])
+                tok_arr = self._sample_row_lazy(req, logits[0, -1])
             else:
                 logits, tok_arr = pending, pending_tok
             self._lookahead(req, tok_arr)
@@ -995,7 +1060,17 @@ class MLXEngine:
                     # prefill's argmax, so replay stays deterministic.
                     found = self._prefix_lookup(req)
                     if found is not None:
-                        cache, token, _entry = found
+                        cache, token, _entry, matched = found
+                        if token is None:
+                            # Partial hit: extend the snapshot with what this
+                            # prompt adds, on its own before the join.
+                            logits = None
+                            for i in range(matched, len(req.prompt), _PREFILL_CHUNK):
+                                chunk = req.prompt[i : i + _PREFILL_CHUNK]
+                                logits = self._model(mx.array(chunk)[None], cache=cache)
+                            mx.eval(logits)
+                            token = self._sample_row(req, logits[0, -1])
+                            self._prefix_insert(req, cache, token, logits[0, -1])
                 if cache is None:
                     cache = self._make_cache()
                     logits = None
@@ -1008,7 +1083,7 @@ class MLXEngine:
                         # Snapshot BEFORE the join: once merged the cache is
                         # batched, and a batched snapshot could not be
                         # restored into a different batch later.
-                        self._prefix_insert(req, cache, token)
+                        self._prefix_insert(req, cache, token, logits[0, -1])
                 batch.join(req.request_id, cache)
                 outputs.append(
                     self._feed(req, token, self._tokenizer.decode([token]))
@@ -1091,31 +1166,6 @@ class MLXEngine:
             sampler = self._sampler_for(req.params)
             return int(sampler(row[None]).item())
         return int(mx.argmax(row).item())
-
-    def _step_stream(self, req: RequestState) -> list[StepOutput]:
-        """Advance one request down the plain generator path."""
-        stream = self._streams.get(req.request_id)
-        if stream is None:
-            self._start(req)
-            stream = self._streams[req.request_id]
-        try:
-            chunk = next(stream)
-        except StopIteration:
-            # The generator ends early only at EOS (it swallows the token:
-            # stream_generate breaks before yielding it), otherwise it runs
-            # to max_tokens and our cap rule retires first. So an incomplete
-            # count here IS a natural end, not an error.
-            if req.n_generated >= req.params.max_tokens:
-                return [self._retire(req, "length")]
-            return [self._retire(req, "eog")]
-        outputs = [self._feed(req, chunk.token, chunk.text)]
-        if chunk.finish_reason in ("length", "stop") and not req.finished:
-            # Belt-and-braces: our rules below retire first in every
-            # reachable case (max_tokens == mlx's cap, EOS in our EOG
-            # set); this only fires if mlx stops early for another
-            # reason, and hanging would be worse than a wrong reason.
-            outputs.append(self._retire(req, "length"))
-        return outputs
 
     def _feed(self, req: RequestState, token: int, piece: str) -> StepOutput:
         """Account for one generated token: EOG, then stop, then cap."""
