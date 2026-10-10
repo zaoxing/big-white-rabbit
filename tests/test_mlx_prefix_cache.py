@@ -154,7 +154,6 @@ def test_a_prompt_that_extends_a_stored_one_prefills_only_the_new_part() -> None
         greedy = RequestParams(temp=0.0, max_tokens=6, stop_at_eog=False)
         rid = eng.add_request(base, greedy)
         list(eng.drain())
-        n_base = len(eng.tokens_of(rid))
         assert eng.prefix_misses == 1 and eng.prefix_partial_hits == 0
         rid = eng.add_request(longer, greedy)
         list(eng.drain())
