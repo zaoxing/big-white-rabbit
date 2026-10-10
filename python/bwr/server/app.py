@@ -19,6 +19,7 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 
@@ -257,6 +258,34 @@ def _tool_call_delta(call: ParsedToolCall) -> ToolCallDelta:
     )
 
 
+def speculation_summary(engine: Any) -> dict[str, Any] | None:
+    """What speculation is doing on this engine, for /health.
+
+    None for an engine without the counters. The gate block says whether
+    drafts are currently paying and what each mode measures, which is the
+    only way to tell "speculation is on but the gate has it parked" from
+    "speculation is off" without reading engine internals.
+    """
+    if not hasattr(engine, "spec_drafted"):
+        return None
+    out: dict[str, Any] = {
+        "drafted": engine.spec_drafted,
+        "accepted": engine.spec_accepted,
+        "acceptance_rate": engine.spec_acceptance_rate,
+        "recomputes": getattr(engine, "spec_recomputes", 0),
+        "fallbacks": getattr(engine, "spec_fallbacks", 0),
+    }
+    gate = getattr(engine, "spec_gate", None)
+    if gate is not None:
+        out["gate"] = {
+            "drafting": gate.drafting,
+            "draft_tps": gate.draft_tps,
+            "plain_tps": gate.plain_tps,
+            "probes": gate.probes,
+        }
+    return out
+
+
 def build_app(
     model: Model | None,
     config: EngineConfig | None = None,
@@ -467,6 +496,9 @@ def build_app(
                 "misses": hotlist.misses,
                 "hit_rate": hotlist.hit_rate(),
             }
+        spec = speculation_summary(engine)
+        if spec is not None:
+            body["speculation"] = spec
         return body
 
     @app.get("/v1/models")

@@ -100,12 +100,19 @@ def bench_one(
         dt = time.monotonic() - t0
         n = len(eng.tokens_of(rid))
         rates.append(n / dt if dt > 0 else 0.0)
+    gate = getattr(eng, "spec_gate", None)
     if backend == "mlx":
         eng.ctx.close()
     return {
         "depth": depth,
         "tok_s": statistics.median(rates),
         "accept": eng.spec_acceptance_rate,
+        # MLX only: where the throughput gate ended up. "plain" on a
+        # drafting row means the drafts were measured and parked, which
+        # is why that row's tok/s is near the baseline, not a mystery.
+        "gate": None if gate is None or depth is None else (
+            "drafting" if gate.drafting else "plain"
+        ),
     }
 
 
@@ -121,11 +128,14 @@ def pick_winner(rows: list[dict]) -> dict | None:
 
 
 def render(rows: list[dict], winner: dict | None) -> str:
-    lines = [f"{'depth':<12}{'tok/s':>10}{'accept':>10}"]
+    lines = [f"{'depth':<12}{'tok/s':>10}{'accept':>10}{'gate':>10}"]
     for r in rows:
         acc = "-" if r["accept"] is None else f"{r['accept']:.0%}"
+        gate = r.get("gate") or "-"
         mark = "  <--" if winner is r else ""
-        lines.append(f"{depth_name(r['depth']):<12}{r['tok_s']:>10.1f}{acc:>10}{mark}")
+        lines.append(
+            f"{depth_name(r['depth']):<12}{r['tok_s']:>10.1f}{acc:>10}{gate:>10}{mark}"
+        )
     if winner is None:
         lines.append("verdict: keep baseline (nothing beat AR past the 5% noise band)")
     elif winner["depth"] is None:
