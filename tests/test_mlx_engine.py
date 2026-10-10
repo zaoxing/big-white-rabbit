@@ -340,7 +340,8 @@ def test_manual_loop_cache_for_a_model_without_make_cache() -> None:
     from mlx_lm.models.cache import KVCache
 
     class _PlainAttentionModel:
-        layers = [object(), object(), object()]
+        def __init__(self):
+            self.layers = [object(), object(), object()]
 
     eng = MLXEngine.__new__(MLXEngine)
     eng._model = _PlainAttentionModel()
