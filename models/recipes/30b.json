@@ -1,5 +1,5 @@
 {
-  "comment": "30B-A3B MoE qwen3moe 48L 128 experts — Metal ~58 tok/s vs MLX 15.97 (3.6x); tuned 2026-09-12 sweep",
+  "comment": "30B-A3B MoE qwen3moe 48L 128 experts — Metal ~58 tok/s; MLX fallback 56.1 (2026-10-10, greedy manual loop; the old 15.97 was the stream path); tuned 2026-09-12 sweep",
   "model": "models/Qwen3-30B-A3B-Q4_K_M.gguf",
   "engine": "metal",
   "n_ctx": 8192,
@@ -17,5 +17,14 @@
   "flash_attn": true,
   "mlx_fallback": "models/Qwen3-30B-A3B-4bit",
   "mlx_engine": "mlx",
-  "bench": {"engine":"metal","tok_s":58.2,"vs_mlx":15.97,"prefix_cache_first":"123.22s","prefix_cache_hit":"0.62s","spec_rep":"+7.5% drafts=4 accept=70%","notes":"flash_attn on is +20% vs off; n_threads_batch!=0 is -7%; n_threads 10 was +1% (noise) so 0=auto for portability; geometry deltas otherwise within +-5% noise; drafts=8 collapses (accept 15%)"}
+  "bench": {
+    "engine": "metal",
+    "tok_s": 58.2,
+    "vs_mlx": 15.97,
+    "prefix_cache_first": "123.22s",
+    "prefix_cache_hit": "0.62s",
+    "spec_rep": "+7.5% drafts=4 accept=70%",
+    "notes": "flash_attn on is +20% vs off; n_threads_batch!=0 is -7%; n_threads 10 was +1% (noise) so 0=auto for portability; geometry deltas otherwise within +-5% noise; drafts=8 collapses (accept 15%)",
+    "vs_mlx_2026_10_10": 56.1
+  }
 }

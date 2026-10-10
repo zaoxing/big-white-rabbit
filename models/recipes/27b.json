@@ -1,5 +1,5 @@
 {
-  "comment": "27B dense qwen35 hybrid, uncensored 4-bit (g64, 15.0 GiB) \u2014 the FASTEST local 4-bit 27B measured T19: 15.7 tok/s decode-only vs MTPLX-Optimized-Speed 14.4 (g32, 19.3 GiB), order-controlled. Defaults are the fast ones: n_ctx 8192 (no decode cost vs 4096) and f16 KV (mlx_kv_bits=8 costs ~4%, buys headroom not speed). mlx_prefix_cache ON: ~8% decode tax, but a 2308-tok repeat goes 28.1s -> 71.6ms TTFT (399x), net win below ~5000 output tokens; needs prompts over prefix_cache_min_tokens (256). mlx_batch ON: concurrent requests decode in one step. Aggregate throughput only ~1.16x at 4 concurrent (MLX's quantized kernel does not amortise rows), but the last request's first token arrives 5x sooner (11.9s -> 2.3s); marginal cost on top of prefix_cache is ~2%, inside noise. Composes with mlx_prefix_cache; forces f16 KV (no batched QuantizedKVCache upstream). No Metal fallback: Qwen3.8-27B-Q4_K_M.gguf was removed, and the old 'MLX 13.2 vs Metal 9.85' comparison is no longer reproducible here. spec/MTP stay OFF: both measured SLOWER here (row-scaling, SPEC-mlx-mtp-draft.md). n_seq_max 4 is advisory on MLX (not gated) but keeps /health's free_seq_slots honest.",
+  "comment": "27B dense qwen35 hybrid, uncensored 4-bit (g64, 15.0 GiB) — the FASTEST local 4-bit 27B measured T19: 15.7 tok/s decode-only vs MTPLX-Optimized-Speed 14.4 (g32, 19.3 GiB), order-controlled. Defaults are the fast ones: n_ctx 8192 (no decode cost vs 4096) and f16 KV (mlx_kv_bits=8 costs ~4%, buys headroom not speed). mlx_prefix_cache ON: ~8% decode tax, but a 2308-tok repeat goes 28.1s -> 71.6ms TTFT (399x), net win below ~5000 output tokens; needs prompts over prefix_cache_min_tokens (256). mlx_batch ON: concurrent requests decode in one step. Aggregate throughput only ~1.16x at 4 concurrent (MLX's quantized kernel does not amortise rows), but the last request's first token arrives 5x sooner (11.9s -> 2.3s); marginal cost on top of prefix_cache is ~2%, inside noise. Composes with mlx_prefix_cache; forces f16 KV (no batched QuantizedKVCache upstream). No Metal fallback: Qwen3.8-27B-Q4_K_M.gguf was removed, and the old 'MLX 13.2 vs Metal 9.85' comparison is no longer reproducible here. spec/MTP stay OFF: with the throughput gate (2026-10) both measure parity with plain decode here, never a win (row-scaling, SPEC-mlx-mtp-draft.md). n_seq_max 4 is advisory on MLX (not gated) but keeps /health's free_seq_slots honest.",
   "model": "models/Qwen3.8-27B-Uncensored-MLX-4bit/4-bit",
   "engine": "mlx",
   "n_ctx": 8192,
@@ -24,7 +24,12 @@
       "serialized_worst_ttft_s": 11.9
     },
     "prefix_cache_repeat_ttft_ms": 71.6,
-    "prefix_cache_cold_ttft_ms": 28570.0
+    "prefix_cache_cold_ttft_ms": 28570.0,
+    "greedy_manual_loop_2026_10_10": {
+      "prose_tok_s": 15.1,
+      "rep_tok_s": 13.1,
+      "protocol": "128 greedy tokens incl. prefill, 3 reps median, both orders; manual loop with lookahead is the greedy default now"
+    }
   },
   "mlx_batch": true,
   "served_model_name": "Qwen3.8-27B-Uncensored-4bit"
