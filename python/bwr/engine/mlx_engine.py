@@ -277,10 +277,17 @@ class MLXEngine:
         for full attention on qwen3_5) then swaps exact-type KVCache entries
         for QuantizedKVCache. Order is preserved positionally, which the
         model relies on (cache[i] belongs to layer i).
-        """
-        from mlx_lm.models.cache import KVCache, QuantizedKVCache
 
-        cache = self._model.make_cache()
+        Through mlx-lm's own builder, not `model.make_cache()` directly:
+        only hybrid models define that method, and a plain-attention one
+        (qwen3_moe, the 30B-A3B) relies on the builder's per-layer KVCache
+        default. The stream path always went through the builder; the
+        manual loop did not, which surfaced the day greedy requests moved
+        onto it.
+        """
+        from mlx_lm.models.cache import KVCache, QuantizedKVCache, make_prompt_cache
+
+        cache = make_prompt_cache(self._model)
         bits = getattr(self, "_kv_bits", self.config.mlx_kv_bits)
         if bits is None:
             return cache

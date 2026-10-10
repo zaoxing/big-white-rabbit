@@ -327,3 +327,23 @@ def test_thinking_disabled_by_default() -> None:
     )
     list(engine.drain())
     assert "<think>" not in engine.text_of(rid)
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("mlx_lm") is None, reason="mlx_lm not installed"
+)
+def test_manual_loop_cache_for_a_model_without_make_cache() -> None:
+    """Only hybrid models define make_cache; a plain-attention model (the
+    30B-A3B MoE) relies on mlx-lm's per-layer default. The stream path
+    always used the builder; the manual loop called the method directly
+    and broke every such model the day greedy requests moved onto it."""
+    from mlx_lm.models.cache import KVCache
+
+    class _PlainAttentionModel:
+        layers = [object(), object(), object()]
+
+    eng = MLXEngine.__new__(MLXEngine)
+    eng._model = _PlainAttentionModel()
+    eng.config = EngineConfig(engine="mlx")
+    cache = eng._make_cache()
+    assert len(cache) == 3 and all(type(c) is KVCache for c in cache)
