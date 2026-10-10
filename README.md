@@ -68,6 +68,7 @@ curl -L -o models/Qwen3-30B-A3B-Q4_K_M.gguf \
 # 4. Serve (default port 1919) — ready-to-use recipes
 bwr serve --recipe 27b   # 27B dense qwen35 hybrid uncensored 4bit: 15.7 tok/s decode, 15G, n_ctx 8192, prefix-cache + continuous batching on
 bwr serve --recipe 30b   # 30B-A3B MoE qwen3moe: Metal 58.2 tok/s (MLX fallback 56.1 since 2026-10), 4bit 17G, n_ctx 8192, prefix-cache 200× on 21k, spec +7.5% on rep
+bwr serve --recipe 30b-mlx   # the same MoE on MLX weights: 54-56 tok/s, 4 concurrent 72 tok/s aggregate, prefix-cache repeat 39 ms; composes with --model-dir pooling
 # or explicit:
 bwr serve -m models/Qwen3.8-27B-Uncensored-MLX-4bit/4-bit --engine mlx --ctx-size 8192 --mlx-prefix-cache --mlx-batch
 bwr serve -m models/Qwen3-30B-A3B-Q4_K_M.gguf --engine metal --ctx-size 8192 --n-seq-max 2 --kv-unified --prefix-cache --speculative
@@ -119,6 +120,7 @@ per-sequence `n_ctx_seq`. Pass `--kv-unified` to share one buffer instead. The M
 | Recipe | Model | Engine | `n_ctx` | `tok/s` | Notes |
 |---|---|---|---|---|---|
 | `bwr serve --recipe 27b` | `Qwen3.8-27B-Uncensored-MLX-4bit/4-bit` `qwen35` hybrid 64L `248320` | `mlx` | `8192` `n_seq_max=4` | `15.7` | `4bit g64 15G`, fastest local 4-bit 27B (vs `MTPLX-Optimized-Speed` `14.4`); decode-only timing. `mlx_prefix_cache` on (2308-tok repeat `28.1s→71.6ms`, ~8% decode tax); `mlx_batch` on (4 concurrent: worst TTFT `11.9s→2.3s`); `spec`/`MTP` off — with the throughput gate both sit at parity with plain decode on this model (2026-10-10), so neither earns its rows. No Metal fallback: that GGUF was removed |
+| `bwr serve --recipe 30b-mlx` | `Qwen3-30B-A3B-4bit` `qwen3moe` 48L | `mlx` | `8192` `n_seq_max=4` | `54–56` | `4bit 17G`; prefill `420–470 tok/s`; `mlx_prefix_cache` on (`1329`-tok repeat `2.9s→39ms`, no decode cost); `mlx_batch` on (4 concurrent `72 tok/s` aggregate, worst TTFT `1.4s`); `spec` off (gate parks it: accept `0.30` at d4), KV f16 (`8-bit` `−14%` and not output-identical). Swept 2026-10-10, each knob byte-identical to baseline |
 | `bwr serve --recipe 30b` | `Qwen3-30B-A3B-Q4_K_M.gguf` `qwen3moe` 48L `151936` | `metal` | `8192` `n_seq_max=2 kv_unified` | `58.2` | `MLX fallback` `models/Qwen3-30B-A3B-4bit` now `56.1` (2026-10-10, 128 greedy tokens incl. prefill; the old `15.97` was mlx-lm's stream path, which greedy requests no longer take); `spec +7.5%` rep (`drafts=4`), `prefix-cache 123.22s→0.62s 200×` on `21k` |
 
 Recipes are `models/recipes/27b.json` / `30b.json` (JSON `EngineConfig` + `model` + `bench`); `bwr serve --recipe 27b --port 1919` or `bwr serve --recipe models/recipes/30b.json` (explicit `CLI` wins; `--receipt` is a deprecated alias). Q4_K_M remains the 30B recipe: Q8_0 fits at 8192 (30.25 GiB) but measured 34% slower decode on this Mac (llama-bench `tg128` 61.2→45.45; `bwr generate` 58.5→41.0 tok/s).

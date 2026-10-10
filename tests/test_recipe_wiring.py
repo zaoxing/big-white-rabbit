@@ -57,6 +57,20 @@ def test_30b_recipe_forwards_tuned_knobs(monkeypatch, rootdir):
     assert kw["flash_attn"] is True
 
 
+def test_30b_mlx_recipe_forwards_the_swept_knobs(monkeypatch, rootdir):
+    """The MoE on MLX weights: prefix cache and batching on (both measured
+    free on decode), speculation off (the gate parks it), KV f16 (8-bit
+    cost 14% and changed the output)."""
+    rc, kw = _serve_kwargs(monkeypatch, ["--recipe", "30b-mlx"])
+    assert rc == 0
+    assert kw["engine"] == "mlx"
+    assert kw["model"] == "models/Qwen3-30B-A3B-4bit"
+    assert kw["n_ctx"] == 8192 and kw["n_seq_max"] == 4
+    assert kw["mlx_prefix_cache"] is True and kw["mlx_batch"] is True
+    assert kw["speculative"] is False
+    assert kw.get("mlx_kv_bits") is None
+
+
 def test_27b_recipe_forwards_mlx_defaults(monkeypatch, rootdir):
     rc, kw = _serve_kwargs(monkeypatch, ["--recipe", "27b"])
     assert rc == 0

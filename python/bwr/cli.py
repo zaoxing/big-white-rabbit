@@ -170,7 +170,7 @@ def _cmd_serve(argv: list[str]) -> int:
     )
     _add_model_args(ap, required=False)
     ap.add_argument("--recipe", default=None, metavar="PATH|27b|30b",
-                    help="ready-to-use recipe: path to JSON or shorthand '27b' (MLX 15.7 tok/s decode-only) / '30b' (Metal 58.2 tok/s, prefix-cache 200× on 21k); see models/recipes/")
+                    help="ready-to-use recipe: path to JSON or shorthand '27b' (MLX 15.7 tok/s decode-only) / '30b' (Metal 58.2 tok/s, prefix-cache 200× on 21k) / '30b-mlx' (the same MoE on MLX weights); see models/recipes/")
     ap.add_argument("--receipt", default=None, metavar="PATH|27b|30b",
                     help=argparse.SUPPRESS)  # deprecated alias for --recipe
     ap.add_argument("--host", default="127.0.0.1")
@@ -263,6 +263,8 @@ def _cmd_serve(argv: list[str]) -> int:
             recipe_path = "models/recipes/27b.json"
         elif recipe_path in ("30b", "30B", "qwen30b", "30", "moe"):
             recipe_path = "models/recipes/30b.json"
+        elif recipe_path in ("30b-mlx", "30B-mlx", "30bmlx", "moe-mlx"):
+            recipe_path = "models/recipes/30b-mlx.json"
         p = pathlib.Path(recipe_path)
         if not p.exists():
             print(f"bwr: recipe {recipe_arg!r} not found at {p}", file=sys.stderr)

@@ -1,0 +1,68 @@
+{
+  "comment": "30B-A3B MoE qwen3moe 48L 128 experts on MLX weights (4-bit, 17G). Swept 2026-10-10 on M1 Max 64 GB, 128 greedy tokens incl. prefill, each knob its own session, baseline repeated last as drift control (54.2 -> 56.0 prose, so +-2% is noise): baseline prose 54-56 / rep 52.6; prefill 420-470 tok/s (1329-tok prompt in 2.9-3.2 s). mlx_prefix_cache ON: no decode cost (56.4 / 53.0), 1329-tok repeat TTFT 2.9 s -> 39 ms (23 ms under batching). mlx_batch ON: single request at parity (55.9 / 51.6), 4 concurrent 72 tok/s aggregate (1.3x) with worst TTFT 1.4 s. Speculation OFF: the throughput gate parks n-gram drafts at d4 (acc 0.30) and d2 (acc 0.50) on this model, so it is neutral, not a win. KV stays f16: mlx_kv_bits=8 cost 14% (48.1 / 45.7) AND changed the prose output. Every kept knob is byte-identical to the baseline on both prompts. Versus the Metal GGUF recipe (30b.json, 58.2 decode-only in Sep): decode within noise, prefix cache repeat 39 ms vs 620 ms, and this one composes with the pool and continuous batching.",
+  "model": "models/Qwen3-30B-A3B-4bit",
+  "engine": "mlx",
+  "n_ctx": 8192,
+  "n_batch": 512,
+  "n_seq_max": 4,
+  "speculative": false,
+  "prefix_cache": false,
+  "kv_unified": false,
+  "flash_attn": true,
+  "mlx_prefix_cache": true,
+  "mlx_prefix_cache_size": 2,
+  "mlx_batch": true,
+  "bench": {
+    "engine": "mlx",
+    "date": "2026-10-10",
+    "protocol": "128 greedy tokens incl. prefill, median of 3 (prose) / 2 (rep); one session per knob; drift control last",
+    "baseline_prose_tok_s": [
+      54.2,
+      56.0
+    ],
+    "baseline_rep_tok_s": 52.6,
+    "prefill_tok_s": [
+      421,
+      467
+    ],
+    "prefix_cache": {
+      "decode_prose": 56.4,
+      "decode_rep": 53.0,
+      "repeat_ttft_ms": 39,
+      "cold_ttft_ms": 2867,
+      "prompt_tokens": 1329
+    },
+    "batch": {
+      "single_prose": 55.9,
+      "single_rep": 51.6,
+      "concurrent_4_agg_tok_s": [
+        71.7,
+        72.4
+      ],
+      "concurrent_4_worst_ttft_ms": [
+        1362,
+        1434
+      ],
+      "repeat_ttft_ms_with_prefix_cache": 23
+    },
+    "speculative_gated": {
+      "d4": {
+        "prose": 54.8,
+        "accept": 0.3,
+        "gate": "plain"
+      },
+      "d2": {
+        "prose": 54.9,
+        "accept": 0.5,
+        "gate": "plain"
+      }
+    },
+    "mlx_kv_bits_8": {
+      "prose": 48.1,
+      "rep": 45.7,
+      "identical_to_baseline": false
+    },
+    "vs_metal_30b_recipe_decode_only_sep": 58.2
+  },
+  "served_model_name": "Qwen3-30B-A3B-4bit"
+}
