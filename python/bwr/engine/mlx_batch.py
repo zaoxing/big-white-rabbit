@@ -124,6 +124,16 @@ class MLXBatch:
         """
         import mlx.core as mx
 
+        logits = self.step_lazy(tokens)
+        mx.eval(logits)
+        return logits
+
+    def step_lazy(self, tokens: Sequence[Any]) -> Any:
+        """`step` without the eval. A token may be an int or a lazy scalar
+        array (the previous step's sample, not yet forced), so the caller
+        can queue this forward before forcing the tokens it feeds."""
+        import mlx.core as mx
+
         if self.caches is None or not self.rows:
             raise RuntimeError("step() on an empty batch")
         if len(tokens) != len(self.rows):
@@ -131,10 +141,11 @@ class MLXBatch:
                 f"got {len(tokens)} tokens for {len(self.rows)} rows; "
                 "the caller must supply one token per row, in row order"
             )
-        ids = mx.array([[int(t)] for t in tokens])
-        logits = self._model(ids, cache=self.caches)
-        mx.eval(logits)
-        return logits
+        ids = mx.stack([
+            (t if isinstance(t, mx.array) else mx.array(int(t))).reshape(1)
+            for t in tokens
+        ])
+        return self._model(ids, cache=self.caches)
 
 
 def _concat_batched(a: Any, b: Any) -> Any:

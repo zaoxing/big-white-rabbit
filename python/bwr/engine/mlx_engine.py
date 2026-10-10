@@ -101,6 +101,7 @@ class _MLXContext:
         eng._spec_ok.clear()
         eng._spec_stats.clear()
         eng._pending.clear()
+        eng._batch_pending.clear()
         eng._mtp_caches.clear()
         eng._mtp_hidden.clear()
         eng._mtp = None
@@ -237,6 +238,9 @@ class MLXEngine:
         # cache already holds next_token, and this is (argmax, logits) for
         # the position after it, queued together but not necessarily done.
         self._pending: dict[int, tuple[object, object]] = {}
+        # The batch path's equivalent: per row, the lazy token sampled from
+        # the forward queued at the end of the previous step.
+        self._batch_pending: dict[int, object] = {}
         self.spec_drafted = 0
         self.spec_accepted = 0
         self.spec_recomputes = 0
@@ -314,6 +318,7 @@ class MLXEngine:
         self._spec_tables.pop(req.request_id, None)
         self._caches.pop(req.request_id, None)
         self._pending.pop(req.request_id, None)
+        self._batch_pending.pop(req.request_id, None)
         self._spec_ok.pop(req.request_id, None)
         self._spec_stats.pop(req.request_id, None)
         self._mtp_caches.pop(req.request_id, None)
@@ -420,22 +425,16 @@ class MLXEngine:
         )
         if rp.stop:
             self._stop_filters[request_id] = StopSequenceFilter(rp.stop)
-        if (
-            self.config.speculative
-            or self.config.mlx_kv_bits is not None
-            or self.config.mlx_prefix_cache
-            or self._mtp is not None
-        ):
-            # Seed with the prompt (same rule as MetalEngine); the cache
-            # itself is built lazily on the first spec step. The MTP head
-            # sources its own drafts, so it allocates no table -- only the
-            # per-request counters the verify path shares.
-            if self._mtp is None:
-                table = NgramTable()
-                table.update_stream(tokens)
-                self._spec_tables[request_id] = table
-            self._spec_ok[request_id] = True
-            self._spec_stats[request_id] = [0, 0, 0]
+        # Every request that may take the manual loop (see _use_manual)
+        # carries the verify path's per-request counters. The n-gram table
+        # is seeded with the prompt (same rule as MetalEngine) only when
+        # speculation is on; the MTP head sources its own drafts.
+        self._spec_ok[request_id] = True
+        self._spec_stats[request_id] = [0, 0, 0]
+        if self.config.speculative and self._mtp is None:
+            table = NgramTable()
+            table.update_stream(tokens)
+            self._spec_tables[request_id] = table
         return request_id
 
     def cancel(self, request_id: int) -> bool:
@@ -491,18 +490,23 @@ class MLXEngine:
         stays manual. Falling back to the stream path would restart
         generation from the prompt (a fresh generator knows nothing of
         emitted tokens), so fallback only ever disables DRAFTING, never the
-        loop. Entry requires the flag plus greedy sampling, or a quantized
-        KV setting (the stream path builds its own f16 cache internally,
-        so mlx_kv_bits can only take effect through the owned cache)."""
+        loop.
+
+        Every greedy request takes the manual loop. It used to be the
+        price of speculation, quantized KV or the prefix cache, and the
+        stream path was the fast default; with its lookahead (see
+        _lookahead) the loop outruns mlx-lm's stream_generate by ~5% on a
+        27B, so greedy decoding has no reason to pay for a generator.
+        Sampled requests (temp > 0) still take the stream path, which owns
+        the sampler, unless a quantized KV setting needs the owned cache
+        (the stream path builds its own f16 cache internally)."""
         if req.request_id in self._caches:
             return True
         if self.config.mlx_kv_bits is not None:
             return True
         if self.config.mlx_prefix_cache:
             return True
-        if self._mtp is not None and req.params.temp <= 0:
-            return True
-        return bool(self.config.speculative and req.params.temp <= 0)
+        return req.params.temp <= 0
 
     def _prefix_lookup(self, req: RequestState):
         """Shared exact-prefix probe: `(cache_copy, base, entry)` or None.
@@ -975,33 +979,63 @@ class MLXEngine:
                 raise
 
         if batch.empty:
+            self._batch_pending.clear()
             return outputs
 
-        # Decode every live row together. next_token is what each row feeds.
+        # Rows retired between steps (cancel) leave before anything is fed.
+        batch.leave([
+            rid for rid in batch.rows
+            if (self._states.get(rid) is None or self._states[rid].finished)
+        ])
+        if batch.empty:
+            self._batch_pending.clear()
+            return outputs
+
+        # Decode every live row together, mlx-lm's generate_step shape: the
+        # forward for what each row feeds next is built from LAZY tokens --
+        # the previous step's sampled rows, or a joiner's prefill token --
+        # and queued, with its own per-row sampling, as one batch; only
+        # then are this step's tokens forced. Forcing first would idle the
+        # GPU through the graph build and the Python below, which is what
+        # left this loop a tenth behind the stream path (see _lookahead).
         rows = list(batch.rows)
-        tokens = []
+        feed = [
+            self._batch_pending.get(rid, self._states[rid].next_token)
+            for rid in rows
+        ]
+        logits = batch.step_lazy(feed)
+        sampled = {
+            rid: self._sample_row_lazy(self._states[rid], logits[i, -1])
+            for i, rid in enumerate(rows)
+        }
+        mx.async_eval(*sampled.values())
+        emit = self._batch_pending
+        self._batch_pending = sampled
         for rid in rows:
-            req = self._states.get(rid)
-            if req is None or req.next_token is None:
-                # Retired between join and step: drop the row rather than
-                # feeding a stale token into the shared forward.
-                batch.leave([rid])
-                continue
-            tokens.append(req.next_token)
-        rows = list(batch.rows)
-        if not rows:
-            return outputs
-
-        logits = batch.step(tokens)
-        for i, rid in enumerate(rows):
-            req = self._states.get(rid)
-            if req is None or req.finished:
-                continue
-            token = self._sample_row(req, logits[i, -1])
+            tok = emit.get(rid)
+            if tok is None:
+                continue  # a joiner: its first token was emitted at admission
+            req = self._states[rid]
+            token = int(tok.item())
             outputs.append(
                 self._feed(req, token, self._tokenizer.decode([token]))
             )
+        # A row that finished on the token just forced had its next forward
+        # queued above for nothing; harmless, the row leaves now.
+        done = [rid for rid in rows if self._states.get(rid) is None or self._states[rid].finished]
+        if done:
+            batch.leave(done)
+            for rid in done:
+                self._batch_pending.pop(rid, None)
         return outputs
+
+    def _sample_row_lazy(self, req: RequestState, row):
+        """`_sample_row` without the force: a lazy scalar the caller may
+        queue with the forward that produced `row`."""
+        mx = _mx()
+        if req.params.temp and req.params.temp > 0:
+            return self._sampler_for(req.params)(row[None]).reshape(())
+        return mx.argmax(row)
 
     def _sample_row(self, req: RequestState, row) -> int:
         """Sample one row's logits with THAT request's parameters.
