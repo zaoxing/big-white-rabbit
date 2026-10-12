@@ -29,6 +29,7 @@ from typing import Any
 
 from .batching import RequestState
 from .config import EngineConfig, RequestParams, StopSequenceFilter
+from .detok import TokenDetokenizer
 from .metal_engine import MIN_RETAINED_FINISHED, StepOutput
 from .ngram import NgramTable
 
@@ -240,6 +241,7 @@ class MLXEngine:
             self._mtp = _mtp_mod.MTPDraft(target, model_path, depth)
         self.ctx = _MLXContext(self)
         self._stop_filters: dict[int, StopSequenceFilter] = {}
+        self._detoks: dict[int, TokenDetokenizer] = {}
         self._states: dict[int, RequestState] = {}
         self._retired: dict[int, RequestState] = {}
         self._retired_limit = max(8, MIN_RETAINED_FINISHED)
@@ -357,6 +359,7 @@ class MLXEngine:
             self._prefix_insert_final(req)
         self._cache_tokens.pop(req.request_id, None)
         self._stop_filters.pop(req.request_id, None)
+        self._detoks.pop(req.request_id, None)
         self._spec_tables.pop(req.request_id, None)
         self._caches.pop(req.request_id, None)
         self._pending.pop(req.request_id, None)
@@ -603,7 +606,7 @@ class MLXEngine:
             base = self._sample_row(req, logits[0, -1])
             self._prefix_insert(req, self._caches[rid], base, logits[0, -1])
         req.next_token = base
-        return [self._feed(req, base, self._tokenizer.decode([base]))]
+        return [self._feed(req, base, self._piece(req, base))]
 
     def _prefix_insert(
         self, req: RequestState, cache: list, base: int, last_logits: Any
@@ -766,7 +769,7 @@ class MLXEngine:
                 # Snapshot covers exactly the prompt: before the lookahead.
                 self._prefix_insert(req, cache, base, logits[0, -1])
             self._lookahead(req, base)
-            return [self._feed(req, base, self._tokenizer.decode([base]))]
+            return [self._feed(req, base, self._piece(req, base))]
         except BaseException:  # noqa: BLE001 - re-raised; must retire slot on any failure
             try:
                 self._retire(req, "error")
@@ -1039,7 +1042,7 @@ class MLXEngine:
                 self.spec_fallbacks += 1
         outputs: list[StepOutput] = []
         for token in accepted:
-            outputs.append(self._feed(req, token, self._tokenizer.decode([token])))
+            outputs.append(self._feed(req, token, self._piece(req, token)))
             if outputs[-1].finished:
                 break
         return outputs
@@ -1111,7 +1114,7 @@ class MLXEngine:
                         self._prefix_insert(req, cache, token, logits[0, -1])
                 batch.join(req.request_id, cache)
                 outputs.append(
-                    self._feed(req, token, self._tokenizer.decode([token]))
+                    self._feed(req, token, self._piece(req, token))
                 )
             except BaseException:  # noqa: BLE001 - re-raised; must not leave a half-joined row
                 try:
@@ -1160,7 +1163,7 @@ class MLXEngine:
             req = self._states[rid]
             token = int(tok.item())
             outputs.append(
-                self._feed(req, token, self._tokenizer.decode([token]))
+                self._feed(req, token, self._piece(req, token))
             )
         # A row that finished on the token just forced had its next forward
         # queued above for nothing; harmless, the row leaves now.
@@ -1192,6 +1195,27 @@ class MLXEngine:
             return int(sampler(row[None]).item())
         return int(mx.argmax(row).item())
 
+    def _piece(self, req: RequestState, token: int) -> str:
+        """The text this token adds, through the request's incremental
+        detokenizer: a character spelled over several byte-fallback tokens
+        is emitted whole by the one that completes it, where a per-token
+        decode gave U+FFFD for each (the routes stream pieces, not text_of).
+        Built here rather than at admission so the stub engines and the
+        hand-fed tests need no table of their own."""
+        detok = self._detoks.get(req.request_id)
+        if detok is None:
+            detok = self._detoks[req.request_id] = TokenDetokenizer(
+                self._tokenizer.decode
+            )
+        return detok.push(token)
+
+    def _flush_piece(self, req: RequestState) -> str:
+        """Whatever `_piece` still holds, for the retire that ends the
+        request: joined pieces must stay equal to text_of, which decodes a
+        trailing partial character to a replacement character."""
+        detok = self._detoks.get(req.request_id)
+        return detok.flush() if detok is not None else ""
+
     def _feed(self, req: RequestState, token: int, piece: str) -> StepOutput:
         """Account for one generated token: EOG, then stop, then cap, then
         context."""
@@ -1201,8 +1225,9 @@ class MLXEngine:
             # MetalEngine retires the same way (token, empty piece), and the
             # stream path never yields it at all -- passing `piece` here made
             # the manual-loop paths (prefix cache, batching) emit a literal
-            # "<|im_end|>" into the response body.
-            return self._retire(req, "eog", token)
+            # "<|im_end|>" into the response body. Only a held partial
+            # character (already in text_of as its replacement) rides along.
+            return self._retire(req, "eog", token, self._flush_piece(req))
         req.output_tokens.append(token)
         req.n_generated += 1
         req.next_token = token
@@ -1215,16 +1240,16 @@ class MLXEngine:
         if stop_filter is not None:
             _emittable, hit = stop_filter.push(piece)
             if hit:
-                return self._retire(req, "stop_sequence", token, piece)
+                return self._retire(req, "stop_sequence", token, piece + self._flush_piece(req))
         if req.n_generated >= req.params.max_tokens:
-            return self._retire(req, "length", token, piece)
+            return self._retire(req, "length", token, piece + self._flush_piece(req))
         # Here, not in the verify loop alone: the batch step and the prefix
         # hit account their tokens through this function too, and with the
         # check elsewhere a batched request ran past n_ctx and called it
         # "length". Counted after the append, as Metal's n_pos check is, so
         # the retiring token is in tokens_of like the piece is in the text.
         if len(req.prompt) + req.n_generated >= self.config.n_ctx:
-            return self._retire(req, "context", token, piece)
+            return self._retire(req, "context", token, piece + self._flush_piece(req))
         return StepOutput(req.request_id, token, piece, False, None)
 
     # --- inspection ---------------------------------------------------------

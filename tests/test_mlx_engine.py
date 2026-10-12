@@ -435,6 +435,7 @@ def _stub_engine(config: EngineConfig) -> MLXEngine:
     eng._mtp_hidden = {}
     eng._batch = None
     eng._stop_filters = {}
+    eng._detoks = {}
     eng._states = {}
     eng._retired = OrderedDict()
     eng._retired_limit = 8
@@ -802,3 +803,49 @@ def test_batch_path_retires_on_context_where_the_single_path_does() -> None:
         finally:
             eng.ctx.close()
     assert seen[False] == seen[True] == n_ctx - n_prompt, seen
+
+
+# --- a character split across tokens reaches the pieces whole ----------------
+
+
+CJK_PROMPT = "Say hello in Japanese (日本語で): "
+
+
+@needs_weights
+@pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
+def test_joined_pieces_are_the_text_when_characters_span_tokens(batch: bool) -> None:
+    """SmolLM spells a CJK character as three single-byte tokens; decoded one
+    at a time each came out as U+FFFD, so the routes (which build the body
+    from the pieces) streamed '����し��し' where text_of said '你好したし'."""
+    eng = MLXEngine(MODEL_PATH, EngineConfig(n_ctx=4096, mlx_batch=batch))
+    try:
+        rid = eng.add_request(CJK_PROMPT, greedy(24))
+        outs = list(eng.drain())
+        text = eng.text_of(rid)
+        assert any(ord(c) > 0x7F for c in text), text  # the prompt did its job
+        joined = "".join(o.piece for o in outs)
+        assert joined == text
+        # A cap can land mid-character; only such a trailing remainder may be
+        # a replacement character, and the retire carries it as its piece.
+        assert "\ufffd" not in joined.rstrip("\ufffd")
+        assert len([o for o in outs if not (o.finished and o.piece == "")]) == len(
+            eng.tokens_of(rid)
+        )
+    finally:
+        eng.ctx.close()
+
+
+@needs_weights
+def test_direct_feed_of_split_characters_joins_to_the_decode() -> None:
+    eng = MLXEngine(MODEL_PATH, EngineConfig(n_ctx=4096))
+    try:
+        ids = eng.tokenize("🦀 日本語", add_special=False)
+        assert len(ids) > 3  # byte-fallback: several tokens per character
+        rid = eng.add_request("x", greedy(len(ids)))
+        req = eng.state(rid)
+        pieces = [eng._piece(req, t) for t in ids]
+        assert "".join(pieces) + eng._flush_piece(req) == "🦀 日本語"
+        assert "\ufffd" not in "".join(pieces)
+        eng.cancel(rid)
+    finally:
+        eng.ctx.close()
