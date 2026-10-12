@@ -847,6 +847,85 @@ def test_ms_routes_mirror_the_hf_surface(tmp_path):
     assert c.post("/admin/api/ms/cancel/nope").json()["status"] == "not_running"
 
 
+class _MSFetcherStub:
+    """Fails the first fetch, succeeds after; records the token each saw."""
+
+    def __init__(self):
+        self.tokens: list = []
+
+    def fetch(self, task, token):
+        self.tokens.append(token)
+        if len(self.tokens) == 1:
+            raise RuntimeError("nope")
+
+
+@pytest.fixture
+def ms_retry_client(tmp_path):
+    from bwr.server.downloads import DownloadManager
+
+    fetcher = _MSFetcherStub()
+    app = FastAPI()
+    mount(app, _StubEngine(), "a", _PoolStub(),
+          ms_downloads=DownloadManager(tmp_path, fetcher=fetcher))
+    return TestClient(app), fetcher
+
+
+def _wait_ms_status(client, tid: str, status: str, timeout: float = 5.0) -> None:
+    import time
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if client.get(f"/admin/api/ms/task/{tid}").json()["task"]["status"] == status:
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"task never reached {status}")
+
+
+def _failed_ms_task(client, token: str = "ms_SECRET") -> str:
+    r = client.post("/admin/api/ms/download", json={"repo_id": "org/gated", "ms_token": token})
+    assert r.status_code == 200, r.text
+    tid = r.json()["task"]["task_id"]
+    _wait_ms_status(client, tid, "failed")
+    return tid
+
+
+def test_ms_retry_through_the_route_keeps_the_request_token(ms_retry_client):
+    """Mirror of the HF retry test: a bare retry sends no token of its own,
+    so the task's retained one is reused, and it never leaks into the row."""
+    client, fetcher = ms_retry_client
+    tid = _failed_ms_task(client)
+    r = client.post(f"/admin/api/ms/retry/{tid}")
+    assert r.status_code == 200, r.text
+    assert r.json()["success"] is True
+    assert r.json()["task"]["task_id"] == tid
+    assert "ms_SECRET" not in r.text
+    _wait_ms_status(client, tid, "completed")
+    assert fetcher.tokens == ["ms_SECRET", "ms_SECRET"]
+
+
+@pytest.mark.parametrize("key", ["ms_token", "msToken"])
+def test_ms_retry_body_token_replaces_the_retained_one(ms_retry_client, key):
+    """Either spelling the page may send overrides the token the task kept."""
+    client, fetcher = ms_retry_client
+    tid = _failed_ms_task(client)
+    r = client.post(f"/admin/api/ms/retry/{tid}", json={key: "ms_NEW"})
+    assert r.status_code == 200, r.text
+    _wait_ms_status(client, tid, "completed")
+    assert fetcher.tokens == ["ms_SECRET", "ms_NEW"]
+
+
+def test_ms_retry_of_an_unknown_task_is_400_with_the_reason(ms_retry_client):
+    client, _ = ms_retry_client
+    r = client.post("/admin/api/ms/retry/nope")
+    assert r.status_code == 400
+    assert r.json()["success"] is False
+    assert "nope" in r.json()["detail"]
+
+
+def test_ms_retry_without_a_manager_is_404(client):
+    assert client.post("/admin/api/ms/retry/nope").status_code == 404
+
+
 def test_ane_tuning_explains_itself_instead_of_a_bare_501(client):
     """The screen needs to say WHY, not just fail."""
     r = client.post("/admin/api/bench/ane-tune/start")
