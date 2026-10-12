@@ -128,6 +128,14 @@ class KVSnapStore:
         req = self.engine._lookup(request_id)
         if req.seq_id == self.snapshot_seq:
             raise ValueError("cannot snapshot the snapshot seq itself")
+        # _lookup also answers for retired requests. A finished one has no next
+        # token and nothing left to prefill, so a state rehydrated from it could
+        # never be advanced, and its seq may already belong to someone else.
+        if req.finished:
+            raise ValueError(
+                f"request {request_id} is finished ({req.finish_reason}); "
+                f"only an in-flight request can be snapshotted"
+            )
         # Clear the previous snapshot before copying. With a unified KV cache
         # seq_cp only adds the destination tag to the source's cells, so without
         # this a second save stacks on top of the first and the restored seq
@@ -205,6 +213,13 @@ class KVSnapStore:
                     raise KeyError(f"unknown snapshot {name!r}") from exc
             else:
                 raise KeyError(f"unknown snapshot {name!r}")
+        if snap.next_token is None and snap.n_prefilled >= len(snap.prompt):
+            # Files written before save() refused finished requests look like
+            # this. Installing the state would leave the engine with a request
+            # that is neither prefilling, generating nor finished.
+            raise ValueError(
+                f"snapshot {name!r} was taken from a finished request and cannot be resumed"
+            )
         # If snapshot has no live KV (disk-hydrated after restart, or params None),
         # try T12c fast path: restore binary KV via state_seq_set_data if .bin exists.
         # Falls back to re-prefill (slow but correct) when bin missing or incompatible.

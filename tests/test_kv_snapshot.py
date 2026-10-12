@@ -17,7 +17,9 @@ from bwr.engine.kv_snapshot import KVSnapStore
 
 MODEL_PATH = os.environ.get("BWR_MOE_MODEL") or os.environ.get("BWR_TEST_MODEL")
 
-pytestmark = pytest.mark.skipif(
+# The weight-gated tests below carry this mark; the stub-level ones at the end
+# run everywhere.
+needs_model = pytest.mark.skipif(
     not MODEL_PATH or not os.path.exists(MODEL_PATH),
     reason="set BWR_MOE_MODEL or BWR_TEST_MODEL to a .gguf path",
 )
@@ -26,6 +28,7 @@ PROMPT = "Count: 1 2 3"
 N_TOKENS = 8
 
 
+@needs_model
 def test_snapshot_save_load_identical(tmp_path) -> None:
     """Save prompt KV after prefill, restore into new request, identical output."""
     cfg = EngineConfig(n_ctx=512, n_seq_max=2, record_experts=False)
@@ -49,6 +52,7 @@ def test_snapshot_save_load_identical(tmp_path) -> None:
     assert engine.state(rid2).finish_reason == engine.state(rid).finish_reason
 
 
+@needs_model
 def test_snapshot_list_delete(tmp_path) -> None:
     cfg = EngineConfig(n_ctx=512, n_seq_max=2)
     engine = MetalEngine(bwr.Model(MODEL_PATH, bwr.ModelParams()), cfg)
@@ -64,6 +68,7 @@ def test_snapshot_list_delete(tmp_path) -> None:
     assert store.list() == []
 
 
+@needs_model
 def test_snapshot_needs_spare_seq() -> None:
     cfg = EngineConfig(n_ctx=512, n_seq_max=1)
     engine = MetalEngine(bwr.Model(MODEL_PATH, bwr.ModelParams()), cfg)
@@ -71,6 +76,7 @@ def test_snapshot_needs_spare_seq() -> None:
         KVSnapStore(engine)
 
 
+@needs_model
 def test_snapshot_disk_roundtrip(tmp_path) -> None:
     """Disk persistence survives engine restart (T12b re-prefill or T12c binary)."""
     cfg = EngineConfig(n_ctx=512, n_seq_max=2)
@@ -90,6 +96,7 @@ def test_snapshot_disk_roundtrip(tmp_path) -> None:
     assert engine2.state(rid2).finish_reason == "length"
 
 
+@needs_model
 def test_snapshot_binary_roundtrip_identical(tmp_path) -> None:
     """T12c: binary KV restores identical tokens across restart without re-prefill."""
     cfg = EngineConfig(n_ctx=512, n_seq_max=2, record_experts=False)
@@ -122,6 +129,7 @@ def test_snapshot_binary_roundtrip_identical(tmp_path) -> None:
     assert not (tmp_path / "snap_bin.json").exists()
 
 
+@needs_model
 def test_second_save_replaces_first_snapshot(tmp_path) -> None:
     """Two saves in a row, then load the second one.
 
@@ -151,3 +159,98 @@ def test_second_save_replaces_first_snapshot(tmp_path) -> None:
     list(engine.drain())
     assert engine.tokens_of(rid_c) == ref_tokens
     assert engine.state(rid_c).finish_reason == "length"
+
+
+# --- stub-level: no weights needed -----------------------------------------
+
+
+class _FakeCtx:
+    """Just enough of the llama context for KVSnapStore's bookkeeping."""
+
+    n_seq_max = 2
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def memory_seq_rm(self, *a) -> None:
+        self.calls.append(("rm", *a))
+
+    def memory_seq_cp(self, *a) -> None:
+        self.calls.append(("cp", *a))
+
+    def state_seq_get_data(self, seq_id):
+        return b"kv"
+
+    def state_seq_set_data(self, seq_id, data):
+        return len(data)
+
+    def set_seq_sampler(self, seq_id, params) -> None:
+        self.calls.append(("sampler", seq_id))
+
+
+def _stub_engine() -> MetalEngine:
+    eng = MetalEngine.__new__(MetalEngine)
+    eng.ctx = _FakeCtx()
+    eng._free_seq_ids = [0, 1]
+    eng._states = {}
+    eng._retired = {}
+    eng._next_request_id = 0
+    return eng
+
+
+def _finished_request(rid: int, seq_id: int):
+    from bwr.engine.batching import RequestState
+
+    st = RequestState(request_id=rid, seq_id=seq_id, prompt=[1, 2, 3], params=bwr.RequestParams(max_tokens=2))
+    st.n_prefilled = 3
+    st.n_pos = 5
+    st.output_tokens = [7, 8]
+    st.n_generated = 2
+    st.next_token = None
+    st.finished = True
+    st.finish_reason = "length"
+    return st
+
+
+def test_save_refuses_a_finished_request(tmp_path) -> None:
+    """_lookup answers for retired requests too, so without a guard save()
+    captures next_token=None from a finished request. load() then installs a
+    state that is neither prefilling, generating nor finished: has_work stays
+    True forever and the worker spins on a request nobody can advance."""
+    eng = _stub_engine()
+    eng._retired[0] = _finished_request(0, 0)
+    eng._next_request_id = 1
+    store = KVSnapStore(eng, kv_dir=tmp_path)
+    with pytest.raises(ValueError, match="finished"):
+        store.save("done", 0)
+    assert "done" not in store.list()
+    assert not (tmp_path / "done.json").exists()
+
+
+def test_load_refuses_a_dead_snapshot_file(tmp_path) -> None:
+    """A snapshot file written before save() refused finished requests has
+    next_token null with nothing left to prefill. load() must say so rather
+    than install a state the engine can never advance, and must not leak
+    the seq it would have used."""
+    import json
+
+    (tmp_path / "dead.json").write_text(
+        json.dumps(
+            {
+                "prompt": [1, 2, 3],
+                "output_tokens": [7, 8],
+                "n_pos": 5,
+                "n_prefilled": 3,
+                "next_token": None,
+                "params": {"max_tokens": 2},
+            }
+        )
+    )
+    (tmp_path / "dead.bin").write_bytes(b"kv")
+    eng = _stub_engine()
+    store = KVSnapStore(eng, kv_dir=tmp_path)
+    with pytest.raises(ValueError, match="finished"):
+        store.load("dead")
+    assert eng._states == {}
+    assert eng._free_seq_ids == [0]
+    assert not eng.has_work
