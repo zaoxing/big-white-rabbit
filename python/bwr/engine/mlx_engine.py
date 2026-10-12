@@ -255,12 +255,19 @@ class MLXEngine:
         from .spec_gate import SpecThroughputGate
 
         self.spec_gate = SpecThroughputGate()
-        # Exact-prefix prompt cache: prompt tokens -> (cache snapshot, base
-        # token). OrderedDict as bounded LRU (move_to_end on hit, popitem
-        # oldest on overflow). Entries are prompt-boundary snapshots: the
-        # cache covers exactly len(key) tokens and base is the argmax of the
-        # prefill's last logits row, so a hit replays deterministically.
-        self._prefix: OrderedDict[tuple[int, ...], tuple[list, int]] = OrderedDict()
+        # Prefix prompt cache: token sequence -> (cache snapshot, base
+        # token, MTP head cache or None, MTP hidden row or None, last
+        # logits row). OrderedDict as bounded LRU (move_to_end on hit,
+        # popitem oldest on overflow). The cache covers exactly len(key)
+        # tokens and base is the argmax of the last logits row, so a greedy
+        # exact hit replays deterministically; a sampled hit draws its own
+        # first token from that row. A prompt that EXTENDS a key is a
+        # partial hit: the snapshot is installed and only the rest is
+        # prefilled. Entries are stored at prefill (the prompt) and at
+        # retire (prompt + answer, what the next chat turn extends).
+        self._prefix: OrderedDict[
+            tuple[int, ...], tuple[list, int | None, Any, Any, Any]
+        ] = OrderedDict()
         self.prefix_hits = 0
         self.prefix_partial_hits = 0
         self.prefix_hit_tokens = 0
@@ -497,12 +504,20 @@ class MLXEngine:
     # lazy (`_sample_row_lazy`), drafting is greedy-only.
 
     def _prefix_lookup(self, req: RequestState):
-        """Shared exact-prefix probe: `(cache_copy, base, entry)` or None.
+        """Shared prefix probe: `(cache_copy, base, entry, matched)` or None.
+
+        `matched` is how many leading prompt tokens `cache_copy` covers.
+        On an exact hit that is the whole prompt and `base` is the first
+        token to emit (see _first_token); on a partial hit -- the prompt
+        extends a stored key -- `base` is None and the caller prefills
+        `prompt[matched:]` itself. A strict prefix of a stored key never
+        hits: the recurrent layers cannot be rewound to an earlier
+        position.
 
         Split out so the batching path can reuse it. A hit yields a
-        single-sequence cache covering exactly the prompt -- which is
-        precisely what `MLXBatch.join` wants, so the prefix cache and
-        continuous batching compose instead of excluding each other.
+        single-sequence cache -- which is precisely what `MLXBatch.join`
+        wants, so the prefix cache and continuous batching compose instead
+        of excluding each other.
         """
         key = tuple(req.prompt)
         entry = self._prefix.get(key)
@@ -543,11 +558,13 @@ class MLXEngine:
         return self._sample_row(req, entry[4])
 
     def _prefix_hit(self, req: RequestState) -> list[StepOutput] | None:
-        """Exact-prefix hit: install the snapshot and replay its base token.
+        """Prefix hit: install the snapshot and emit the first token.
 
-        Returns None on miss (caller prefills normally). The snapshot covers
-        exactly len(prompt) positions and base is the prefill's argmax, so
-        replay is deterministic — no forward pass, TTFT is deepcopy time.
+        Returns None on miss (caller prefills normally). An exact hit costs
+        no forward pass -- TTFT is deepcopy time -- and replays the stored
+        base token (or, sampled, a draw from the stored logits row). A
+        partial hit prefills only `prompt[matched:]` on top of the
+        snapshot and stores the whole prompt for the next extension.
         """
         found = self._prefix_lookup(req)
         if found is None:
