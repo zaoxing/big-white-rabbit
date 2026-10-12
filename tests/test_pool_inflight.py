@@ -42,6 +42,9 @@ class _FakeRaw:
         self.step_delay = step_delay
         self._next = 0
         self._emitted: dict[int, int] = {}
+        # Requests that reached their last token. A request whose engine
+        # was stopped under it never gets here.
+        self.finished: set[int] = set()
         self._lock = threading.Lock()
         self.ctx = types.SimpleNamespace(
             close=lambda: None, n_ctx=4096, n_ctx_seq=4096, n_seq_max=8,
@@ -86,6 +89,7 @@ class _FakeRaw:
                 )
                 if done:
                     del self._emitted[rid]
+                    self.finished.add(rid)
         return out
 
     def cancel(self, rid: int) -> bool:
@@ -234,6 +238,48 @@ def test_in_flight_is_released_on_every_exit(pool_app):
 
     app = pool_app
     asyncio.run(go())
+
+
+def test_a_benchmark_row_survives_an_eviction_by_another_model(pool_app):
+    """The throughput benchmark issues requests through `resolve` like a
+    handler does, so it must bracket them with the pool's in-flight count
+    like a handler does. It used to skip the bracket: a request for model b
+    mid-row evicted a, the engine was stopped under the row after a few
+    tokens, and the run still reported "completed" with a rate computed
+    from a fraction of the work."""
+
+    async def go():
+        app = pool_app
+        async with app.router.lifespan_context(app):
+            bench = app.state.bench
+            started = bench.start(
+                "a", prompt_lengths=[8], generation_length=N_TOKENS,
+                batch_sizes=[1],
+            )
+            raw_a = None
+            for _ in range(200):
+                await asyncio.sleep(0.005)
+                raw_a = app.state.pool.engine_for("a")
+                if (raw_a is not None and raw_a._next > 0
+                        and raw_a._emitted.get(0, 0) >= 3):
+                    break
+            assert raw_a is not None and raw_a._next > 0, "bench never started"
+            r_b = await _post(app, "/v1/chat/completions", _chat("b"))
+            for _ in range(400):
+                body = bench.get(started["bench_id"])
+                if body["status"] != "running":
+                    break
+                await asyncio.sleep(0.005)
+            return raw_a, r_b, bench.get(started["bench_id"])
+
+    raw_a, r_b, run = asyncio.run(go())
+    assert run["status"] == "completed", run
+    assert run["results"][0]["error"] is None, run
+    # Every request the row issued ran to its last token.
+    assert raw_a.finished == set(range(raw_a._next)), (raw_a.finished, raw_a._next)
+    # And the bracket was released: b was served after a drained.
+    assert r_b.status_code == 200, r_b.text
+    assert r_b.json()["usage"]["completion_tokens"] == N_TOKENS
 
 
 # -- finding 2: /v1/messages renders with the RESOLVED model in pool mode ----

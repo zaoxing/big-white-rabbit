@@ -137,8 +137,22 @@ class BenchRunner:
     quietly producing noise.
     """
 
-    def __init__(self, resolve: Any, renderer_for: Any = None) -> None:
+    def __init__(
+        self,
+        resolve: Any,
+        renderer_for: Any = None,
+        *,
+        request_started: Any = None,
+        request_finished: Any = None,
+    ) -> None:
         self._resolve = resolve
+        # The pool's in-flight bracket, the same pair the request handlers
+        # use. A benchmark row is a request as far as the pool is concerned:
+        # without the bracket an eviction (a request for another model that
+        # needs this one's budget) stopped the engine under the row, which
+        # then "completed" with a rate computed from a few tokens.
+        self._request_started = request_started or (lambda _mid: None)
+        self._request_finished = request_finished or (lambda _mid: None)
         self._runs: dict[str, BenchRun] = {}
         self._active: str | None = None
 
@@ -260,15 +274,34 @@ class BenchRunner:
     async def _one(
         self, model_id: str, pp: int, gen: int, batch: int, kind: str
     ) -> BenchResult:
-        from ..engine.config import RequestParams
-        from .common import submit_request
-
         result = BenchResult(test_type=kind, pp=pp, tg=gen, batch_size=batch)
         try:
-            _served, engine, renderer, _overlay = await self._resolve(model_id)
+            served, engine, renderer, _overlay = await self._resolve(model_id)
         except Exception as exc:  # noqa: BLE001 - an unknown model is a result
             result.error = f"{type(exc).__name__}: {exc}"
             return result
+        # Bracketed per row, right after resolve returns (no await in
+        # between, so an eviction cannot slip into the gap) and released
+        # once every request of the row has drained. NOT around the whole
+        # run: a row for a second model would then wait on this one's
+        # in-flight count from inside the bracket that holds it up.
+        self._request_started(served)
+        try:
+            return await self._measure(result, engine, renderer, pp, gen, batch)
+        finally:
+            self._request_finished(served)
+
+    async def _measure(
+        self,
+        result: BenchResult,
+        engine: Any,
+        renderer: Any,
+        pp: int,
+        gen: int,
+        batch: int,
+    ) -> BenchResult:
+        from ..engine.config import RequestParams
+        from .common import submit_request
 
         prompt = _prompt_of_length(renderer, pp)
         # Greedy and EOG-free: the run must generate exactly `gen` tokens, or

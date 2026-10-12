@@ -459,8 +459,17 @@ def build_app(
     app.state.profiles = profile_store
     app.state.downloads = downloads
     # The runner drives `resolve`, so a benchmark loads the model the same
-    # way a request does -- including the pool's LRU accounting.
-    bench = BenchRunner(resolve) if model_dir is not None else None
+    # way a request does -- including the pool's LRU accounting -- and it
+    # gets the same in-flight bracket, so an eviction waits for a row to
+    # drain instead of stopping the engine under it.
+    bench = (
+        BenchRunner(
+            resolve,
+            request_started=request_started,
+            request_finished=request_finished,
+        )
+        if model_dir is not None else None
+    )
     app.state.bench = bench
     # Takes the POOL, not `resolve`: it reloads the model at each candidate
     # context size, which is residency work rather than request work. Pool
