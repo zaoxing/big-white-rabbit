@@ -27,7 +27,7 @@ import re
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -64,6 +64,10 @@ class Task:
     retry_count: int = 0
     local_dir: str = ""
     _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
+    # The worker future for the current attempt. `retry` consults it: a
+    # cancelled row whose worker has not yet returned still has a thread
+    # writing into local_dir, and a second worker alongside it would race.
+    _worker: Future | None = field(default=None, repr=False)
 
     @property
     def progress(self) -> float:
@@ -172,7 +176,7 @@ class DownloadManager:
             # "completed" would make the caller skip the progress row it is
             # supposed to render.
             queued = task.to_dict()
-        self._pool_exec.submit(self._run, task.task_id, token)
+            task._worker = self._pool_exec.submit(self._run, task.task_id, token)
         return queued
 
     def cancel(self, task_id: str) -> bool:
@@ -194,13 +198,22 @@ class DownloadManager:
                 raise DownloadError(f"unknown task {task_id!r}")
             if t.status in ("pending", "downloading"):
                 raise DownloadError("task is still running")
+            # `cancel` marks the row before the worker notices, so a
+            # "cancelled" status does not mean the worker has returned. A
+            # queued future is dropped here (cancel() succeeds on one that
+            # never started); a running one cannot be, and a second worker
+            # beside it would write the same local_dir and race the
+            # cancel Event this method is about to replace.
+            if (t._worker is not None and not t._worker.cancel()
+                    and not t._worker.done()):
+                raise DownloadError("task is still stopping; retry in a moment")
             t.status = "pending"
             t.error = ""
             t.downloaded_size = 0
             t.completed_at = 0.0
             t.retry_count += 1
             t._cancel = threading.Event()
-        self._pool_exec.submit(self._run, task_id, token)
+            t._worker = self._pool_exec.submit(self._run, task_id, token)
         return self.get(task_id) or {}
 
     def forget(self, task_id: str) -> bool:

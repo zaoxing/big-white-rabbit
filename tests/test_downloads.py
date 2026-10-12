@@ -193,6 +193,65 @@ def test_retrying_a_running_task_is_refused(manager, monkeypatch):
     gate.set()
 
 
+def test_retry_refuses_while_a_cancelled_worker_is_still_running(manager, monkeypatch):
+    """`cancel` marks the row cancelled before the worker has noticed. A
+    retry in that window used to pass the status guard, hand the row a fresh
+    cancel Event and submit a SECOND worker, so two workers wrote the same
+    local_dir and the old one -- polling the new, unset Event -- finished
+    the row as "completed"."""
+    gate = threading.Event()
+    runs: list[str] = []
+
+    def fake_snapshot(**kwargs):
+        runs.append(kwargs["local_dir"])
+        gate.wait(5)
+        return kwargs["local_dir"]
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot)
+    monkeypatch.setattr(HFFetcher, "_repo_size", lambda self, r, t: 0)
+    task = manager.start("org/model")
+    tid = task["task_id"]
+    assert _wait(lambda: manager.get(tid)["status"] == "downloading")
+    assert manager.cancel(tid) is True
+    with pytest.raises(DownloadError):
+        manager.retry(tid)
+    assert runs == [task["local_dir"]]
+
+    gate.set()
+    # Once the first worker has returned, a retry is a normal second run.
+    assert _wait(lambda: manager.get(tid)["status"] != "downloading")
+
+    def retry_ok():
+        try:
+            manager.retry(tid)
+        except DownloadError:
+            return False
+        return True
+
+    assert _wait(retry_ok)
+    assert _wait(lambda: manager.get(tid)["status"] == "completed")
+    assert runs == [task["local_dir"]] * 2
+    assert manager.get(tid)["retry_count"] == 1
+
+
+def test_retry_of_a_cancelled_queued_task_does_not_wait_for_the_pool(manager, monkeypatch):
+    """A task cancelled before its worker ever started has no live worker to
+    wait for: its queued future is dropped and the retry is immediate, even
+    with every pool slot busy."""
+    gate = threading.Event()
+    monkeypatch.setattr("huggingface_hub.snapshot_download",
+                        lambda **k: gate.wait(5) or k["local_dir"])
+    monkeypatch.setattr(HFFetcher, "_repo_size", lambda self, r, t: 0)
+    busy = [manager.start(f"org/busy{i}") for i in range(manager.MAX_WORKERS)]
+    assert _wait(lambda: all(
+        manager.get(b["task_id"])["status"] == "downloading" for b in busy))
+    queued = manager.start("org/queued")
+    assert manager.cancel(queued["task_id"]) is True
+    assert manager.retry(queued["task_id"])["status"] == "pending"
+    gate.set()
+    assert _wait(lambda: manager.get(queued["task_id"])["status"] == "completed")
+
+
 def test_forget_drops_the_row_but_never_the_files(manager, monkeypatch, tmp_path):
     monkeypatch.setattr("huggingface_hub.snapshot_download", lambda **k: k["local_dir"])
     monkeypatch.setattr(HFFetcher, "_repo_size", lambda self, r, t: 0)
