@@ -46,6 +46,27 @@ class _VerifyEntry:
     pos_base: int
 
 
+def _frames_to_dicts(frames) -> list[dict[str, object]]:
+    """Unpack the C++ router frames (flat per-token probability rows) into
+    ``{"layer": int, "tokens": [[float, ...], ...]}`` entries, one row per
+    decoded token. Shared by the hotlist feed in `step` and the
+    `expert_activations` accessor so both read the same shape."""
+    out: list[dict[str, object]] = []
+    for frame in frames:
+        n_tokens = frame.n_tokens
+        n_expert = len(frame.probs) // max(1, n_tokens) if n_tokens else 0
+        out.append(
+            {
+                "layer": frame.layer,
+                "tokens": [
+                    list(frame.probs[i * n_expert : (i + 1) * n_expert])
+                    for i in range(n_tokens)
+                ],
+            }
+        )
+    return out
+
+
 # Floor on how many finished requests stay readable through `state` / `tokens_of` /
 # `text_of` after they retire. The window is `max(this, ctx.n_seq_max)`: it must cover at
 # least a full batch's worth of retirements, because every request in flight together is
@@ -456,21 +477,8 @@ class MetalEngine:
         # SSD hotlist (T11b+c): feed router distributions into per-layer LRU
         # and simulate SSD fetch for misses (0.35ms per 0.91MB slab).
         if self._hotlist is not None:
-            raw_frames = self.ctx.expert_activations()
-            if raw_frames:
-                converted: list[dict[str, object]] = []
-                for f in raw_frames:
-                    n_tokens = f.n_tokens
-                    n_expert = len(f.probs) // max(1, n_tokens) if n_tokens else 0
-                    converted.append(
-                        {
-                            "layer": f.layer,
-                            "tokens": [
-                                list(f.probs[i * n_expert : (i + 1) * n_expert])
-                                for i in range(n_tokens)
-                            ],
-                        }
-                    )
+            converted = _frames_to_dicts(self.ctx.expert_activations())
+            if converted:
                 result = self._hotlist.update(converted)
                 for layer, eid in result.get("missed", []):  # type: ignore[arg-type]
                     self.ctx.fetch_expert(layer, eid)
@@ -1002,20 +1010,7 @@ class MetalEngine:
         just selects (and validates) the caller.
         """
         self._lookup(request_id)
-        out: list[dict[str, object]] = []
-        for frame in self.ctx.expert_activations():
-            n_tokens = frame.n_tokens
-            n_expert = len(frame.probs) // max(1, n_tokens) if n_tokens else 0
-            out.append(
-                {
-                    "layer": frame.layer,
-                    "tokens": [
-                        list(frame.probs[i * n_expert : (i + 1) * n_expert])
-                        for i in range(n_tokens)
-                    ],
-                }
-            )
-        return out
+        return _frames_to_dicts(self.ctx.expert_activations())
 
     @property
     def spec_acceptance_rate(self) -> float | None:
