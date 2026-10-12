@@ -153,7 +153,7 @@ std::vector<llama_token> Model::tokenize(const std::string & text, bool add_spec
     return out;
 }
 
-std::string Model::token_to_piece(llama_token tok, bool special) const {
+std::string Model::token_to_piece_raw(llama_token tok, bool special) const {
     ensure_open();
     char buf[256];
     const int32_t n = llama_token_to_piece(vocab_, tok, buf, sizeof(buf), 0, special);
@@ -164,9 +164,13 @@ std::string Model::token_to_piece(llama_token tok, bool special) const {
             throw std::runtime_error("token_to_piece failed for token " + std::to_string(tok));
         }
         big.resize(n2);
-        return ensure_valid_utf8(big);
+        return big;
     }
-    return ensure_valid_utf8(std::string(buf, n));
+    return std::string(buf, n);
+}
+
+std::string Model::token_to_piece(llama_token tok, bool special) const {
+    return ensure_valid_utf8(token_to_piece_raw(tok, special));
 }
 
 std::string Model::detokenize(const std::vector<llama_token> & toks, bool unparse_special) const {

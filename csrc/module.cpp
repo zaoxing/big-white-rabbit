@@ -87,6 +87,13 @@ PYBIND11_MODULE(_bwr_metal, m) {
              py::arg("text"), py::arg("add_special") = true, py::arg("parse_special") = true)
         .def("token_to_piece", &bwr::Model::token_to_piece,
              py::arg("token"), py::arg("special") = false)
+        .def("token_to_piece_bytes",
+             [](const bwr::Model & self, llama_token token, bool special) {
+                 return py::bytes(self.token_to_piece_raw(token, special));
+             },
+             py::arg("token"), py::arg("special") = false,
+             "The piece's raw bytes, before any UTF-8 repair: a character spelled "
+             "over several byte-fallback tokens can only be joined from these.")
         .def("detokenize", &bwr::Model::detokenize,
              py::arg("tokens"), py::arg("unparse_special") = false)
         .def("is_eog", &bwr::Model::is_eog, py::arg("token"))

@@ -170,6 +170,39 @@ def test_async_engine_survives_a_bad_request(model: bwr.Model) -> None:
 # --- HTTP surface -------------------------------------------------------------------
 
 
+# --- a character spelled over several tokens reaches the pieces whole --------------
+
+
+def test_piece_bytes_join_to_the_detokenized_text(model: bwr.Model) -> None:
+    """llama.cpp's pieces are bytes; an emoji with a skin-tone modifier is
+    several tokens of them. `token_to_piece` stamps U+FFFD onto each partial
+    one, so the engine needs the raw bytes to join them."""
+    for text in ("\U0001fae0\U0001faf6\U0001f3ff", "\U0001f980 \u65e5\u672c\u8a9e"):
+        ids = model.tokenize(text, False)
+        raw = b"".join(model.token_to_piece_bytes(t) for t in ids)
+        assert raw.decode("utf-8") == model.detokenize(ids) == text
+
+
+def test_joined_pieces_are_the_text_when_characters_span_tokens(model: bwr.Model) -> None:
+    """Every decoded or verified token is accounted through `_advance_token`,
+    so feeding the emoji's ids there is the engine path minus the forward
+    passes. The pieces used to read '��������' where `detokenize` read the
+    characters, and the routes build the response from the pieces."""
+    ids = model.tokenize("\U0001fae0\U0001faf6\U0001f3ff", False)
+    assert len(ids) > 3  # byte-fallback: several tokens per character
+    eng = _engine(model)
+    try:
+        rid = eng.add_request("x", bwr.RequestParams(max_tokens=len(ids), temp=0.0))
+        req = eng.state(rid)
+        outs = [eng._advance_token(req, t) for t in ids]
+        assert outs[-1].finished and outs[-1].finish_reason == "length"
+        assert all(not o.finished for o in outs[:-1])
+        joined = "".join(o.piece for o in outs)
+        assert joined == eng.text_of(rid) == "\U0001fae0\U0001faf6\U0001f3ff"
+    finally:
+        eng.ctx.close()
+
+
 @pytest.fixture(scope="module")
 def client(model: bwr.Model):
     fastapi_testclient = pytest.importorskip("fastapi.testclient")

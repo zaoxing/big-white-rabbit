@@ -70,6 +70,11 @@ public:
 
     std::vector<llama_token> tokenize(const std::string & text, bool add_special, bool parse_special) const;
     std::string token_to_piece(llama_token tok, bool special) const;
+    // The piece as llama.cpp spells it: raw bytes, not necessarily whole UTF-8
+    // characters (byte-fallback tokens are single bytes). Bound to Python as
+    // `token_to_piece_bytes` so the engine can join a character spelled over
+    // several tokens before decoding it; `token_to_piece` is the valid-UTF-8 view.
+    std::string token_to_piece_raw(llama_token tok, bool special) const;
     std::string detokenize(const std::vector<llama_token> & toks, bool unparse_special) const;
     bool is_eog(llama_token tok) const;
 

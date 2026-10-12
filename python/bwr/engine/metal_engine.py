@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from .._bwr_metal import Batch, Context, Model
 from .batching import AdmissionPolicy, FCFSPolicy, RequestState, StepBudget, StepPlan
 from .config import EngineConfig, RequestParams, StopSequenceFilter
+from .detok import ByteDetokenizer
 from .draft import DraftEngine
 from .hotlist import ExpertHotlist
 from .ngram import NgramTable
@@ -286,6 +287,7 @@ class MetalEngine:
         # entry -- and `_advance` retires on ANY failure -- so `set(_stop_filters)` is
         # always a subset of `set(_states)`: a scanner cannot outlive its request.
         self._stop_filters: dict[int, StopSequenceFilter] = {}
+        self._detoks: dict[int, ByteDetokenizer] = {}
         # N-gram draft tables, one per request. Same ownership story as the
         # stop filters: engine-owned, invisible to policies, dropped on retire
         # (and therefore on ANY `_advance`/`_verify` failure). Only populated
@@ -609,12 +611,14 @@ class MetalEngine:
         chain must have replayed the chain to match (see ``accept_seq``).
         """
         if req.params.stop_at_eog and self.model.is_eog(token):
-            return self._retire(req, "eog", token=token)
+            # No piece for the control token itself; only a held partial
+            # character (already in text_of as its replacement) rides along.
+            return self._retire(req, "eog", token=token, piece=self._flush_piece(req))
 
         req.output_tokens.append(token)
         req.n_generated += 1
         req.next_token = token
-        piece = self.model.token_to_piece(token)
+        piece = self._piece(req, token)
 
         stop_filter = self._stop_filters.get(req.request_id)
         if stop_filter is not None:
@@ -628,6 +632,7 @@ class MetalEngine:
             # has arrived stops costing decodes.
             _emittable, hit = stop_filter.push(piece)
             if hit:
+                piece += self._flush_piece(req)
                 return self._retire(req, "stop_sequence", token=token, piece=piece)
 
         # Checked after the stop sequence on purpose: if one token both completes a
@@ -635,10 +640,35 @@ class MetalEngine:
         # the text is truncated at it either way, and "length" would tell the client to
         # continue a turn that is already complete.
         if req.n_generated >= req.params.max_tokens:
-            return self._retire(req, "length", token=token, piece=piece)
+            return self._retire(req, "length", token=token, piece=piece + self._flush_piece(req))
         if req.n_pos >= self.ctx.n_ctx_seq:
-            return self._retire(req, "context", token=token, piece=piece)
+            return self._retire(req, "context", token=token, piece=piece + self._flush_piece(req))
         return StepOutput(req.request_id, token, piece, False, None)
+
+    def _piece(self, req: RequestState, token: int) -> str:
+        """The text this token adds, through the request's incremental
+        detokenizer. llama.cpp's pieces are bytes, and a byte-fallback
+        vocabulary spells one character over several tokens; decoded one at a
+        time (`token_to_piece`, which repairs each piece to valid UTF-8) every
+        piece but the last was U+FFFD, and the routes stream pieces, not
+        text_of. Built on first use: the stub engines in the tests construct
+        no tables, and a model stand-in may offer `token_to_piece` only."""
+        detoks = getattr(self, "_detoks", None)
+        if detoks is None:
+            detoks = self._detoks = {}
+        detok = detoks.get(req.request_id)
+        if detok is None:
+            detok = detoks[req.request_id] = ByteDetokenizer()
+        raw = getattr(self.model, "token_to_piece_bytes", None)
+        data = raw(token) if raw is not None else self.model.token_to_piece(token).encode()
+        return detok.push(data)
+
+    def _flush_piece(self, req: RequestState) -> str:
+        """Whatever `_piece` still holds, for the retire that ends the
+        request: joined pieces must stay equal to text_of, which decodes a
+        trailing partial character to a replacement character."""
+        detok = getattr(self, "_detoks", {}).get(req.request_id)
+        return detok.flush() if detok is not None else ""
 
     def _plan_drafts(self, plan: StepPlan, spare: int) -> dict[int, list[int]]:
         """Draft continuations for greedy generating requests from spare rows.
@@ -817,6 +847,7 @@ class MetalEngine:
         req.finish_reason = reason
         req.next_token = None
         self._stop_filters.pop(req.request_id, None)
+        getattr(self, "_detoks", {}).pop(req.request_id, None)
         self._spec_tables.pop(req.request_id, None)
         if self.draft is not None:
             self.draft.release(req.request_id)
