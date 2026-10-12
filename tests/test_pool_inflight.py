@@ -282,6 +282,35 @@ def test_a_benchmark_row_survives_an_eviction_by_another_model(pool_app):
     assert r_b.json()["usage"]["completion_tokens"] == N_TOKENS
 
 
+# -- a profile's cap is a default for BOTH spellings of the request's cap ----
+
+
+def test_a_profile_cap_fills_only_a_request_that_sent_neither_spelling():
+    """An exposed profile's max_tokens is a default, not an override, and the
+    request has two spellings for its cap. The builder used to test only the
+    legacy field before applying the profile, so an explicit
+    `max_completion_tokens: 400` lost to a profile's 50 -- the one spelling
+    `resolved_max_tokens` says wins lost to a default."""
+    from bwr.server.app import DEFAULT_MAX_TOKENS, _request_params
+    from bwr.server.schemas import ChatCompletionRequest
+
+    def req(**kw):
+        return ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hi"}], **kw
+        )
+
+    profile = {"max_tokens": 50}
+    assert _request_params(req(max_completion_tokens=400), profile).max_tokens == 400
+    assert _request_params(req(max_tokens=400), profile).max_tokens == 400
+    assert (
+        _request_params(req(max_completion_tokens=400, max_tokens=7), profile).max_tokens
+        == 400
+    )
+    # Nothing explicit: the profile fills the gap, ahead of the server default.
+    assert _request_params(req(), profile).max_tokens == 50
+    assert _request_params(req(), {}).max_tokens == DEFAULT_MAX_TOKENS
+
+
 # -- finding 2: /v1/messages renders with the RESOLVED model in pool mode ----
 
 

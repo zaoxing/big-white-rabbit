@@ -195,7 +195,12 @@ def _request_params(
     if not stops and d.get("stop"):
         stops = normalize_stops(d["stop"])
     max_tokens = req.resolved_max_tokens(DEFAULT_MAX_TOKENS)
-    if req.max_tokens is None and d.get("max_tokens"):
+    # The cap has two spellings and the profile may fill it only when NEITHER
+    # was sent. Testing the legacy field alone let a profile's cap beat an
+    # explicit `max_completion_tokens` -- the spelling `resolved_max_tokens`
+    # says wins lost to a default.
+    if (req.max_tokens is None and req.max_completion_tokens is None
+            and d.get("max_tokens")):
         max_tokens = int(d["max_tokens"])
     return build_params(
         max_tokens=max_tokens,
