@@ -240,6 +240,47 @@ def test_in_flight_is_released_on_every_exit(pool_app):
     asyncio.run(go())
 
 
+_EVERY_SURFACE = [
+    ("/v1/chat/completions", _chat("a")),
+    ("/v1/chat/completions", _chat("a", stream=True)),
+    ("/v1/messages", _messages("a")),
+    ("/v1/messages", _messages("a", stream=True)),
+]
+
+
+@pytest.mark.parametrize("path,body", _EVERY_SURFACE)
+def test_in_flight_is_released_when_submit_503s(pool_app, monkeypatch, path, body):
+    """The bracket opens right after `resolve` and must close on the ERROR
+    exit too: a submit the engine refuses (no free sequence slot, mapped to
+    503) raises before any generator exists, so the handler's own finally is
+    the only thing that can release it. Without that release the 503 leaves
+    `in_flight` at 1 for a request that never ran, and the next unload of
+    the model -- eviction, admin, context benchmark -- waits forever."""
+    from bwr.engine.async_engine import AsyncEngine
+
+    async def boom(self, prompt, params):
+        raise RuntimeError("no free seq")
+
+    monkeypatch.setattr(AsyncEngine, "submit", boom)
+
+    async def go():
+        async with pool_app.router.lifespan_context(pool_app):
+            r = await _post(pool_app, path, body)
+            assert r.status_code == 503, (path, r.text)
+            rec = pool_app.state.pool._loaded["a"]
+            try:
+                assert rec.in_flight == 0, f"in_flight leaked: {rec.in_flight}"
+            finally:
+                # A leak would also hang the lifespan's shutdown (the pool
+                # waits on `drained` under its lock); reset so the failure
+                # is reported rather than timed out.
+                rec.in_flight = 0
+                rec.drained.set()
+            assert await asyncio.wait_for(pool_app.state.pool.unload("a"), 2.0) is True
+
+    asyncio.run(go())
+
+
 def test_a_benchmark_row_survives_an_eviction_by_another_model(pool_app):
     """The throughput benchmark issues requests through `resolve` like a
     handler does, so it must bracket them with the pool's in-flight count
