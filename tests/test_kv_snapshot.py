@@ -334,3 +334,26 @@ def test_second_save_demotes_the_first_to_its_bin_file(tmp_path) -> None:
     assert ("cp", store.snapshot_seq, 4, -1, -1) in eng.ctx.calls
     assert eng._states[rid_b].prompt == [7, 7, 7, 7]
     assert eng._free_seq_ids == []
+
+
+def test_failed_binary_restore_returns_its_seq_to_the_free_list(tmp_path) -> None:
+    """The binary path pops a seq before read_bytes/state_seq_set_data. Those
+    run under a bare except that only re-inserts the seq when set_data
+    returned 0, so a raising context (or an unreadable .bin) leaked the slot
+    for the life of the engine. The fallback must see the same free list."""
+    eng = _stub_engine(set_data_raises=True)
+    eng.ctx.n_seq_max = 4
+    eng._free_seq_ids = [2, 3]
+    store = KVSnapStore(eng, kv_dir=tmp_path)
+    eng._states[0] = _live_request(0, 0, [1, 2, 3], [10])
+    store.save("a", 0)
+    store._snaps["a"].live = False  # as after a restart: only the .bin is left
+    assert (tmp_path / "a.bin").exists()
+
+    seen = []
+    eng.add_request = lambda prompt, params, **kw: seen.append((prompt, params)) or 99
+    rid = store.load("a")
+    assert rid == 99
+    assert ("set_data", 2) in eng.ctx.calls
+    assert eng._free_seq_ids == [2, 3]
+    assert seen == [([1, 2, 3], store._snaps["a"].params)]

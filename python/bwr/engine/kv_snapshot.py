@@ -231,21 +231,23 @@ class KVSnapStore:
         if not snap.live or snap.params is None:
             bin_path = self.kv_dir / f"{name}.bin"
             if bin_path.exists():
-                try:
-                    # Need a free seq for the restored KV
-                    if not self.engine._free_seq_ids:
-                        self.engine._evict_pin(exclude=None)
-                    if self.engine._free_seq_ids:
-                        seq_id = self.engine._free_seq_ids.pop(0)
+                # Need a free seq for the restored KV
+                if not self.engine._free_seq_ids:
+                    self.engine._evict_pin(exclude=None)
+                if self.engine._free_seq_ids:
+                    seq_id = self.engine._free_seq_ids.pop(0)
+                    # Whatever goes wrong between the pop and the rehydrate
+                    # (unreadable .bin, set_data raising or returning 0), the
+                    # seq goes back to the free list before the fallback.
+                    try:
                         data = bin_path.read_bytes()
                         # state_seq_set_data returns bytes consumed (0 on failure)
                         consumed = self.engine.ctx.state_seq_set_data(seq_id, data)  # type: ignore[attr-defined]
-                        if consumed and consumed > 0:
-                            return self._rehydrate(snap, seq_id, new_request_id)
-                        # set_data failed — return seq to free list for fallback
-                        self.engine._free_seq_ids.insert(0, seq_id)
-                except Exception:  # noqa: BLE001 - best-effort binary restore, fallback to re-prefill
-                    pass
+                    except Exception:  # noqa: BLE001 - best-effort binary restore, fallback to re-prefill
+                        consumed = 0
+                    if consumed and consumed > 0:
+                        return self._rehydrate(snap, seq_id, new_request_id)
+                    self.engine._free_seq_ids.insert(0, seq_id)
             # Fallback: re-prefill via normal admission (slow but correct)
             rid = self.engine.add_request(
                 snap.prompt,  # type: ignore[arg-type] — already tokenized
