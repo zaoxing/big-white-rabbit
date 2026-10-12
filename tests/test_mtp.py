@@ -264,9 +264,10 @@ def _greedy(tmp_model, **cfg_kw):
 
 @needs_weights
 def test_ngram_speculation_preserves_greedy_output():
-    """Regression: _refill used to rebuild from `prompt + output_tokens` while
-    the accepted tokens were still unfed, leaving the cache short by `matched`
-    and diverging from AR at the first mismatch that followed an accept."""
+    """Regression: the mismatch path used to rebuild the cache from
+    `prompt + output_tokens` while the accepted tokens were still unfed,
+    leaving it short by `matched` and diverging from AR at the first
+    mismatch that followed an accept."""
     ar, _ = _greedy(MODEL, speculative=True, spec_max_drafts=0)
     spec, recomputes = _greedy(MODEL, speculative=True, spec_max_drafts=4)
     assert recomputes > 0, "no mismatch occurred; test would not exercise rewind"

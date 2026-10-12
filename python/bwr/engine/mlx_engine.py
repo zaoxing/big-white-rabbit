@@ -664,9 +664,9 @@ class MLXEngine:
         continued the same way, pairing its stored last hidden row with
         `tokens[start]` first.
 
-        Shared by `_start_spec` and `_refill` so the trunk cache and the MTP
-        head cache can never drift apart -- every rebuild of one rebuilds the
-        other, chunked identically.
+        The one prefill path, for a cold prompt and for a partial prefix
+        hit alike, so the trunk cache and the MTP head cache can never drift
+        apart -- whatever fills one fills the other, chunked identically.
 
         Position convention the head depends on: after this returns, the head
         cache holds pairs `(hidden[p], tokens[p+1])` for `p` in
@@ -736,27 +736,6 @@ class MLXEngine:
             except BaseException:  # noqa: BLE001 - must never mask the real failure
                 pass
             raise
-
-    def _refill(self, req: RequestState, extra: Sequence[int] = ()) -> None:
-        """Rebuild the cache exactly: re-feed prompt + accepted tokens.
-
-        The mismatch path: the evaluated batch advanced the cache past the
-        accepted prefix and ArraysCache cannot rewind, so replay from scratch.
-        Exact by construction -- same tokens, same order, same positions.
-
-        `extra` is the tokens this verify round accepted but has not fed yet.
-        The caller runs `_feed` AFTER this, so `req.output_tokens` still lags
-        by exactly those; without them the rebuilt cache is short by `matched`
-        and every later step decodes against a truncated history (greedy
-        speculative output then diverges from greedy AR -- the invariant the
-        whole verify path exists to preserve). The engine-wide invariant is
-        `cache == prompt + output_tokens[:-1]`, `next_token == output[-1]`;
-        passing `accepted[:-1]` here is what keeps it true once `_feed` runs.
-        """
-        mx = _mx()
-        tokens = req.prompt + req.output_tokens + list(extra)
-        logits = self._prefill_owned(req.request_id, tokens)
-        req.next_token = int(mx.argmax(logits[0, -1]).item())
 
     def _lookahead(self, req: RequestState, token: int) -> None:
         """Queue the forward for `token` now, so the GPU computes it while
