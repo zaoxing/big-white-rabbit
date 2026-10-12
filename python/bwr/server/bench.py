@@ -326,7 +326,21 @@ class BenchRunner:
             end = time.perf_counter()
             return (first or end), n, end
 
-        rows = await asyncio.gather(*[one_row() for _ in range(batch)])
+        # A row that fails does not end the batch on its own: its siblings
+        # are still streaming on the engine, and the caller releases the
+        # pool's in-flight bracket as soon as this returns. A bare gather
+        # raised on the first failure with the rest live, so the bracket
+        # went while the engine still held their requests. Stop the
+        # siblings and wait for every one to settle (each releases its
+        # own request in its finally) before the failure propagates.
+        tasks = [asyncio.create_task(one_row()) for _ in range(batch)]
+        try:
+            rows = await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         t_end = time.perf_counter()
 
         firsts = [r[0] for r in rows]

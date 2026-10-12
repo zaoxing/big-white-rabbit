@@ -378,3 +378,48 @@ def test_prompt_construction_survives_a_missing_tokenizer():
             raise AttributeError("no tokenizer here")
 
     assert _prompt_of_length(_NoTokenizer(), 10)
+
+
+# -- the pool's in-flight bracket --------------------------------------------
+
+
+class _NthSubmitRaises(_StubEngine):
+    """Streams normally except that the Nth submit blows up -- one row of a
+    batch failing while its siblings are mid-stream."""
+
+    def __init__(self, nth: int, **kw):
+        super().__init__(**kw)
+        self.nth = nth
+
+    async def submit(self, prompt, params):
+        if self.submitted + 1 == self.nth:
+            self.submitted += 1
+            raise RuntimeError("boom")
+        return await super().submit(prompt, params)
+
+
+def test_a_failed_batch_row_releases_the_bracket_only_after_its_siblings_drain():
+    """The bracket is what keeps the pool from evicting the engine under a
+    row. `gather` used to raise on the first failed row with the others
+    still streaming, so the bracket was released with live requests on the
+    engine and every one of them ran unprotected."""
+    async def main():
+        engine = _NthSubmitRaises(5, tokens=20, delay=0.005)
+        at_finish = []
+
+        def finished(model_id):
+            at_finish.append((engine.concurrent, engine.submitted, engine.released))
+
+        runner = BenchRunner(_resolver(engine), request_finished=finished)
+        started = runner.start("m", prompt_lengths=[8], batch_sizes=[8],
+                               generation_length=20)
+        body = await _drain_any(runner, started["bench_id"])
+        assert body["status"] == "failed"
+        assert body["error"] == "HTTPException: 503: boom"
+        # The single row brackets first and on its own. The batch's
+        # failing submit never handed back a request, so the other seven
+        # are what must have drained by the time its bracket goes:
+        # nothing live, and every handed-out request released.
+        assert at_finish == [(0, 1, 1), (0, 9, 8)]
+
+    _run(main())
