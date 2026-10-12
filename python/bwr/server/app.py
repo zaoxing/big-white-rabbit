@@ -692,12 +692,18 @@ def build_app(
 def _prefix_tokens(engine: object) -> int:
     """Prompt tokens the prefix cache has served, or 0 where there is no cache.
 
-    MetalEngine keeps no such counter and the MLX one only has it when the
-    prefix cache is enabled, so this must degrade to 0 rather than raise --
-    stats are observability, never a reason to fail a completion.
+    The two backends spell the counter differently: MLXEngine keeps
+    `prefix_hit_tokens`, MetalEngine `prefix_cache_tokens_saved` (the name
+    its own tests assert on, so it is read here rather than renamed). Either
+    may be absent -- a backend without a cache, or one with it switched off --
+    and that degrades to 0 rather than raising: stats are observability,
+    never a reason to fail a completion.
     """
     raw = getattr(engine, "engine", engine)
-    return int(getattr(raw, "prefix_hit_tokens", 0) or 0)
+    value = getattr(raw, "prefix_hit_tokens", None)
+    if value is None:
+        value = getattr(raw, "prefix_cache_tokens_saved", 0)
+    return int(value or 0)
 
 
 def _record(

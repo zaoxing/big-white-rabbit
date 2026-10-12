@@ -254,3 +254,19 @@ def test_anthropic_messages_works_in_pool_mode(pool_app):
     assert body["model"] == "a"
     assert body["usage"]["input_tokens"] == 2  # "user: go"
     assert body["content"][0]["text"] == "t " * N_TOKENS
+
+
+# -- finding 3: Metal's prefix counter reaches the stats ----------------------
+
+
+def test_prefix_tokens_reads_the_metal_counter_too():
+    from bwr.server.app import _prefix_tokens
+
+    mlx_like = types.SimpleNamespace(prefix_hit_tokens=7)
+    metal_like = types.SimpleNamespace(prefix_cache_hits=1, prefix_cache_tokens_saved=11)
+    neither = object()
+    assert _prefix_tokens(mlx_like) == 7
+    assert _prefix_tokens(metal_like) == 11
+    assert _prefix_tokens(neither) == 0
+    # The AsyncEngine wrapper is unwrapped the same way for both.
+    assert _prefix_tokens(types.SimpleNamespace(engine=metal_like)) == 11
