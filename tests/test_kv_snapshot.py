@@ -357,3 +357,19 @@ def test_failed_binary_restore_returns_its_seq_to_the_free_list(tmp_path) -> Non
     assert ("set_data", 2) in eng.ctx.calls
     assert eng._free_seq_ids == [2, 3]
     assert seen == [([1, 2, 3], store._snaps["a"].params)]
+
+
+def test_every_save_clears_the_snapshot_seq_before_copying(tmp_path) -> None:
+    """With kv_unified=True llama.cpp's same-stream seq_cp only adds the
+    destination tag to the source's cells, so a save that does not clear the
+    snapshot seq first stacks on top of the previous one and the restored seq
+    carries two cells per position. The rm must precede the cp on every save,
+    the second included."""
+    eng = _stub_engine()
+    eng._states[0] = _live_request(0, 0, [1, 2, 3], [7])
+    store = KVSnapStore(eng, snapshot_seq=1, kv_dir=tmp_path)
+    eng.ctx.calls.clear()
+    store.save("one", 0)
+    store.save("two", 0)
+    rm_cp = [c for c in eng.ctx.calls if c[0] in ("rm", "cp")]
+    assert rm_cp == [("rm", 1, -1, -1), ("cp", 0, 1, -1, -1)] * 2, rm_cp
