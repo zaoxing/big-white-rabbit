@@ -1,7 +1,8 @@
 """MTP-head speculation for the MLX backend (SPEC-mlx-mtp-draft.md).
 
 The model's own multi-token-prediction head proposes; the target verifies with
-the SAME machinery as n-gram speculation (`_verify_rows` + refill).
+the SAME machinery as n-gram speculation (`_verify_rows`, with its
+snapshot/restore rewind on a mismatch).
 Verification makes output identical regardless of draft quality -- a bad draft
 only costs time, never correctness. Only the acceptance rate depends on the
 head.
@@ -19,8 +20,9 @@ measurement rather than from the runtime metadata (see the spec):
    0.479.
 2. Proposal appends `depth` speculative entries to that cache; they MUST be
    trimmed back before the next round, or the cache drifts by `depth` per
-   round. `KVCache.trim` is O(1) (an offset decrement), which is why
-   rejection is cheap on the head even though the hybrid trunk has to refill.
+   round. `KVCache.trim` is O(1) (an offset decrement), so rejection is
+   cheap on the head: the engine rewinds it by resetting that offset, while
+   the trunk restores a snapshot and re-feeds the accepted prefix.
 """
 
 from __future__ import annotations
@@ -96,8 +98,8 @@ class MTPDraft:
     """The MTP head: load, prefill, propose. One instance per engine.
 
     Caches are per-request and owned by the caller (mirroring the engine's
-    `_caches`), because the head's cache has to be rebuilt in lockstep with
-    the trunk's on a refill.
+    `_caches`), because the head's cache has to move in lockstep with the
+    trunk's: prefilled together, rewound together on a mismatch.
     """
 
     def __init__(self, target: Any, model_path: str | Path, depth: int) -> None:

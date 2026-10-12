@@ -60,18 +60,45 @@ def test_propose_is_greedily_deterministic(model: bwr.Model) -> None:
 
 
 def test_sync_advances_and_propose_continues(model: bwr.Model) -> None:
+    """The engine's position convention, end to end: the target's base token
+    is fed at its own cell before the first propose, drafts then occupy
+    base+1.., and a verify confirms ONLY the new token at base+1+matched
+    (matched drafts already sit at the right cells)."""
     draft = make_draft(model)
     tokens = prompt_tokens(model)
     draft.prepare(0, 0, tokens)
     base_pos = len(tokens)
+    base_token = 9999 % model.n_vocab
+    draft.sync(0, base_pos, [base_token])
+    assert draft._pos[0] == base_pos + 1
     drafts = draft.propose(0, 4)
     assert len(drafts) == 4
-    # Confirm the first two drafts plus a new tail token, as a verify would.
-    confirmed, tail = base_pos + 2, [drafts[0], drafts[1], 9999 % model.n_vocab]
-    draft.sync(0, confirmed, tail)
-    assert draft._pos[0] == confirmed + len(tail)
+    assert draft._pos[0] == base_pos + 1 + 4
+    # Two drafts matched, the third rejected: the target's token replaces it.
+    matched, new_token = 2, (drafts[2] + 1) % model.n_vocab
+    confirmed = base_pos + 1 + matched
+    draft.sync(0, confirmed, [new_token])
+    assert draft._pos[0] == confirmed + 1
     continued = draft.propose(0, 2)
     assert len(continued) == 2
+    assert draft._pos[0] == confirmed + 1 + 2
+
+
+def test_sync_after_full_match_stays_consecutive(model: bwr.Model) -> None:
+    """All four drafts matched: the bonus token lands one past the last
+    proposal, which is a consecutive write only because the base token was
+    fed first (prompt-only preparation would leave the drafts one cell
+    short and the bonus write would gap)."""
+    draft = make_draft(model)
+    tokens = prompt_tokens(model)
+    draft.prepare(0, 0, tokens)
+    base_pos = len(tokens)
+    draft.sync(0, base_pos, [9999 % model.n_vocab])
+    drafts = draft.propose(0, 4)
+    bonus_pos = base_pos + 1 + len(drafts)
+    draft.sync(0, bonus_pos, [(drafts[-1] + 1) % model.n_vocab])
+    assert draft._pos[0] == bonus_pos + 1
+    assert len(draft.propose(0, 1)) == 1
 
 
 def test_propose_zero_is_noop(model: bwr.Model) -> None:
@@ -143,6 +170,34 @@ def test_draft_on_off_byte_identical(model: bwr.Model) -> None:
     spec_id = spec._next_request_id - 1
     assert spec.tokens_of(spec_id) == plain.tokens_of(plain_id)
     assert spec.state(spec_id).finish_reason == plain.state(plain_id).finish_reason
+
+
+def test_draft_full_match_keeps_positions_consecutive(model: bwr.Model) -> None:
+    """A same-file draft on a repetitive prompt matches every draft on the
+    very first verify. The draft context must then already sit one cell past
+    its last proposal (the target's base token fed before the first propose),
+    so the bonus token syncs consecutively instead of leaving a gap that
+    llama.cpp rejects ("sequence positions must remain consecutive"). Output
+    stays byte-identical to the plain path either way."""
+    # No trailing space: the continuation is " word" repeated, one token
+    # each, so the first proposal matches in full even when misaligned.
+    prompt = "Repeat forever:" + " word" * 8
+    params = bwr.RequestParams(temp=0.0, max_tokens=16, stop_at_eog=False)
+    plain = bwr.MetalEngine(model, bwr.EngineConfig(n_ctx=512, n_seq_max=1))
+    plain_id = plain.add_request(prompt, params)
+    list(plain.drain())
+    draft_model = bwr.Model(MODEL_PATH, bwr.ModelParams())
+    spec = bwr.MetalEngine(
+        model, bwr.EngineConfig(n_ctx=512, n_seq_max=1), draft_model=draft_model
+    )
+    spec_id = spec.add_request(prompt, params)
+    list(spec.drain())  # raised RuntimeError out of decode before the fix
+    assert spec.tokens_of(spec_id) == plain.tokens_of(plain_id)
+    assert spec.state(spec_id).finish_reason == "length"
+    assert spec.spec_drafted > 0
+    # Drafts come from the same weights as the target: the very first verify
+    # (and most after it) accept every draft, which is the full-match path.
+    assert spec.spec_accepted > 0
 
 
 def test_draft_never_uses_more_decodes(model: bwr.Model) -> None:

@@ -12,6 +12,17 @@ past confirmed tokens except inside `propose`, and it never partially rewinds
 except in `sync` (which is why it carries rollback snapshots like the target
 when the draft model is a hybrid).
 
+Position convention: before `propose`, the draft holds every token the target
+holds PLUS the one the target is about to pack (its ``next_token``, at the
+target's ``n_pos``). So the first proposal is the token for ``n_pos + 1`` and
+sits at that cell -- exactly where the target packs draft 0 and whose row it
+compares against. The target's first sampled token after prefill therefore
+goes through `sync(rid, n_pos, [token])` before the first `propose`, and so
+does any token sampled by a plain step that packed no drafts. After a verify,
+`sync(rid, pos_base + 1 + matched, [confirmed])`: draft k sits at
+``pos_base + 1 + k`` in both contexts, so that is the first cell the target
+rejected (or, on a full match, the bonus cell one past the last proposal).
+
 Per-step call order (all on the worker thread, the single owner of both
 contexts): `propose` (draft decodes now) -> target packs + decodes ->
 `_verify` -> `sync` (exactly the newly-confirmed tail). `propose` leaves
@@ -115,7 +126,9 @@ class DraftEngine:
         the rejected drafts at/after that cell. Always called with the newly
         confirmed tail only -- matched drafts already sit at the right cells,
         so re-decoding them would desync positions (llama requires strictly
-        consecutive writes). Leaves pending logits."""
+        consecutive writes). ``confirmed_pos`` must therefore be at most one
+        past the draft's last cell (see the module docstring for where the
+        engine's callers place it). Leaves pending logits."""
         seq_id = self._lookup(request_id)
         tail_tokens = list(tail)
         if not tail_tokens:

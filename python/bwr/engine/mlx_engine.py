@@ -451,8 +451,8 @@ class MLXEngine:
         )
         if rp.stop:
             self._stop_filters[request_id] = StopSequenceFilter(rp.stop)
-        # Every request that may take the manual loop (see _use_manual)
-        # carries the verify path's per-request counters. The n-gram table
+        # Every request runs the manual loop (see step) and carries the
+        # verify path's per-request counters. The n-gram table
         # is seeded with the prompt (same rule as MetalEngine) only when
         # speculation is on; the MTP head sources its own drafts.
         self._spec_ok[request_id] = True
@@ -945,9 +945,9 @@ class MLXEngine:
         self.spec_accepted += matched
         stats[1] += matched
         if len(accepted) < len(rows):
-            # Mismatch: the cache advanced past the accepted prefix and
-            # cannot rewind -- rebuild it exactly. Full matches skip this:
-            # the cache already holds exactly the accepted stream.
+            # Mismatch: the cache advanced past the accepted prefix, so
+            # rewind it to the snapshot. Full matches skip this: the cache
+            # already holds exactly the accepted stream.
             self.spec_recomputes += 1
             stats[2] += 1
             # Rejection: rewind to the pre-forward state and re-feed only the

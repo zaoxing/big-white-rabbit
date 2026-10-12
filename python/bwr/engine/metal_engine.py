@@ -481,9 +481,12 @@ class MetalEngine:
                 verify_outputs, accepted, matched = self._verify(entry)
                 outputs.extend(verify_outputs)
                 # Feed the newly confirmed tail back into the draft stream so
-                # the next propose continues from verified tokens. Live
-                # requests only: a request that just retired already released
-                # its draft state in `_retire`.
+                # the next propose continues from verified tokens. Draft k
+                # sits at pos_base+1+k in both contexts, so the first rejected
+                # (or bonus) cell is pos_base+1+matched: the draft drops its
+                # proposals from there and decodes the target's token in their
+                # place. Live requests only: a request that just retired
+                # already released its draft state in `_retire`.
                 if self.draft is not None and not entry.req.finished:
                     self.draft.sync(
                         entry.req.request_id,
@@ -492,7 +495,20 @@ class MetalEngine:
                     )
             else:
                 req, row = entry
-                outputs.append(self._advance(req, row))
+                out = self._advance(req, row)
+                outputs.append(out)
+                # A token sampled outside a verify (the first one after
+                # prefill, or any plain step that packed no drafts) is one the
+                # draft never saw. It becomes the base token the target packs
+                # at `req.n_pos` next step, and the draft must hold it at that
+                # same cell before it proposes, so its first proposal is the
+                # token for n_pos+1 -- the cell the target packs draft 0 at
+                # and compares it with. Without this the draft runs one cell
+                # behind: proposals compare against the wrong target row and
+                # a full first match leaves a gap at `sync` (llama requires
+                # consecutive positions).
+                if self.draft is not None and not req.finished:
+                    self.draft.sync(req.request_id, req.n_pos, [out.token])
         return outputs
 
     def _fill_batch(
