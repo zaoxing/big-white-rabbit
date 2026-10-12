@@ -259,6 +259,65 @@ def test_rescan_picks_up_new_models_without_dropping_loaded(pool_factory, tmp_pa
     assert p.loaded_ids == ["a"]
 
 
+def test_rescan_drops_a_model_whose_directory_is_gone(pool_factory, tmp_path):
+    """DELETE /admin/api/hf/models/{name} removes the directory and rescans;
+    the model must stop being listed, or the next request for it reaches the
+    engine constructor over a path that no longer exists."""
+    import shutil
+
+    p = pool_factory({"a": 4, "b": 4, "c": 4}, budget_gib=32)
+    shutil.rmtree(tmp_path / "b")
+    p.rescan()
+    assert {m["id"] for m in p.list()} == {"a", "c"}
+    with pytest.raises(ModelPoolError, match="unknown model"):
+        p.resolve("b")
+
+
+def test_rescan_keeps_a_resident_model_listed_until_it_is_unloaded(
+    pool_factory, tmp_path
+):
+    """A resident engine is never dropped by a scan: an unload goes through
+    the normal drain-then-stop path. The entry disappears on the first scan
+    after the unload."""
+    import shutil
+
+    p = pool_factory({"a": 4, "b": 4}, budget_gib=32)
+    asyncio.run(p.acquire("b"))
+    shutil.rmtree(tmp_path / "b")
+    p.rescan()
+    assert {m["id"] for m in p.list()} == {"a", "b"}
+    assert p.loaded_ids == ["b"]
+    assert asyncio.run(p.unload("b")) is True
+    p.rescan()
+    assert {m["id"] for m in p.list()} == {"a"}
+
+
+def test_acquire_of_a_vanished_directory_is_a_pool_error_not_an_engine_crash(
+    pool_factory, tmp_path
+):
+    """The directory can go between two scans. The pool must refuse with its
+    own error (a 400 at the routes) instead of building an engine over a
+    missing path -- and it must not evict a resident model to make room for
+    one that cannot load."""
+    import shutil
+
+    built: list[str] = []
+    p = pool_factory({"a": 10, "b": 10}, budget_gib=12)
+    real = p._factory
+
+    def counting(entry, config):
+        built.append(entry.model_id)
+        return real(entry, config)
+
+    p._factory = counting
+    asyncio.run(p.acquire("a"))
+    shutil.rmtree(tmp_path / "b")
+    with pytest.raises(ModelPoolError, match="no longer"):
+        asyncio.run(p.acquire("b"))
+    assert built == ["a"]
+    assert p.loaded_ids == ["a"]
+
+
 # -- preload -----------------------------------------------------------------
 
 

@@ -215,11 +215,27 @@ class ModelPool:
     # -- inspection --------------------------------------------------------
 
     def rescan(self) -> None:
-        """Pick up models added on disk since startup, keeping loaded state."""
-        for entry in discover(self.model_dir):
-            if entry.model_id in self._entries:
+        """Re-run discovery: pick up models added on disk, drop ones removed.
+
+        A model whose files are gone is dropped from the list -- unless it is
+        resident. An engine is never torn down by a scan: an unload goes
+        through the normal drain-then-stop path, and the entry stays listed
+        (and acquirable, since the mapped weights still serve) until that
+        happens. The scan after the unload drops it.
+
+        Removing the entry is what keeps a deleted model from being chosen:
+        `resolve` on it answers "unknown model" instead of `acquire` reaching
+        the engine constructor over a missing directory.
+        """
+        found = {e.model_id: e for e in discover(self.model_dir)}
+        for mid in list(self._entries):
+            if mid in found or mid in self._loaded:
                 continue
-            self._entries[entry.model_id] = entry
+            del self._entries[mid]
+            self._native_cache.pop(mid, None)
+        for mid, entry in found.items():
+            if mid not in self._entries:
+                self._entries[mid] = entry
 
     def list(self) -> list[dict[str, Any]]:
         for mid, entry in self._entries.items():
@@ -370,6 +386,13 @@ class ModelPool:
         async with self._lock:
             rec = self._loaded.get(mid)
             if rec is None:
+                if not entry.path.exists():
+                    # Checked before making room, not only in `_load`: a
+                    # model that cannot load must not evict a resident one.
+                    raise ModelPoolError(
+                        f"{mid} is no longer on disk at {entry.path}; "
+                        "rescan the model directory"
+                    )
                 await self._make_room(entry)
                 rec = await self._load(entry)
             self._loaded.move_to_end(mid)
@@ -415,6 +438,16 @@ class ModelPool:
     async def _load(
         self, entry: ModelEntry, *, config: EngineConfig | None = None
     ) -> _Loaded:
+        if not entry.path.exists():
+            # The directory can go between two scans (a delete from the
+            # admin UI, or by hand). Refuse here, as an admission error the
+            # routes answer 400 to, rather than handing a missing path to the
+            # engine constructor -- which for MLX falls through to the hub
+            # loader and raises something no surface maps.
+            raise ModelPoolError(
+                f"{entry.model_id} is no longer on disk at {entry.path}; "
+                "rescan the model directory"
+            )
         logger.info("pool: loading %s (%s)", entry.model_id, entry.kind)
         if config is None:
             config = self.config
