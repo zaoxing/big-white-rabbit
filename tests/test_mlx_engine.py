@@ -760,3 +760,45 @@ def test_joined_pieces_are_the_text_at_a_stop_sequence(batch: bool) -> None:
         assert outs[-1].token == eng.tokens_of(rid)[-1]
     finally:
         eng.ctx.close()
+
+
+# --- the context cap applies on every path ----------------------------------
+
+
+@needs_mlx_lib
+def test_feed_retires_on_context_when_prompt_plus_output_fills_n_ctx() -> None:
+    """The n_ctx check lived in the verify loop only; the batch step and the
+    prefix hit account their tokens through _feed, which checked EOG, stop
+    and max_tokens and nothing else, so a batched request ran past n_ctx
+    and reported "length". The check belongs in the one accounting
+    function, as in MetalEngine, after the stop and cap rules."""
+    eng = _stub_engine(EngineConfig(n_ctx=5))
+    req = _feed_only(eng, [1, 2, 3], max_tokens=100)
+    assert not eng._feed(req, 4, "4").finished
+    out = eng._feed(req, 5, "5")
+    assert out.finished and out.finish_reason == "context"
+    assert (out.token, out.piece) == (5, "5")
+    assert eng.tokens_of(req.request_id) == [4, 5]
+    assert eng.text_of(req.request_id) == "4 5"
+
+
+@needs_weights
+def test_batch_path_retires_on_context_where_the_single_path_does() -> None:
+    n_ctx, n_prompt = 64, 50
+    probe = MLXEngine(MODEL_PATH, EngineConfig(n_ctx=n_ctx))
+    words = "Count: " + " ".join(str(i % 10) for i in range(60))
+    prompt = list(probe._tokenizer.encode(words, add_special_tokens=True))[:n_prompt]
+    probe.ctx.close()
+    params = RequestParams(temp=0.0, max_tokens=100, stop_at_eog=False)
+    seen = {}
+    for batch in (False, True):
+        eng = MLXEngine(MODEL_PATH, EngineConfig(n_ctx=n_ctx, mlx_batch=batch))
+        try:
+            rid = eng.add_request(prompt, params)
+            outs = list(eng.drain())
+            assert eng.state(rid).finish_reason == "context", batch
+            assert "".join(o.piece for o in outs) == eng.text_of(rid)
+            seen[batch] = len(eng.tokens_of(rid))
+        finally:
+            eng.ctx.close()
+    assert seen[False] == seen[True] == n_ctx - n_prompt, seen

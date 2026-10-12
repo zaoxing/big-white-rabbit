@@ -1039,10 +1039,6 @@ class MLXEngine:
                 self.spec_fallbacks += 1
         outputs: list[StepOutput] = []
         for token in accepted:
-            if len(req.prompt) + req.n_generated >= self.config.n_ctx:
-                piece = self._tokenizer.decode([token])
-                outputs.append(self._retire(req, "context", token, piece))
-                break
             outputs.append(self._feed(req, token, self._tokenizer.decode([token])))
             if outputs[-1].finished:
                 break
@@ -1197,7 +1193,8 @@ class MLXEngine:
         return int(mx.argmax(row).item())
 
     def _feed(self, req: RequestState, token: int, piece: str) -> StepOutput:
-        """Account for one generated token: EOG, then stop, then cap."""
+        """Account for one generated token: EOG, then stop, then cap, then
+        context."""
         self._decode_calls += 1
         if req.params.stop_at_eog and token in self._eog_ids():
             # No piece: the end-of-turn marker is a control token, not text.
@@ -1221,6 +1218,13 @@ class MLXEngine:
                 return self._retire(req, "stop_sequence", token, piece)
         if req.n_generated >= req.params.max_tokens:
             return self._retire(req, "length", token, piece)
+        # Here, not in the verify loop alone: the batch step and the prefix
+        # hit account their tokens through this function too, and with the
+        # check elsewhere a batched request ran past n_ctx and called it
+        # "length". Counted after the append, as Metal's n_pos check is, so
+        # the retiring token is in tokens_of like the piece is in the text.
+        if len(req.prompt) + req.n_generated >= self.config.n_ctx:
+            return self._retire(req, "context", token, piece)
         return StepOutput(req.request_id, token, piece, False, None)
 
     # --- inspection ---------------------------------------------------------
