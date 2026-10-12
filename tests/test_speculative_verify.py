@@ -299,3 +299,99 @@ def test_verify_checks_each_token_at_its_own_position() -> None:
     assert [(o.token, o.finished, o.finish_reason) for o in outputs] == [
         (o.token, o.finished, o.finish_reason) for o in plain_outputs
     ]
+
+
+class _StepCtx(_ScriptedCtx):
+    """`_ScriptedCtx` plus what `step` itself touches: the batch size and a
+    decode that just records the rows it was handed."""
+
+    n_batch = 8
+    n_ctx_seq = 64
+
+    def __init__(self, samples: dict[int, int]) -> None:
+        super().__init__(samples)
+        self.decoded: list[list[tuple[int, int, int, bool]]] = []
+
+    def decode(self, batch: _FakeBatch) -> None:
+        self.decoded.append(list(batch.rows))
+
+
+class _FakeBatch:
+    """Row-recording stand-in for `Batch`: `add` returns the row index."""
+
+    def __init__(self) -> None:
+        self.rows: list[tuple[int, int, int, bool]] = []
+
+    def clear(self) -> None:
+        self.rows = []
+
+    def add(self, token: int, pos: int, seq_id: int, want: bool) -> int:
+        self.rows.append((token, pos, seq_id, want))
+        return len(self.rows) - 1
+
+
+class _FakeDraft:
+    """A draft model that proposes a fixed list and records every call."""
+
+    def __init__(self, proposals: list[int]) -> None:
+        self.proposals = proposals
+        self.calls: list[tuple] = []
+
+    def propose(self, request_id: int, n: int) -> list[int]:
+        self.calls.append(("propose", request_id, n))
+        return list(self.proposals)[:n]
+
+    def sync(self, request_id: int, pos: int, tail: list[int]) -> None:
+        self.calls.append(("sync", request_id, pos, list(tail)))
+
+    def release(self, request_id: int) -> None:
+        self.calls.append(("release", request_id))
+
+
+def _step_engine(ctx: _StepCtx, draft: _FakeDraft) -> MetalEngine:
+    """`_stub_engine` plus the attributes the real `step` reads."""
+    from bwr.engine.batching import FCFSPolicy
+
+    eng = _stub_engine(ctx)
+    eng.draft = draft
+    eng.config = EngineConfig(draft_max_drafts=2)
+    eng.policy = FCFSPolicy()
+    eng._batch = _FakeBatch()
+    eng._hotlist = None
+    eng._pins = {}
+    return eng
+
+
+def test_plain_step_syncs_the_sampled_token_into_the_draft() -> None:
+    """A step that packed no drafts samples a token the draft never saw. It
+    is the base token the target packs at `req.n_pos` next step, so `step`
+    must hand it to the draft at that same cell before the next propose;
+    otherwise the draft runs one cell behind and every proposal compares
+    against the wrong target row."""
+    ctx = _StepCtx({0: 42})
+    draft = _FakeDraft(proposals=[])
+    eng = _step_engine(ctx, draft)
+    req = _generating_request(7, n_pos=3)
+    eng._states[7] = req
+    outputs = eng.step()
+    assert [o.token for o in outputs] == [42]
+    assert req.n_pos == 4
+    assert draft.calls == [("propose", 7, 2), ("sync", 7, 4, [42])], draft.calls
+
+
+def test_verify_step_syncs_only_the_newly_confirmed_tail() -> None:
+    """Two matched drafts, row 2 is the bonus: the draft already holds the
+    matched tokens at pos_base+1 and pos_base+2, so the sync carries only
+    the bonus token at pos_base+1+matched -- not the whole accepted run."""
+    pos_base = 3
+    ctx = _StepCtx({0: 11, 1: 12, 2: 13})
+    draft = _FakeDraft(proposals=[11, 12])
+    eng = _step_engine(ctx, draft)
+    req = _generating_request(7, n_pos=pos_base)
+    eng._states[7] = req
+    outputs = eng.step()
+    assert [o.token for o in outputs] == [11, 12, 13]
+    assert draft.calls == [
+        ("propose", 7, 2),
+        ("sync", 7, pos_base + 1 + 2, [13]),
+    ], draft.calls
