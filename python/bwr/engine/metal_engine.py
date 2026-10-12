@@ -767,11 +767,13 @@ class MetalEngine:
                 )
         # Every accepted token goes through the identical finish logic as a
         # normally decoded one; n_pos advances per token so the context-full
-        # check sees the same values as the plain path. Stop feeding at the
-        # first token that ends the request (the slot is freed, so later
-        # tokens have nowhere to go).
+        # check sees the same values as the plain path: accepted[k] is the
+        # token the plain path would have sampled off position pos_base+k and
+        # checked with n_pos == pos_base+k+1 (its own write position, after
+        # that step's commit). Stop feeding at the first token that ends the
+        # request (the slot is freed, so later tokens have nowhere to go).
         self._feed_table(req, accepted)
-        req.n_pos = entry.pos_base + 1
+        req.n_pos = entry.pos_base
         outputs: list[StepOutput] = []
         for token in accepted:
             req.n_pos += 1
@@ -779,9 +781,9 @@ class MetalEngine:
             outputs.append(out)
             if out.finished:
                 break
-        # The per-token increments above leave n_pos one past the last accepted
-        # position (each check reads position+1, as on the plain path); settle
-        # it on the next write position, which the following step decodes at.
+        # Settle on the next write position (the per-token increments end
+        # there unless a finish broke out early), which the following step
+        # decodes at.
         req.n_pos = final_n_pos
         return outputs, accepted, matched
 
