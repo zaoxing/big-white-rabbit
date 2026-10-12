@@ -687,3 +687,76 @@ def test_a_diverging_prompt_misses() -> None:
     _store(eng, (1, 2, 3, 4))
     assert _probe(eng, [1, 2, 9, 4, 5]) is None
     assert (eng.prefix_hits, eng.prefix_misses) == (0, 1)
+
+
+# --- the finishing token reaches the output ---------------------------------
+
+
+def _feed_only(eng: MLXEngine, prompt: list[int], max_tokens: int, stop=()):
+    """A request whose tokens will be fed by hand (no forward passes)."""
+    from bwr.engine.config import StopSequenceFilter
+
+    req = _admit(eng, prompt, max_tokens=max_tokens, drafts=None)
+    if stop:
+        eng._stop_filters[req.request_id] = StopSequenceFilter(list(stop))
+    return req
+
+
+@needs_mlx_lib
+def test_the_capping_token_is_retired_with_its_token_and_piece() -> None:
+    """MetalEngine retires on "length" with the token that hit the cap and
+    its piece; the routes build the text from StepOutput.piece, so an
+    empty-piece retire drops the final token from the response while the
+    usage still counts it."""
+    eng = _stub_engine(EngineConfig(n_ctx=4096))
+    req = _feed_only(eng, [1, 2, 3], max_tokens=1)
+    out = eng._feed(req, 4, "4")
+    assert out.finished and out.finish_reason == "length"
+    assert (out.token, out.piece) == (4, "4")
+    assert eng.text_of(req.request_id) == "4"
+
+
+@needs_mlx_lib
+def test_the_stop_completing_token_is_retired_with_its_token_and_piece() -> None:
+    """Same for "stop_sequence": the route-side StopSequenceFilter needs the
+    completing piece to recognise the delimiter and drop its withheld prefix.
+    Retired without it, the prefix leaks on flush."""
+    eng = _stub_engine(EngineConfig(n_ctx=4096))
+    req = _feed_only(eng, [1, 2, 3], max_tokens=8, stop=["4 5"])
+    first = eng._feed(req, 4, "4 ")
+    assert not first.finished
+    out = eng._feed(req, 5, "5")
+    assert out.finished and out.finish_reason == "stop_sequence"
+    assert (out.token, out.piece) == (5, "5")
+
+
+@needs_weights
+@pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
+def test_joined_pieces_are_the_text_at_the_cap(batch: bool) -> None:
+    eng = MLXEngine(MODEL_PATH, EngineConfig(n_ctx=4096, mlx_batch=batch))
+    try:
+        rid = eng.add_request("Hello, what model are you?", greedy())
+        outs = list(eng.drain())
+        assert eng.state(rid).finish_reason == "length"
+        assert len(eng.tokens_of(rid)) == N_TOKENS
+        assert "".join(o.piece for o in outs) == eng.text_of(rid)
+        assert outs[-1].token == eng.tokens_of(rid)[-1]
+    finally:
+        eng.ctx.close()
+
+
+@needs_weights
+@pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
+def test_joined_pieces_are_the_text_at_a_stop_sequence(batch: bool) -> None:
+    prompt = "Count: " + " ".join(str(i % 10) for i in range(48))
+    eng = MLXEngine(MODEL_PATH, EngineConfig(n_ctx=4096, mlx_batch=batch))
+    try:
+        rid = eng.add_request(
+            prompt, RequestParams(temp=0.0, max_tokens=32, stop_at_eog=False, stop=("3 4",))
+        )
+        outs = list(eng.drain())
+        assert eng.state(rid).finish_reason == "stop_sequence", eng.text_of(rid)
+        assert "".join(o.piece for o in outs) == eng.text_of(rid)
+        assert outs[-1].token == eng.tokens_of(rid)[-1]
+    finally:
+        eng.ctx.close()

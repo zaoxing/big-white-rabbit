@@ -1209,13 +1209,18 @@ class MLXEngine:
         req.output_tokens.append(token)
         req.n_generated += 1
         req.next_token = token
+        # The finishing token travels with its retire, as in MetalEngine: the
+        # routes build the response text from StepOutput.piece and run their
+        # own StopSequenceFilter over it, so a bare retire dropped the capped
+        # token from the text (usage still counted it) and withheld the
+        # delimiter from the route's filter, leaking the partial-match prefix.
         stop_filter = self._stop_filters.get(req.request_id)
         if stop_filter is not None:
             _emittable, hit = stop_filter.push(piece)
             if hit:
-                return self._retire(req, "stop_sequence")
+                return self._retire(req, "stop_sequence", token, piece)
         if req.n_generated >= req.params.max_tokens:
-            return self._retire(req, "length")
+            return self._retire(req, "length", token, piece)
         return StepOutput(req.request_id, token, piece, False, None)
 
     # --- inspection ---------------------------------------------------------
