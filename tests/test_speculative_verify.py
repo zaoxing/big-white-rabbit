@@ -19,6 +19,7 @@ import bwr
 import pytest
 from bwr.engine import EngineConfig, MetalEngine, RequestParams
 from bwr.engine.batching import RequestState
+from bwr.engine.config import StopSequenceFilter
 
 MODEL_PATH = os.environ.get("BWR_TEST_MODEL")
 
@@ -395,3 +396,87 @@ def test_verify_step_syncs_only_the_newly_confirmed_tail() -> None:
         ("propose", 7, 2),
         ("sync", 7, pos_base + 1 + 2, [13]),
     ], draft.calls
+
+
+class _ByteModel:
+    """A byte-fallback vocabulary: tokens below 256 are that single byte, so
+    a multi-byte character is spelled over several tokens; 300 is EOG."""
+
+    EOG = 300
+
+    def is_eog(self, token: int) -> bool:
+        return token == self.EOG
+
+    def token_to_piece(self, token: int) -> str:
+        # Never the right answer when `token_to_piece_bytes` exists: a lone
+        # lead byte repaired on its own is U+FFFD, which is the bug under test.
+        return "?"
+
+    def token_to_piece_bytes(self, token: int) -> bytes:
+        return bytes([token]) if token < 256 else b""
+
+    def detokenize(self, tokens: list[int]) -> str:
+        return b"".join(self.token_to_piece_bytes(t) for t in tokens).decode(errors="replace")
+
+
+# "é" is C3 A9: a lead byte and one continuation byte.
+_LEAD, _CONT = 0xC3, 0xA9
+
+
+def _byte_engine(max_tokens: int = 4000, stop: list[str] | None = None) -> tuple[MetalEngine, RequestState]:
+    eng = _stub_engine(_ScriptedCtx({}))
+    eng.model = _ByteModel()
+    req = _generating_request(0, 3)
+    req.params = RequestParams(temp=0.0, max_tokens=max_tokens, stop_at_eog=True, stop=stop or [])
+    eng._states[0] = req
+    if stop:
+        eng._stop_filters[0] = StopSequenceFilter(stop)
+    return eng, req
+
+
+def test_lead_byte_is_held_until_its_continuation_arrives() -> None:
+    """The lead byte alone adds no text; the continuation emits the whole
+    character. Before the incremental detokenizer each token was repaired on
+    its own and the stream carried U+FFFD for the lead byte."""
+    eng, req = _byte_engine()
+    first = eng._advance_token(req, _LEAD)
+    second = eng._advance_token(req, _CONT)
+    assert (first.piece, first.finished) == ("", False)
+    assert (second.piece, second.finished) == ("é", False)
+    assert eng.text_of(0) == "é"
+
+
+def test_length_retire_carries_the_held_partial_character() -> None:
+    """A cap that lands on a lead byte: the retire piece carries the flushed
+    replacement character, so joined pieces still equal text_of."""
+    eng, req = _byte_engine(max_tokens=2)
+    outs = [eng._advance_token(req, 0x48), eng._advance_token(req, _LEAD)]
+    assert [o.finished for o in outs] == [False, True]
+    assert outs[-1].finish_reason == "length"
+    assert outs[-1].piece == "�"
+    assert "".join(o.piece for o in outs) == eng.text_of(0) == "H�"
+
+
+def test_eog_retire_carries_the_held_partial_character_and_no_eog_token() -> None:
+    """EOG right after a lead byte: the eog output carries the flushed
+    replacement (the control token itself adds no text) and the eog token is
+    not counted in tokens_of."""
+    eng, req = _byte_engine()
+    outs = [eng._advance_token(req, t) for t in (0x48, _LEAD, _ByteModel.EOG)]
+    assert outs[-1].finished and outs[-1].finish_reason == "eog"
+    assert outs[-1].piece == "�"
+    assert eng.tokens_of(0) == [0x48, _LEAD]
+    assert "".join(o.piece for o in outs) == eng.text_of(0) == "H�"
+
+
+def test_stop_sequence_completed_by_a_multibyte_character_retires() -> None:
+    """The stop filter sees whole characters: "é" spelled over two tokens
+    completes the delimiter on the continuation byte, and the request retires
+    with "stop_sequence" rather than decoding on past it."""
+    eng, req = _byte_engine(stop=["é"])
+    first = eng._advance_token(req, _LEAD)
+    second = eng._advance_token(req, _CONT)
+    assert not first.finished
+    assert second.finished and second.finish_reason == "stop_sequence"
+    assert second.piece == "é"
+    assert eng.text_of(0) == "é"
