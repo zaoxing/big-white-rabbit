@@ -68,6 +68,11 @@ class Task:
     # cancelled row whose worker has not yet returned still has a thread
     # writing into local_dir, and a second worker alongside it would race.
     _worker: Future | None = field(default=None, repr=False)
+    # The token the task was started with, kept so a retry can use it. A
+    # SECRET: private, out of repr, and never part of to_dict -- the retry
+    # routes carry no token of their own, and resubmitting with None turned
+    # a retry of a gated download into a 401 the first attempt never had.
+    _token: str | None = field(default=None, repr=False)
 
     @property
     def progress(self) -> float:
@@ -169,6 +174,7 @@ class DownloadManager:
                 task_id=uuid.uuid4().hex[:12],
                 repo_id=repo_id,
                 local_dir=str(self.model_dir / _safe_dirname(repo_id)),
+                _token=token or None,
             )
             self._tasks[task.task_id] = task
             # Snapshot INSIDE the lock and before submitting: the worker can
@@ -213,7 +219,10 @@ class DownloadManager:
             t.completed_at = 0.0
             t.retry_count += 1
             t._cancel = threading.Event()
-            t._worker = self._pool_exec.submit(self._run, task_id, token)
+            # A new token replaces the retained one; none keeps it.
+            if token:
+                t._token = token
+            t._worker = self._pool_exec.submit(self._run, task_id, t._token)
         return self.get(task_id) or {}
 
     def forget(self, task_id: str) -> bool:

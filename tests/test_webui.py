@@ -724,6 +724,41 @@ def test_starting_a_download_returns_a_task_row(download_client, monkeypatch):
         assert key in task, f"HFTaskDTO requires {key}"
 
 
+def test_a_retry_through_the_route_keeps_the_request_token(download_client, monkeypatch):
+    """The retry route sends no token of its own; the task's is reused."""
+    client, _ = download_client
+    seen = []
+
+    def snapshot(**k):
+        seen.append(k["token"])
+        if len(seen) == 1:
+            raise RuntimeError("nope")
+        return k["local_dir"]
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", snapshot)
+    monkeypatch.setattr("bwr.server.downloads.HFFetcher._repo_size", lambda self, r, t: 0)
+    r = client.post("/admin/api/hf/download",
+                    json={"repo_id": "org/gated", "hf_token": "hf_SECRET"})
+    tid = r.json()["task"]["task_id"]
+    _wait_status(client, tid, "failed")
+    r = client.post(f"/admin/api/hf/retry/{tid}")
+    assert r.status_code == 200, r.text
+    assert "hf_SECRET" not in r.text
+    _wait_status(client, tid, "completed")
+    assert seen == ["hf_SECRET", "hf_SECRET"]
+
+
+def _wait_status(client, tid: str, status: str, timeout: float = 5.0) -> None:
+    import time
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if client.get(f"/admin/api/hf/task/{tid}").json()["task"]["status"] == status:
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"task never reached {status}")
+
+
 def test_starting_a_download_without_a_repo_is_400(download_client):
     client, _ = download_client
     assert client.post("/admin/api/hf/download", json={}).status_code == 400

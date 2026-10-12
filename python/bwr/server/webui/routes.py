@@ -956,11 +956,16 @@ def build_router(
         return JSONResponse({"status": "cancelled" if ok else "not_running"})
 
     @router.post("/api/hf/retry/{task_id}")
-    async def api_hf_retry(task_id: str) -> JSONResponse:
+    async def api_hf_retry(task_id: str, request: Request) -> JSONResponse:
         if downloads is None:
             return JSONResponse({"success": False}, status_code=404)
+        # The body is optional; the task keeps the token it was started
+        # with, so a bare retry of a gated download still authenticates.
+        body = await _json_body(request)
         try:
-            task = downloads.retry(task_id)
+            task = downloads.retry(
+                task_id, token=body.get("hf_token") or body.get("hfToken") or None
+            )
         except DownloadError as exc:
             return JSONResponse({"success": False, "detail": str(exc)}, status_code=400)
         return JSONResponse({"success": True, "task": task})
@@ -1099,11 +1104,15 @@ def build_router(
         return JSONResponse({"status": "cancelled" if ok else "not_running"})
 
     @router.post("/api/ms/retry/{task_id}")
-    async def api_ms_retry(task_id: str) -> JSONResponse:
+    async def api_ms_retry(task_id: str, request: Request) -> JSONResponse:
         if ms_downloads is None:
             return JSONResponse({"success": False}, status_code=404)
+        body = await _json_body(request)
         try:
-            return JSONResponse({"success": True, "task": ms_downloads.retry(task_id)})
+            task = ms_downloads.retry(
+                task_id, token=body.get("ms_token") or body.get("msToken") or None
+            )
+            return JSONResponse({"success": True, "task": task})
         except DownloadError as exc:
             return JSONResponse({"success": False, "detail": str(exc)}, status_code=400)
 

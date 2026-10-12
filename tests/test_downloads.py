@@ -181,6 +181,43 @@ def test_retry_resets_progress_and_counts(manager, monkeypatch):
     assert after["error"] == ""
 
 
+def test_retry_reuses_the_token_the_task_was_started_with(tmp_path):
+    """A per-request token (the web page's / the Mac app's) must survive a
+    retry: the retry routes carry no token, and resubmitting with None turned
+    a retry of a gated download into a 401 the first attempt never had."""
+
+    class _Fetcher:
+        def __init__(self):
+            self.seen = []
+            self.fail = True
+
+        def fetch(self, task, token):
+            self.seen.append(token)
+            if self.fail:
+                raise RuntimeError("nope")
+
+    fetcher = _Fetcher()
+    m = DownloadManager(tmp_path, fetcher=fetcher)
+    task = m.start("org/model", token="hf_SECRET")
+    assert _wait(lambda: m.get(task["task_id"])["status"] == "failed")
+
+    fetcher.fail = False
+    m.retry(task["task_id"])
+    assert _wait(lambda: m.get(task["task_id"])["status"] == "completed")
+    assert fetcher.seen == ["hf_SECRET", "hf_SECRET"]
+
+    # A retry that brings its own token uses that one instead.
+    m.retry(task["task_id"], token="hf_OTHER")
+    assert _wait(lambda: m.get(task["task_id"])["status"] == "completed"
+                 and len(fetcher.seen) == 3)
+    assert fetcher.seen[-1] == "hf_OTHER"
+
+    # The token is a secret: it is retained, never reported.
+    for row in (m.get(task["task_id"]), *m.list()):
+        assert "hf_SECRET" not in repr(row) and "hf_OTHER" not in repr(row)
+        assert "token" not in " ".join(row)
+
+
 def test_retrying_a_running_task_is_refused(manager, monkeypatch):
     gate = threading.Event()
     monkeypatch.setattr("huggingface_hub.snapshot_download",
