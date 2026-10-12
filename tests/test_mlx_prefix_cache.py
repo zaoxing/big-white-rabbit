@@ -192,3 +192,52 @@ def test_the_next_chat_turn_extends_the_finished_conversation() -> None:
         assert list(eng.tokens_of(rid)) == _cold_tokens(conversation + extra, 4)
     finally:
         eng.ctx.close()
+
+
+def test_a_speculating_request_stores_its_cache_under_the_tokens_it_holds() -> None:
+    """With n-gram drafts the cache advances by whole draft rows, not one
+    lookahead token at a time; the end-of-request entry must still be
+    keyed by prompt + answer. Keyed short, an extension of the
+    conversation partial-hits a cache holding more than the key says and
+    decodes against positions the prompt never had."""
+    from bwr.engine.mlx_engine import MLXEngine
+
+    base = "Count: " + " ".join(str(i % 10) for i in range(300))
+    eng = MLXEngine(MODEL_PATH, EngineConfig(
+        n_ctx=4096, speculative=True, mlx_prefix_cache=True,
+        prefix_cache_min_tokens=16,
+    ))
+    try:
+        rid = eng.add_request(base, RequestParams(temp=0.0, max_tokens=16, stop_at_eog=False))
+        list(eng.drain())
+        assert eng.spec_accepted > 0, "no draft accepted; the cache never jumped"
+        conversation = list(eng._tokenizer.encode(base)) + list(eng.tokens_of(rid))
+        assert tuple(conversation) in eng._prefix, "retire stored a key that is not prompt + answer"
+        extra = list(eng._tokenizer.encode(" and then some more"))
+        rid = eng.add_request(conversation + extra, RequestParams(temp=0.0, max_tokens=4, stop_at_eog=False))
+        list(eng.drain())
+        assert eng.prefix_partial_hits == 1
+        assert list(eng.tokens_of(rid)) == _cold_tokens(conversation + extra, 4)
+    finally:
+        eng.ctx.close()
+
+
+def test_a_one_token_repeat_of_a_cached_prompt_finishes_on_the_hit() -> None:
+    """The hit's replayed base token is the whole answer when max_tokens is
+    1: `_feed` retires the request inside `_prefix_hit`, and the lookahead
+    that follows must notice (next_token is None by then) rather than queue
+    a forward for a finished request."""
+    from bwr.engine.mlx_engine import MLXEngine
+
+    eng = MLXEngine(MODEL_PATH, EngineConfig(
+        n_ctx=4096, mlx_prefix_cache=True, prefix_cache_min_tokens=16,
+    ))
+    try:
+        rid1, _, _ = _once(eng, max_tokens=8)
+        first = eng.tokens_of(rid1)[0]
+        rid2, _, n = _once(eng, max_tokens=1)
+        assert eng.prefix_hits == 1 and n == 1
+        assert eng.state(rid2).finish_reason == "length"
+        assert eng.tokens_of(rid2) == [first]
+    finally:
+        eng.ctx.close()

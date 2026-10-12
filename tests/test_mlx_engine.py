@@ -348,3 +348,166 @@ def test_manual_loop_cache_for_a_model_without_make_cache() -> None:
     eng.config = EngineConfig(engine="mlx")
     cache = eng._make_cache()
     assert len(cache) == 3 and all(type(c) is KVCache for c in cache)
+
+
+# --- stub-level tests of the manual loop's bookkeeping ---------------------
+#
+# A fake model whose "next token" is always `token + 1`, driving the real
+# verify loop through a cache that records exactly what was fed into it.
+# No weights: what these pin is the engine's own accounting (which tokens
+# the cache holds, what the prefix cache stores), not the model.
+
+needs_mlx_lib = pytest.mark.skipif(
+    importlib.util.find_spec("mlx_lm") is None, reason="mlx_lm not installed"
+)
+
+_VOCAB = 64
+
+
+class _TrackingCache:
+    """A KVCache stand-in: `offset` is the number of tokens held, and
+    rewinding it (what `_restore_cache` does) drops the tokens past it."""
+
+    def __init__(self) -> None:
+        self.tokens: list[int] = []
+
+    @property
+    def offset(self) -> int:
+        return len(self.tokens)
+
+    @offset.setter
+    def offset(self, n: int) -> None:
+        del self.tokens[n:]
+
+
+class _SuccessorModel:
+    """argmax(logits for token t) == t + 1, at every position."""
+
+    def __call__(self, ids, cache=None):
+        import mlx.core as mx
+
+        toks = [int(t) for t in ids[0].tolist()]
+        cache[0].tokens.extend(toks)
+        logits = mx.zeros((1, len(toks), _VOCAB))
+        for i, t in enumerate(toks):
+            logits[0, i, (t + 1) % _VOCAB] = 1.0
+        return logits
+
+
+class _Tokenizer:
+    eos_token_ids = None
+    eos_token_id = None
+
+    def decode(self, ids) -> str:
+        return " ".join(str(int(t)) for t in ids)
+
+
+class _FixedTable:
+    """An n-gram table stand-in proposing a scripted draft sequence."""
+
+    order = 3
+
+    def __init__(self, drafts: list[int]) -> None:
+        self.drafts = drafts
+
+    def predict(self, context, max_tokens: int) -> list[int]:
+        return list(self.drafts[:max_tokens])
+
+    def update_stream(self, tokens) -> None:
+        pass
+
+
+def _stub_engine(config: EngineConfig) -> MLXEngine:
+    """An MLXEngine without weights: every per-request table the manual
+    loop and the prefix cache touch, set by hand as __init__ would."""
+    from collections import OrderedDict
+
+    from bwr.engine.spec_gate import SpecThroughputGate
+
+    eng = MLXEngine.__new__(MLXEngine)
+    eng.config = config
+    eng._kv_bits = config.mlx_kv_bits
+    eng._model = _SuccessorModel()
+    eng._tokenizer = _Tokenizer()
+    eng._make_cache = lambda: [_TrackingCache()]
+    eng._mtp = None
+    eng._mtp_caches = {}
+    eng._mtp_hidden = {}
+    eng._batch = None
+    eng._stop_filters = {}
+    eng._states = {}
+    eng._retired = OrderedDict()
+    eng._retired_limit = 8
+    eng._decode_calls = 0
+    eng._spec_tables = {}
+    eng._caches = {}
+    eng._spec_ok = {}
+    eng._spec_stats = {}
+    eng._pending = {}
+    eng._batch_pending = {}
+    eng.spec_drafted = eng.spec_accepted = eng.spec_recomputes = eng.spec_fallbacks = 0
+    eng.spec_gate = SpecThroughputGate()
+    eng._prefix = OrderedDict()
+    eng.prefix_hits = eng.prefix_partial_hits = eng.prefix_hit_tokens = eng.prefix_misses = 0
+    eng._cache_tokens = {}
+    eng._next_request_id = 0
+    return eng
+
+
+def _admit(eng: MLXEngine, prompt: list[int], max_tokens: int, drafts: list[int] | None):
+    from bwr.engine.batching import RequestState
+
+    rid = eng._next_request_id
+    eng._next_request_id += 1
+    req = RequestState(
+        request_id=rid, seq_id=0, prompt=list(prompt),
+        params=RequestParams(temp=0.0, max_tokens=max_tokens, stop_at_eog=False),
+    )
+    eng._states[rid] = req
+    eng._spec_ok[rid] = True
+    eng._spec_stats[rid] = [0, 0, 0]
+    if drafts is not None:
+        eng._spec_tables[rid] = _FixedTable(drafts)
+    return req
+
+
+def _spec_cfg() -> EngineConfig:
+    return EngineConfig(
+        engine="mlx", n_ctx=4096, speculative=True, spec_max_drafts=3,
+        mlx_prefix_cache=True, prefix_cache_min_tokens=1,
+    )
+
+
+@needs_mlx_lib
+@pytest.mark.parametrize(
+    "drafts, expect_recompute",
+    [([5, 6, 7], False), ([5, 9, 7], True)],
+    ids=["full-match", "mismatch"],
+)
+def test_spec_round_keeps_cache_tokens_in_step_with_the_cache(
+    drafts: list[int], expect_recompute: bool
+) -> None:
+    """With drafts in play the cache advances by the draft rows (full
+    match) or by the re-fed accepted prefix (mismatch), and `_cache_tokens`
+    must follow: it is the key the end-of-request prefix entry is stored
+    under. Recorded only by the lookahead, the key came out shorter than the
+    cache, and an extension of it then partial-hit a cache holding more
+    tokens than the key said -- wrong output, silently."""
+    eng = _stub_engine(_spec_cfg())
+    # Prompt 1 2 3 -> base 4; successor drafts 5 6 7 all match; 5 9 7 fails
+    # at the second row, accepting 5 and the bonus 6.
+    req = _admit(eng, [1, 2, 3], max_tokens=8, drafts=drafts)
+    eng._start_spec(req)
+    cache = eng._caches[req.request_id][0]
+    assert cache.tokens == [1, 2, 3, 4]  # prompt + lookahead of the base
+    eng._verify(req)
+    assert (eng.spec_recomputes > 0) is expect_recompute
+    held = list(cache.tokens)
+    recorded = [int(t) if isinstance(t, int) else int(t.item()) for t in eng._cache_tokens[req.request_id]]
+    assert recorded == held
+    # The round after retire stores the cache under the tokens it holds.
+    req.params = RequestParams(temp=0.0, max_tokens=req.n_generated, stop_at_eog=False)
+    eng._retire(req, "length")
+    (key, entry), = eng._prefix.items() if len(eng._prefix) == 1 else [max(eng._prefix.items(), key=lambda kv: len(kv[0]))]
+    assert list(key) == held
+    assert entry[0][0].tokens == held

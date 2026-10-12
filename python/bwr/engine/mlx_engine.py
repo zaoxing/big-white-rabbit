@@ -865,6 +865,12 @@ class MLXEngine:
         # Only worth taking when there is something to reject. Taken after
         # the lookahead's write, which is confirmed either way.
         snap = self._snapshot_cache(self._caches[rid]) if drafts else None
+        # `_cache_tokens` must follow every write below: it is the key the
+        # end-of-request prefix entry is stored under, and a key shorter
+        # than the cache hands the next turn a partial hit on positions it
+        # never asked for.
+        fed = self._cache_tokens.get(rid)
+        n_fed = len(fed) if fed is not None else 0
         msnap = (
             self._mtp_caches[rid][0].offset
             if (mtp is not None and drafts)
@@ -916,6 +922,10 @@ class MLXEngine:
                 self._model(mx.array(drafts)[None], cache=self._caches[rid]),
             ], axis=1)
             mx.eval(logits)
+        if fed is not None and not lookahead_queued:
+            # The forward above fed the draft rows (or every row, without
+            # a lookahead's base already in place).
+            fed.extend(drafts if pending is not None else rows)
         self.spec_drafted += len(drafts)
         stats = self._spec_stats[req.request_id]
         stats[0] += len(drafts)
@@ -951,6 +961,9 @@ class MLXEngine:
             if pending is not None:
                 # The restored cache already holds `base`.
                 keep = keep[1:]
+            if fed is not None:
+                del fed[n_fed:]
+                fed.extend(keep)
             if mtp is not None:
                 self._mtp_caches[rid][0].offset = msnap
                 if keep:
