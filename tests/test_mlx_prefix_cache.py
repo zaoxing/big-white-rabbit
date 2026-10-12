@@ -155,13 +155,17 @@ def test_a_prompt_that_extends_a_stored_one_prefills_only_the_new_part() -> None
         rid = eng.add_request(base, greedy)
         list(eng.drain())
         assert eng.prefix_misses == 1 and eng.prefix_partial_hits == 0
+        # Stored twice: the prompt at prefill, prompt + answer at retire.
+        base_ids = list(eng._tokenizer.encode(base))
+        assert tuple(base_ids) in eng._prefix
+        assert tuple(base_ids + eng.tokens_of(rid)) in eng._prefix
         rid = eng.add_request(longer, greedy)
         list(eng.drain())
         assert eng.prefix_partial_hits == 1
-        # The finished first request stored prompt + its answer, which is
-        # the longest stored prefix of `longer` only if the answer happens
-        # to match -- it does not here, so the match is the base prompt.
-        assert eng.prefix_hit_tokens >= len(eng.ctx.tokenize(base)) if hasattr(eng.ctx, "tokenize") else True
+        # prompt + answer is the longest stored prefix of `longer` only if
+        # the answer happens to match -- it does not here, so the match is
+        # exactly the base prompt.
+        assert eng.prefix_hit_tokens == len(base_ids)
         assert list(eng.tokens_of(rid)) == _cold_tokens(longer, 6)
     finally:
         eng.ctx.close()
