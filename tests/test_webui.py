@@ -865,6 +865,19 @@ class _BenchStub:
         self.total = 2
         self.reads = 0
         self.final_status = "completed"
+        self.started: list[tuple[str, dict]] = []
+        self.start_raises: Exception | None = None
+        self.cancelled: list[str] = []
+
+    def start(self, model_id, **kwargs):
+        if self.start_raises is not None:
+            raise self.start_raises
+        self.started.append((model_id, kwargs))
+        return {"bench_id": "b1", "status": "running", "total_tests": self.total}
+
+    def cancel(self, bench_id):
+        self.cancelled.append(bench_id)
+        return bench_id == "b1"
 
     def active_summary(self):
         if self.status != "running":
@@ -953,6 +966,56 @@ def test_bench_stream_ends_a_cancelled_run_as_an_error(bench_client):
     with c.stream("GET", "/admin/api/bench/b1/stream") as r:
         events = _sse_events(r)
     assert events[-1] == {"type": "error", "message": "benchmark cancelled"}
+
+
+def test_bench_start_forwards_the_camel_case_body_to_the_runner(bench_client):
+    """The dashboard sends camelCase; the runner takes snake_case kwargs."""
+    c, stub = bench_client
+    r = c.post("/admin/api/bench/start", json={
+        "modelId": "other", "promptLengths": [128, 512],
+        "generationLength": "32", "batchSizes": [1, 4],
+        "contextProfile": "long",
+    })
+    assert r.status_code == 200, r.text
+    assert r.json() == {"bench_id": "b1", "status": "running", "total_tests": 2}
+    assert stub.started == [("other", {
+        "prompt_lengths": [128, 512], "generation_length": 32,
+        "batch_sizes": [1, 4], "context_profile": "long",
+    })]
+
+
+def test_bench_start_without_a_model_id_benchmarks_the_served_model(bench_client):
+    c, stub = bench_client
+    assert c.post("/admin/api/bench/start", json={}).status_code == 200
+    assert stub.started == [("a", {
+        "prompt_lengths": None, "generation_length": 64,
+        "batch_sizes": None, "context_profile": None,
+    })]
+
+
+def test_bench_start_reports_a_runner_refusal_as_400(bench_client):
+    from bwr.server.bench import BenchError
+
+    c, stub = bench_client
+    stub.start_raises = BenchError("benchmark b0 is still running; cancel it first")
+    r = c.post("/admin/api/bench/start", json={"modelId": "a"})
+    assert r.status_code == 400
+    assert "still running" in r.json()["detail"]
+
+
+def test_bench_start_rejects_a_non_numeric_generation_length(bench_client):
+    c, stub = bench_client
+    r = c.post("/admin/api/bench/start", json={"generationLength": "lots"})
+    assert r.status_code == 400
+    assert stub.started == []
+
+
+def test_bench_cancel_with_a_runner_reports_cancelling(bench_client):
+    c, stub = bench_client
+    body = c.post("/admin/api/bench/b1/cancel").json()
+    assert body == {"status": "cancelling", "bench_id": "b1"}
+    assert stub.cancelled == ["b1"]
+    assert c.post("/admin/api/bench/nope/cancel").json()["status"] == "not_running"
 
 
 def test_bench_stream_404s_for_an_unknown_run(bench_client):
