@@ -16,6 +16,7 @@ not per server.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 import types
@@ -156,6 +157,83 @@ def _run_eviction_race(app, first: dict, second: dict, first_path: str):
             return r_first, r_second
 
     return asyncio.run(go())
+
+
+# -- finding 1: the request paths bracket the pool's in-flight count ----------
+
+
+def test_openai_completion_survives_an_eviction_by_another_model(pool_app):
+    """Request A (model a, 20 tokens) must get all 20 tokens even though
+    request B (model b) arrives mid-generation and needs a's budget: the
+    pool waits for A to drain before stopping a's engine. Without the server
+    bracketing the request, `in_flight` is 0, the engine is stopped under A,
+    and A gets a truncated 200 with finish_reason "stop"."""
+    r_a, r_b = _run_eviction_race(
+        pool_app, _chat("a"), _chat("b"), "/v1/chat/completions"
+    )
+    assert r_a.status_code == 200, r_a.text
+    assert r_b.status_code == 200, r_b.text
+    body = r_a.json()
+    assert body["usage"]["completion_tokens"] == N_TOKENS, body
+    assert body["choices"][0]["message"]["content"] == "t " * N_TOKENS
+
+
+def test_openai_stream_survives_an_eviction_by_another_model(pool_app):
+    r_a, r_b = _run_eviction_race(
+        pool_app, _chat("a", stream=True), _chat("b"), "/v1/chat/completions"
+    )
+    assert r_a.status_code == 200 and r_b.status_code == 200
+    frames = [ln for ln in r_a.text.split("\n") if ln.startswith("data: ")]
+    content = "".join(
+        json.loads(ln[6:])["choices"][0].get("delta", {}).get("content", "")
+        for ln in frames if ln != "data: [DONE]"
+    )
+    assert content == "t " * N_TOKENS
+    assert frames[-1] == "data: [DONE]"
+
+
+def test_anthropic_message_survives_an_eviction_by_another_model(pool_app):
+    r_a, r_b = _run_eviction_race(
+        pool_app, _messages("a"), _chat("b"), "/v1/messages"
+    )
+    assert r_a.status_code == 200, r_a.text
+    assert r_b.status_code == 200
+    body = r_a.json()
+    assert body["usage"]["output_tokens"] == N_TOKENS, body
+    assert body["content"][0]["text"] == "t " * N_TOKENS
+
+
+def test_anthropic_stream_survives_an_eviction_by_another_model(pool_app):
+    r_a, r_b = _run_eviction_race(
+        pool_app, _messages("a", stream=True), _chat("b"), "/v1/messages"
+    )
+    assert r_a.status_code == 200 and r_b.status_code == 200
+    assert r_a.text.count('"text_delta"') == N_TOKENS
+    assert '"output_tokens": 20' in r_a.text or '"output_tokens":20' in r_a.text
+    assert "event: message_stop" in r_a.text
+
+
+def test_in_flight_is_released_on_every_exit(pool_app):
+    """After a request on each surface finishes, nothing is left counted as
+    in flight -- otherwise the first unload would hang forever."""
+
+    async def go():
+        async with app.router.lifespan_context(app):
+            for path, body in (
+                ("/v1/chat/completions", _chat("a")),
+                ("/v1/chat/completions", _chat("a", stream=True)),
+                ("/v1/messages", _messages("a")),
+                ("/v1/messages", _messages("a", stream=True)),
+            ):
+                r = await _post(app, path, body)
+                assert r.status_code == 200, (path, r.text)
+            rec = app.state.pool._loaded["a"]
+            assert rec.in_flight == 0
+            assert rec.drained.is_set()
+            assert await asyncio.wait_for(app.state.pool.unload("a"), 2.0) is True
+
+    app = pool_app
+    asyncio.run(go())
 
 
 # -- finding 2: /v1/messages renders with the RESOLVED model in pool mode ----

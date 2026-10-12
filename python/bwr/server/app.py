@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -386,6 +386,22 @@ def build_app(
         # MetalEngine delegates tokenization to its Model; MLXEngine owns it.
         return mid, eng, (getattr(raw, "model", None) or raw), overlay
 
+    # The pool only waits for a model's live requests before unloading it if
+    # the request paths TELL it they are live. Every handler below brackets
+    # its work with these two, from right after `resolve` (no await in
+    # between, so an eviction cannot slip into the gap) until the response is
+    # complete -- on the streaming paths that is the generator's finally, not
+    # the handler's return. Without the bracket `in_flight` stayed 0 forever,
+    # and an eviction, an admin unload or a context benchmark stopped the
+    # engine under a running request, which then ended as a truncated 200.
+    def request_started(model_id: str) -> None:
+        if pool is not None:
+            pool.request_started(model_id)
+
+    def request_finished(model_id: str) -> None:
+        if pool is not None:
+            pool.request_finished(model_id)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # The engine thread starts here rather than in build_app so it is bound to the
@@ -529,119 +545,129 @@ def build_app(
         except ModelPoolError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        prompt = _render_prompt(renderer_r, req)
-        # The profile supplies DEFAULTS: an explicit value on the request
-        # always wins, because a client that asked for temperature=0 means it
-        # even when the profile it selected prefers 0.7.
-        params = _request_params(req, defaults=overlay)
-        known_tools = _parsing_names(req)
-        n_prompt = count_tokens(renderer_r, prompt)
-        # Read BEFORE submitting: the delta across the request is how many
-        # prompt tokens the prefix cache served. Under concurrency a token
-        # can land on a neighbouring request's tally, but the SUM -- which is
-        # all /admin/api/stats reports -- stays exact.
-        cached_before = _prefix_tokens(engine_r)
-        t_submit = time.perf_counter()
-        request_id = await submit_request(engine_r, prompt, params)
+        request_started(served)
+        streaming = False
+        try:
+            prompt = _render_prompt(renderer_r, req)
+            # The profile supplies DEFAULTS: an explicit value on the request
+            # always wins, because a client that asked for temperature=0 means it
+            # even when the profile it selected prefers 0.7.
+            params = _request_params(req, defaults=overlay)
+            known_tools = _parsing_names(req)
+            n_prompt = count_tokens(renderer_r, prompt)
+            # Read BEFORE submitting: the delta across the request is how many
+            # prompt tokens the prefix cache served. Under concurrency a token
+            # can land on a neighbouring request's tally, but the SUM -- which is
+            # all /admin/api/stats reports -- stays exact.
+            cached_before = _prefix_tokens(engine_r)
+            t_submit = time.perf_counter()
+            request_id = await submit_request(engine_r, prompt, params)
 
-        if req.stream:
-            return sse_response(
-                _sse(
-                    engine_r,
-                    request_id,
-                    served,
-                    http_request,
-                    known_tools,
-                    params.stop,
-                    stats=stats,
-                    n_prompt=n_prompt,
-                    t_submit=t_submit,
+            if req.stream:
+                # From here the generator owns the bracket: its finally
+                # is the only place that knows when the stream is done.
+                streaming = True
+                return sse_response(
+                    _sse(
+                        engine_r,
+                        request_id,
+                        served,
+                        http_request,
+                        known_tools,
+                        params.stop,
+                        stats=stats,
+                        n_prompt=n_prompt,
+                        t_submit=t_submit,
+                        cached_before=cached_before,
+                        served=served,
+                        on_finished=lambda: request_finished(served),
+                    ),
+                )
+
+            # The same filter object the SSE path runs, fed the same pieces in the same
+            # order, so the assembled body cannot drift from the streamed text -- the reason
+            # `parse_tool_calls` is the streaming parser fed one chunk, applied to the other
+            # thing that now withholds text. With no `stop` it is a pass-through, so this
+            # path is byte-identical to what it produced before.
+            stopper = StopSequenceFilter(params.stop)
+            try:
+                parts: list[str] = []
+                n_completion = 0
+                finish_reason = "stop"
+                t_first: float | None = None
+                async for out in engine_r.stream(request_id):
+                    if t_first is None:
+                        t_first = time.perf_counter()
+                    if await http_request.is_disconnected():
+                        await engine_r.cancel(request_id)
+                        break
+                    # The engine's natural-end retirement (eog) yields an empty
+                    # piece and does not append to output_tokens / n_generated,
+                    # so counting it would make `completion_tokens` off by one
+                    # (10 vs 9). Only count tokens that carried text.
+                    if not (out.finished and out.piece == "" and out.finish_reason == "eog"):
+                        n_completion += 1
+                    emittable, hit = stopper.push(out.piece)
+                    parts.append(emittable)
+                    if hit:
+                        # Stop consuming: the engine retires on this same token, and on a
+                        # stream that does not (a replayed one) `release` cancels it. The
+                        # reason goes through the same table as the engine's own, so the
+                        # two cannot name this condition differently.
+                        finish_reason = _openai_finish_reason("stop_sequence")
+                        break
+                    if out.finished:
+                        finish_reason = _openai_finish_reason(out.finish_reason)
+                else:
+                    parts.append(stopper.flush())
+            finally:
+                engine_r.release(request_id)
+                _record(
+                    stats, engine_r,
+                    n_prompt=n_prompt, n_completion=n_completion,
                     cached_before=cached_before,
-                    served=served,
+                    t_submit=t_submit, t_first=t_first, model=served,
+                )
+
+            text = "".join(parts)
+            content: str | None = text
+            tool_calls: list[ToolCall] | None = None
+            try:
+                # `known_tools is None` means parsing is off, which the parser implements as a
+                # pass-through (content == text, no calls) -- so the pre-tools response shape
+                # is preserved without a second guard restating what "off" means here.
+                parsed = parse_tool_calls(text, known_tools)
+            except Exception:  # noqa: BLE001 - a parse failure must degrade, not 500
+                # Nothing in the parser is supposed to raise, but the whole server is one
+                # process: falling back to the raw text costs a tool call, whereas a 500
+                # here would also mean the engine slot was burned for nothing.
+                parsed = None
+            if parsed is not None:
+                content = parsed.content
+                if parsed.tool_calls:
+                    tool_calls = [_tool_call(c) for c in parsed.tool_calls]
+                    # The engine's reasons are eog/length/context/cancelled; "tool_calls"
+                    # exists only at the protocol boundary, so it is set here.
+                    finish_reason = "tool_calls"
+            return ChatCompletion(
+                # the model actually served, which in pool mode is not the
+                # startup default
+                model=served,
+                choices=[
+                    Choice(
+                        message=ResponseMessage(content=content, tool_calls=tool_calls),
+                        finish_reason=finish_reason,
+                    )
+                ],
+                usage=Usage(
+                    prompt_tokens=n_prompt,
+                    completion_tokens=n_completion,
+                    total_tokens=n_prompt + n_completion,
                 ),
             )
-
-        # The same filter object the SSE path runs, fed the same pieces in the same
-        # order, so the assembled body cannot drift from the streamed text -- the reason
-        # `parse_tool_calls` is the streaming parser fed one chunk, applied to the other
-        # thing that now withholds text. With no `stop` it is a pass-through, so this
-        # path is byte-identical to what it produced before.
-        stopper = StopSequenceFilter(params.stop)
-        try:
-            parts: list[str] = []
-            n_completion = 0
-            finish_reason = "stop"
-            t_first: float | None = None
-            async for out in engine_r.stream(request_id):
-                if t_first is None:
-                    t_first = time.perf_counter()
-                if await http_request.is_disconnected():
-                    await engine_r.cancel(request_id)
-                    break
-                # The engine's natural-end retirement (eog) yields an empty
-                # piece and does not append to output_tokens / n_generated,
-                # so counting it would make `completion_tokens` off by one
-                # (10 vs 9). Only count tokens that carried text.
-                if not (out.finished and out.piece == "" and out.finish_reason == "eog"):
-                    n_completion += 1
-                emittable, hit = stopper.push(out.piece)
-                parts.append(emittable)
-                if hit:
-                    # Stop consuming: the engine retires on this same token, and on a
-                    # stream that does not (a replayed one) `release` cancels it. The
-                    # reason goes through the same table as the engine's own, so the
-                    # two cannot name this condition differently.
-                    finish_reason = _openai_finish_reason("stop_sequence")
-                    break
-                if out.finished:
-                    finish_reason = _openai_finish_reason(out.finish_reason)
-            else:
-                parts.append(stopper.flush())
         finally:
-            engine_r.release(request_id)
-            _record(
-                stats, engine_r,
-                n_prompt=n_prompt, n_completion=n_completion,
-                cached_before=cached_before,
-                t_submit=t_submit, t_first=t_first, model=served,
-            )
-
-        text = "".join(parts)
-        content: str | None = text
-        tool_calls: list[ToolCall] | None = None
-        try:
-            # `known_tools is None` means parsing is off, which the parser implements as a
-            # pass-through (content == text, no calls) -- so the pre-tools response shape
-            # is preserved without a second guard restating what "off" means here.
-            parsed = parse_tool_calls(text, known_tools)
-        except Exception:  # noqa: BLE001 - a parse failure must degrade, not 500
-            # Nothing in the parser is supposed to raise, but the whole server is one
-            # process: falling back to the raw text costs a tool call, whereas a 500
-            # here would also mean the engine slot was burned for nothing.
-            parsed = None
-        if parsed is not None:
-            content = parsed.content
-            if parsed.tool_calls:
-                tool_calls = [_tool_call(c) for c in parsed.tool_calls]
-                # The engine's reasons are eog/length/context/cancelled; "tool_calls"
-                # exists only at the protocol boundary, so it is set here.
-                finish_reason = "tool_calls"
-        return ChatCompletion(
-            # the model actually served, which in pool mode is not the
-            # startup default
-            model=served,
-            choices=[
-                Choice(
-                    message=ResponseMessage(content=content, tool_calls=tool_calls),
-                    finish_reason=finish_reason,
-                )
-            ],
-            usage=Usage(
-                prompt_tokens=n_prompt,
-                completion_tokens=n_completion,
-                total_tokens=n_prompt + n_completion,
-            ),
-        )
+            if not streaming:
+                request_finished(served)
 
     # --- Anthropic Messages surface -------------------------------------------------
     # Mounted on the same app so one server serves both protocols against one loaded
@@ -655,6 +681,8 @@ def build_app(
         model_name=model_name,
         resolve=resolve,
         render_prompt=render_pairs,
+        request_started=request_started,
+        request_finished=request_finished,
     )
     app.include_router(anthropic_router)
 
@@ -718,8 +746,14 @@ async def _sse(
     t_submit: float = 0.0,
     cached_before: int = 0,
     served: str | None = None,
+    on_finished: Callable[[], None] | None = None,
 ) -> AsyncIterator[bytes]:
-    """Emit OpenAI-shaped SSE frames, then `[DONE]`."""
+    """Emit OpenAI-shaped SSE frames, then `[DONE]`.
+
+    `on_finished` runs in the finally, after the engine slot is released: it
+    is how the handler's in-flight bracket on the pool closes for a stream,
+    whose handler returned long before the last token.
+    """
     completion_id = _rid("chatcmpl")
     # Two things now withhold text on this one stream, and the order is load-bearing:
     # the stop filter runs FIRST, upstream of the tool parser. A stop sequence is
@@ -819,3 +853,5 @@ async def _sse(
                 cached_before=cached_before,
                 t_submit=t_submit, t_first=t_first, model=served,
             )
+        if on_finished is not None:
+            on_finished()

@@ -18,7 +18,7 @@ serialisations.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -232,11 +232,18 @@ def register_anthropic_routes(
     model_name: str,
     resolve=None,
     render_prompt,
+    request_started=None,
+    request_finished=None,
 ) -> None:
     """Mount /v1/messages. `render_prompt(renderer, pairs)` is injected rather than
     reimplemented so the Anthropic surface cannot drift from the OpenAI one on prompt
     construction; it takes the renderer per call because in pool mode that is a
-    per-request object, not a per-server one."""
+    per-request object, not a per-server one.
+
+    `request_started` / `request_finished` are the pool's in-flight bracket (see
+    app.build_app): the route calls them around every request so an eviction waits
+    for this surface's live generations exactly as it does for the OpenAI one.
+    """
 
     @router.post("/v1/messages")
     async def create_message(req: A.MessagesRequest, http_request: Request):
@@ -270,84 +277,100 @@ def register_anthropic_routes(
             served, engine_r, renderer_r = model_name, async_engine, model
         else:
             served, engine_r, renderer_r, _overlay = await resolve(req.model)
-        prompt = render_prompt(renderer_r, pairs)
-        params = _request_params(req)
-        n_prompt = count_tokens(renderer_r, prompt)
-        request_id = await submit_request(engine_r, prompt, params)
 
-        # Read back off the params the ENGINE was given, so the sequences the engine
-        # stops on and the ones the wire truncates on cannot be two different lists.
-        stops = params.stop
-        if req.stream:
-            return sse_response(
-                _stream(
-                    engine_r,
-                    request_id,
-                    model_name,
-                    known,
-                    n_prompt,
-                    http_request,
-                    stops,
-                ),
-            )
+        def _finished(mid: str) -> None:
+            if request_finished is not None:
+                request_finished(mid)
 
-        # Same filter, same pieces, same order as the streaming path below: that is what
-        # makes the assembled body equal the streamed text rather than resemble it.
-        stopper = StopSequenceFilter(stops)
+        # Started straight after resolve, with no await in between, so an
+        # eviction cannot land in the gap; closed on every exit below.
+        if request_started is not None:
+            request_started(served)
+        streaming = False
         try:
-            parts: list[str] = []
-            n_completion = 0
-            reason = "eog"
-            async for out in engine_r.stream(request_id):
-                if await http_request.is_disconnected():
-                    await engine_r.cancel(request_id)
-                    break
-                if not (out.finished and out.piece == "" and out.finish_reason == "eog"):
-                    n_completion += 1
-                emittable, hit = stopper.push(out.piece)
-                parts.append(emittable)
-                if hit:
-                    reason = "stop_sequence"
-                    break  # `release` cancels anything still in flight
-                if out.finished:
-                    reason = out.finish_reason or "eog"
-            else:
-                parts.append(stopper.flush())
-        finally:
-            engine_r.release(request_id)
+            prompt = render_prompt(renderer_r, pairs)
+            params = _request_params(req)
+            n_prompt = count_tokens(renderer_r, prompt)
+            request_id = await submit_request(engine_r, prompt, params)
 
-        raw = "".join(parts)
-        try:
-            parsed = parse_tool_calls(raw, known, id_factory=A.new_tool_use_id)
-        except Exception:  # noqa: BLE001 - a parse failure must degrade, not 500
-            parsed = None
-
-        blocks: list[A.TextBlock | A.ToolUseBlock] = []
-        stop_reason = _STOP_REASONS.get(reason, "end_turn")
-        if parsed is not None and parsed.tool_calls:
-            if parsed.content:
-                blocks.append(A.TextBlock(text=parsed.content))
-            for call in parsed.tool_calls:
-                blocks.append(
-                    A.ToolUseBlock(id=call.id, name=call.name, input=_input_object(call))
+            # Read back off the params the ENGINE was given, so the sequences the engine
+            # stops on and the ones the wire truncates on cannot be two different lists.
+            stops = params.stop
+            if req.stream:
+                streaming = True  # the generator's finally closes the bracket
+                return sse_response(
+                    _stream(
+                        engine_r,
+                        request_id,
+                        model_name,
+                        known,
+                        n_prompt,
+                        http_request,
+                        stops,
+                        on_finished=lambda: _finished(served),
+                    ),
                 )
-            stop_reason = "tool_use"
-        else:
-            text = parsed.content if parsed is not None else raw
-            # Anthropic always returns at least one block; an empty generation is an
-            # empty text block, not an empty list.
-            blocks.append(A.TextBlock(text=text or ""))
 
-        return A.MessagesResponse(
-            content=blocks,
-            model=served,
-            stop_reason=stop_reason,
-            # Which sequence matched, the field Anthropic clients read to learn which
-            # delimiter ended the turn. Only ever set together with the matching
-            # stop_reason: a turn that ended as tool_use did not end at a delimiter.
-            stop_sequence=stopper.matched if stop_reason == "stop_sequence" else None,
-            usage=A.Usage(input_tokens=n_prompt, output_tokens=n_completion),
-        )
+            # Same filter, same pieces, same order as the streaming path below: that is what
+            # makes the assembled body equal the streamed text rather than resemble it.
+            stopper = StopSequenceFilter(stops)
+            try:
+                parts: list[str] = []
+                n_completion = 0
+                reason = "eog"
+                async for out in engine_r.stream(request_id):
+                    if await http_request.is_disconnected():
+                        await engine_r.cancel(request_id)
+                        break
+                    if not (out.finished and out.piece == "" and out.finish_reason == "eog"):
+                        n_completion += 1
+                    emittable, hit = stopper.push(out.piece)
+                    parts.append(emittable)
+                    if hit:
+                        reason = "stop_sequence"
+                        break  # `release` cancels anything still in flight
+                    if out.finished:
+                        reason = out.finish_reason or "eog"
+                else:
+                    parts.append(stopper.flush())
+            finally:
+                engine_r.release(request_id)
+
+            raw = "".join(parts)
+            try:
+                parsed = parse_tool_calls(raw, known, id_factory=A.new_tool_use_id)
+            except Exception:  # noqa: BLE001 - a parse failure must degrade, not 500
+                parsed = None
+
+            blocks: list[A.TextBlock | A.ToolUseBlock] = []
+            stop_reason = _STOP_REASONS.get(reason, "end_turn")
+            if parsed is not None and parsed.tool_calls:
+                if parsed.content:
+                    blocks.append(A.TextBlock(text=parsed.content))
+                for call in parsed.tool_calls:
+                    blocks.append(
+                        A.ToolUseBlock(id=call.id, name=call.name, input=_input_object(call))
+                    )
+                stop_reason = "tool_use"
+            else:
+                text = parsed.content if parsed is not None else raw
+                # Anthropic always returns at least one block; an empty generation is an
+                # empty text block, not an empty list.
+                blocks.append(A.TextBlock(text=text or ""))
+
+            return A.MessagesResponse(
+                content=blocks,
+                model=served,
+                stop_reason=stop_reason,
+                # Which sequence matched, the field Anthropic clients read to learn which
+                # delimiter ended the turn. Only ever set together with the matching
+                # stop_reason: a turn that ended as tool_use did not end at a delimiter.
+                stop_sequence=stopper.matched if stop_reason == "stop_sequence" else None,
+                usage=A.Usage(input_tokens=n_prompt, output_tokens=n_completion),
+            )
+        finally:
+            if not streaming:
+                _finished(served)
 
 
 async def _stream(
@@ -358,6 +381,7 @@ async def _stream(
     n_prompt: int,
     http_request: Request,
     stops: tuple[str, ...] = (),
+    on_finished: Callable[[], None] | None = None,
 ) -> AsyncIterator[bytes]:
     """Emit the Anthropic event sequence.
 
@@ -536,3 +560,5 @@ async def _stream(
         yield A.sse("message_stop", A.MessageStopEvent().model_dump())
     finally:
         engine.release(request_id)
+        if on_finished is not None:
+            on_finished()
