@@ -1176,11 +1176,22 @@ def build_router(
             return JSONResponse({"detail": str(exc)}, status_code=400)
         return JSONResponse({"template": t.to_dict()})
 
+    def _changes(body: dict[str, Any], *path_keys: str) -> dict[str, Any]:
+        """The body minus the keys the URL path already binds.
+
+        Clients round-trip the object they were given, so an update body
+        carries `name` and `model_id` beside the change. The path is the
+        identity and the body is the change; a body key that duplicates a
+        positional argument would otherwise be a TypeError and a 500.
+        Renames travel as `new_name`.
+        """
+        return {k: v for k, v in body.items() if k not in path_keys}
+
     @router.put("/api/profile-templates/{name}")
     async def api_update_template(name: str, request: Request) -> JSONResponse:
         body = await _json_body(request)
         try:
-            t = _need_profiles().update_template(name, **body)
+            t = _need_profiles().update_template(name, **_changes(body, "name"))
         except (ProfileError, _Unavailable) as exc:
             return JSONResponse({"detail": str(exc)}, status_code=400)
         return JSONResponse({"template": t.to_dict()})
@@ -1224,7 +1235,9 @@ def build_router(
     async def api_update_profile(model_id: str, name: str, request: Request) -> JSONResponse:
         body = await _json_body(request)
         try:
-            p = _need_profiles().update_profile(model_id, name, **body)
+            p = _need_profiles().update_profile(
+                model_id, name, **_changes(body, "model_id", "name")
+            )
         except (ProfileError, _Unavailable) as exc:
             return JSONResponse({"detail": str(exc)}, status_code=400)
         return JSONResponse({"profile": p.to_dict(base_model=model_id)})

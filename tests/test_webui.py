@@ -619,6 +619,29 @@ def test_profile_crud_round_trip(pool_client):
     assert client.delete("/admin/api/models/a/profiles/fast").json()["deleted"] is True
 
 
+def test_an_update_body_echoing_the_path_keys_is_not_a_500(pool_client):
+    """Clients round-trip the object they were given, so an update body
+    carries `name` (and `model_id`) alongside the change. Splatting that
+    into a call that already binds `name` positionally was a TypeError
+    and a 500; the path is the identity, the body is the change."""
+    client, _ = pool_client
+    client.post("/admin/api/profile-templates",
+                json={"name": "mine", "settings": {"top_p": 0.5}})
+    r = client.put("/admin/api/profile-templates/mine",
+                   json={"name": "mine", "display_name": "Ours"})
+    assert r.status_code == 200, r.text
+    assert r.json()["template"]["display_name"] == "Ours"
+
+    client.post("/admin/api/models/a/profiles",
+                json={"name": "fast", "settings": {"temperature": 0.1}})
+    r = client.put("/admin/api/models/a/profiles/fast",
+                   json={"name": "fast", "model_id": "a:fast",
+                         "settings": {"temperature": 0.4}})
+    assert r.status_code == 200, r.text
+    assert r.json()["profile"]["settings"] == {"temperature": 0.4}
+    assert r.json()["profile"]["name"] == "fast"
+
+
 def test_a_profile_with_engine_fields_says_so(pool_client):
     """The client renders its reload warning from this flag rather than
     keeping its own copy of the field list."""
