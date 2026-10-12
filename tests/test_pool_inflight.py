@@ -281,6 +281,42 @@ def test_in_flight_is_released_when_submit_503s(pool_app, monkeypatch, path, bod
     asyncio.run(go())
 
 
+@pytest.mark.parametrize("path,body", _EVERY_SURFACE)
+def test_client_disconnect_cancels_and_releases(pool_app, monkeypatch, path, body):
+    """A client that hangs up mid-generation stops costing decodes: every
+    consumer loop polls `is_disconnected` per token, cancels the engine's
+    request and leaves -- and on the streaming paths that early return still
+    reaches the generator's finally, which hands the bracket back. No test
+    polled the hang-up branch before, so dropping the poll (or the cancel,
+    or the release behind it) left the suite green."""
+    from starlette.requests import Request
+
+    polls = {"n": 0}
+
+    async def gone(self):  # connected on the first poll, gone from the second
+        polls["n"] += 1
+        return polls["n"] >= 2
+
+    monkeypatch.setattr(Request, "is_disconnected", gone)
+
+    async def go():
+        async with pool_app.router.lifespan_context(pool_app):
+            r = await _post(pool_app, path, body)
+            raw = pool_app.state.pool.engine_for("a")
+            for _ in range(100):
+                if not raw._emitted:
+                    break
+                await asyncio.sleep(0.01)
+            assert raw._emitted == {}, "engine request was not cancelled"
+            rec = pool_app.state.pool._loaded["a"]
+            assert rec.in_flight == 0
+            return r
+
+    r = asyncio.run(go())
+    assert polls["n"] >= 2, "the hang-up was never polled"
+    assert r.text.count("t ") < N_TOKENS, r.text
+
+
 def test_a_benchmark_row_survives_an_eviction_by_another_model(pool_app):
     """The throughput benchmark issues requests through `resolve` like a
     handler does, so it must bracket them with the pool's in-flight count
