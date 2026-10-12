@@ -40,12 +40,15 @@ from pathlib import Path
 from typing import Any
 
 # Settings fixed when the engine is built. A profile touching any of these
-# cannot be applied to a loaded model, only to the next load.
+# cannot be applied to a loaded model, only to the next load. Mirrors
+# EngineConfig's profile-settable knobs; tests/test_profiles.py cross-checks
+# the two so a new knob cannot be added to one and forgotten in the other.
 ENGINE_FIELDS = frozenset({
     "n_ctx", "n_batch", "n_ubatch", "n_seq_max", "n_threads", "n_threads_batch",
-    "flash_attn", "kv_unified", "speculative", "spec_max_drafts",
+    "flash_attn", "kv_unified", "kv_type", "speculative", "spec_max_drafts",
     "mlx_batch", "mlx_prefix_cache", "mlx_prefix_cache_size", "mlx_kv_bits",
     "mlx_mtp", "mlx_mtp_depth", "prefix_cache", "prefix_cache_pins",
+    "prefix_cache_min_tokens",
 })
 
 # Settings applied per request. Anything here can be overlaid on a loaded

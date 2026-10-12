@@ -202,3 +202,39 @@ def test_without_a_model_dir_the_store_works_in_memory_and_writes_nothing():
     assert s.path is None
     s.create_profile("m1", "fast", settings={"top_p": 0.5})
     assert s.get_profile("m1", "fast").settings == {"top_p": 0.5}
+
+
+# -- ENGINE_FIELDS mirrors EngineConfig -------------------------------------
+
+
+# EngineConfig fields that are NOT profile settings, each with the reason.
+# A new EngineConfig knob that is neither here nor in ENGINE_FIELDS fails
+# the test below, which is the point: the dashboard's "requires reload"
+# warning is rendered from ENGINE_FIELDS, so a knob missing from it would
+# apply silently to nothing.
+_NOT_PROFILE_SETTINGS = {
+    "engine": "backend choice is a launch decision, not a per-model setting",
+    "record_experts": "profiling switch; the constructor refuses it when serving",
+    "ssd_hotlist": "profiling measurement that requires record_experts",
+    "ssd_hotlist_k": "ssd_hotlist sizing; same profiling-only path",
+    "ssd_hotlist_top_k": "ssd_hotlist sizing; same profiling-only path",
+    "ssd_hotlist_bytes": "ssd_hotlist sizing; same profiling-only path",
+    "draft_max_drafts": "the draft Model object is passed by the launcher, not a recipe",
+    "speculative_opportunistic": "n-gram drafting policy; the launcher has no flag for it",
+}
+
+
+def test_engine_fields_cover_every_engine_config_knob():
+    """`has_engine_fields` is what tells the dashboard a profile needs a
+    reload. It is only right if ENGINE_FIELDS lists every EngineConfig knob
+    a profile can carry; a knob added to EngineConfig and forgotten here
+    would be saved and then silently fail to apply."""
+    from dataclasses import fields
+
+    from bwr.engine.config import EngineConfig
+
+    knobs = {f.name for f in fields(EngineConfig)}
+    excluded = set(_NOT_PROFILE_SETTINGS)
+    assert excluded <= knobs, excluded - knobs
+    assert not (excluded & ENGINE_FIELDS), excluded & ENGINE_FIELDS
+    assert knobs - excluded == set(ENGINE_FIELDS)
