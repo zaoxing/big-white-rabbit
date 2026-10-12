@@ -96,12 +96,31 @@ class KVSnapStore:
             live=False,
         )
 
+    def _params_for(self, snap: _Snap):
+        """The RequestParams a restore of `snap` runs with. A snapshot file
+        written for a request without params carries "params": null; such a
+        snapshot restores with the engine's defaults, the same way add_request
+        treats params=None."""
+        if snap.params is not None:
+            return snap.params
+        default = getattr(self.engine, "default_params", None)
+        if default is not None:
+            return default
+        from .config import RequestParams
+
+        return RequestParams()
+
     def _rehydrate(self, snap: _Snap, seq_id: int, new_request_id: int | None) -> int:
         """Install a RequestState for `snap` on `seq_id` (whose KV is already in
         place) and return its request id. Bypasses tokenization / prompt-length
         checks -- the snapshot was validated when it was taken."""
         from .batching import RequestState
 
+        params = self._params_for(snap)
+        # Everything that can fail runs before the state is registered or the
+        # request id is consumed, so a failed restore leaves no dead state
+        # behind (the caller returns the seq to the free list).
+        self.engine.ctx.set_seq_sampler(seq_id, params.to_sampler_params())
         rid = new_request_id if new_request_id is not None else self.engine._next_request_id
         if new_request_id is None:
             self.engine._next_request_id += 1
@@ -111,7 +130,7 @@ class KVSnapStore:
             request_id=rid,
             seq_id=seq_id,
             prompt=list(snap.prompt),
-            params=snap.params,  # type: ignore[arg-type]
+            params=params,
         )
         state.output_tokens = list(snap.output_tokens)
         state.n_pos = snap.n_pos
@@ -120,7 +139,6 @@ class KVSnapStore:
         state.next_token = snap.next_token
         # n_pos already includes prompt + output, so next decode continues
         self.engine._states[rid] = state
-        self.engine.ctx.set_seq_sampler(seq_id, snap.params.to_sampler_params())  # type: ignore[union-attr]
         return rid
 
     def save(self, name: str, request_id: int) -> None:
@@ -243,15 +261,17 @@ class KVSnapStore:
                         data = bin_path.read_bytes()
                         # state_seq_set_data returns bytes consumed (0 on failure)
                         consumed = self.engine.ctx.state_seq_set_data(seq_id, data)  # type: ignore[attr-defined]
+                        if consumed and consumed > 0:
+                            return self._rehydrate(snap, seq_id, new_request_id)
                     except Exception:  # noqa: BLE001 - best-effort binary restore, fallback to re-prefill
-                        consumed = 0
-                    if consumed and consumed > 0:
-                        return self._rehydrate(snap, seq_id, new_request_id)
+                        pass
                     self.engine._free_seq_ids.insert(0, seq_id)
-            # Fallback: re-prefill via normal admission (slow but correct)
+            # Fallback: re-prefill via normal admission (slow but correct). The
+            # params are resolved here rather than left to add_request so a
+            # paramless snapshot restores the same way on both paths.
             rid = self.engine.add_request(
                 snap.prompt,  # type: ignore[arg-type] — already tokenized
-                snap.params,  # type: ignore[arg-type] — preserves max_tokens etc.
+                self._params_for(snap),  # preserves max_tokens etc.
                 add_special=False,
             )
             return rid

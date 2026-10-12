@@ -373,3 +373,67 @@ def test_every_save_clears_the_snapshot_seq_before_copying(tmp_path) -> None:
     store.save("two", 0)
     rm_cp = [c for c in eng.ctx.calls if c[0] in ("rm", "cp")]
     assert rm_cp == [("rm", 1, -1, -1), ("cp", 0, 1, -1, -1)] * 2, rm_cp
+
+
+def _write_paramless_snapshot(tmp_path, name: str, with_bin: bool) -> None:
+    """A snapshot file as save() writes it when the request had no params."""
+    import json
+
+    (tmp_path / f"{name}.json").write_text(
+        json.dumps(
+            {
+                "prompt": [1, 2, 3],
+                "output_tokens": [10],
+                "n_pos": 4,
+                "n_prefilled": 3,
+                "next_token": 10,
+                "params": None,
+            }
+        )
+    )
+    if with_bin:
+        (tmp_path / f"{name}.bin").write_bytes(b"kv")
+
+
+def test_load_of_a_paramless_snapshot_via_bin_uses_default_params(tmp_path) -> None:
+    """save() writes "params": null when the request carried none. The binary
+    path then popped a seq, registered the RequestState and only afterwards
+    called snap.params.to_sampler_params() -- AttributeError, a leaked seq and
+    a dead state with params None left in _states. A missing params must
+    restore with the engine's defaults, and nothing may be registered unless
+    the whole restore succeeds."""
+    _write_paramless_snapshot(tmp_path, "nop", with_bin=True)
+    eng = _stub_engine()
+    eng.default_params = bwr.RequestParams(max_tokens=7)
+    store = KVSnapStore(eng, kv_dir=tmp_path)
+
+    rid = store.load("nop")
+    st = eng._states[rid]
+    assert st.params is eng.default_params
+    assert st.seq_id == 0
+    assert st.prompt == [1, 2, 3]
+    assert st.next_token == 10
+    assert ("set_data", 0) in eng.ctx.calls
+    assert ("sampler", 0) in eng.ctx.calls
+    assert eng._free_seq_ids == []
+
+
+def test_load_of_a_paramless_snapshot_without_bin_reprefills_with_default_params(tmp_path) -> None:
+    """Same file, no .bin: the re-prefill fallback handed params=None to
+    add_request, which the real engine replaces with its default_params but a
+    stub without that attribute cannot. The fallback must pass the resolved
+    default explicitly."""
+    _write_paramless_snapshot(tmp_path, "nop", with_bin=False)
+    eng = _stub_engine()
+    store = KVSnapStore(eng, kv_dir=tmp_path)
+
+    seen = []
+    eng.add_request = lambda prompt, params, **kw: seen.append((prompt, params)) or 99
+    rid = store.load("nop")
+    assert rid == 99
+    assert len(seen) == 1
+    assert seen[0][0] == [1, 2, 3]
+    assert isinstance(seen[0][1], bwr.RequestParams)
+    assert seen[0][1] == bwr.RequestParams()
+    assert eng._free_seq_ids == [0]
+    assert eng._states == {}
