@@ -312,3 +312,30 @@ def test_anthropic_stream_names_the_model_the_request_resolved_to(pool_app):
     assert start["message"]["model"] == "b"
     chunk = json.loads(r_o.text.split("\n\n")[0][6:])
     assert chunk["model"] == start["message"]["model"]
+
+
+# -- /v1/messages traffic reaches the server's stats ---------------------------
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_anthropic_requests_are_counted_in_server_stats(pool_app, stream):
+    """Every finished request feeds /admin/api/stats and the per-model usage
+    breakdown. The Anthropic route recorded nothing, so a server serving only
+    Anthropic clients reported zero requests and zero tokens."""
+    stats = pool_app.state.stats
+    stats.clear()
+
+    async def go():
+        async with pool_app.router.lifespan_context(pool_app):
+            return await _post(pool_app, "/v1/messages", _messages("a", stream=stream))
+
+    r = asyncio.run(go())
+    assert r.status_code == 200, r.text
+    snap = stats.snapshot()
+    assert snap["total_requests"] == 1
+    assert snap["total_prompt_tokens"] == 2  # "user: go"
+    assert snap["total_completion_tokens"] == N_TOKENS
+    assert snap["avg_generation_tps"] > 0
+    by_id = {m["model_id"]: m for m in stats.usage()["models"]}
+    assert by_id["a"]["requests"] == 1
+    assert by_id["a"]["total_tokens"] == 2 + N_TOKENS

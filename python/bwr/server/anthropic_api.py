@@ -18,6 +18,7 @@ serialisations.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
@@ -235,6 +236,8 @@ def register_anthropic_routes(
     render_prompt,
     request_started=None,
     request_finished=None,
+    record: Callable[..., None] | None = None,
+    prefix_tokens: Callable[[object], int] | None = None,
 ) -> None:
     """Mount /v1/messages. `render_prompt(renderer, pairs)` is injected rather than
     reimplemented so the Anthropic surface cannot drift from the OpenAI one on prompt
@@ -244,7 +247,19 @@ def register_anthropic_routes(
     `request_started` / `request_finished` are the pool's in-flight bracket (see
     app.build_app): the route calls them around every request so an eviction waits
     for this surface's live generations exactly as it does for the OpenAI one.
+
+    `record` / `prefix_tokens` are the server's stats hooks, the same `_record` and
+    `_prefix_tokens` the OpenAI route uses (app.build_app binds the ServerStats): a
+    request on this surface is a request that happened, and /admin/api/stats
+    reported zero of them until it was folded in from the same finally blocks.
     """
+
+    def _cached_tokens(engine: object) -> int:
+        return prefix_tokens(engine) if prefix_tokens is not None else 0
+
+    def _record(engine: object, **counts: Any) -> None:
+        if record is not None:
+            record(engine, **counts)
 
     @router.post("/v1/messages")
     async def create_message(req: A.MessagesRequest, http_request: Request):
@@ -298,6 +313,10 @@ def register_anthropic_routes(
             prompt = render_prompt(renderer_r, pairs)
             params = _request_params(req)
             n_prompt = count_tokens(renderer_r, prompt)
+            # Read BEFORE submitting, as the OpenAI route does: the delta across
+            # the request is how many prompt tokens the prefix cache served.
+            cached_before = _cached_tokens(engine_r)
+            t_submit = time.perf_counter()
             request_id = await submit_request(engine_r, prompt, params)
 
             # Read back off the params the ENGINE was given, so the sequences the engine
@@ -315,6 +334,9 @@ def register_anthropic_routes(
                         http_request,
                         stops,
                         on_finished=lambda: _finished(served),
+                        record=_record,
+                        cached_before=cached_before,
+                        t_submit=t_submit,
                     ),
                 )
 
@@ -325,7 +347,10 @@ def register_anthropic_routes(
                 parts: list[str] = []
                 n_completion = 0
                 reason = "eog"
+                t_first: float | None = None
                 async for out in engine_r.stream(request_id):
+                    if t_first is None:
+                        t_first = time.perf_counter()
                     if await http_request.is_disconnected():
                         await engine_r.cancel(request_id)
                         break
@@ -342,6 +367,12 @@ def register_anthropic_routes(
                     parts.append(stopper.flush())
             finally:
                 engine_r.release(request_id)
+                _record(
+                    engine_r,
+                    n_prompt=n_prompt, n_completion=n_completion,
+                    cached_before=cached_before,
+                    t_submit=t_submit, t_first=t_first, model=served,
+                )
 
             raw = "".join(parts)
             try:
@@ -389,6 +420,9 @@ async def _stream(
     http_request: Request,
     stops: tuple[str, ...] = (),
     on_finished: Callable[[], None] | None = None,
+    record: Callable[..., None] | None = None,
+    cached_before: int = 0,
+    t_submit: float = 0.0,
 ) -> AsyncIterator[bytes]:
     """Emit the Anthropic event sequence.
 
@@ -412,6 +446,7 @@ async def _stream(
     text_open = False
     n_completion = 0
     stop_reason = "end_turn"
+    t_first: float | None = None
 
     try:
         yield A.sse(
@@ -462,6 +497,8 @@ async def _stream(
             return frames
 
         async for out in engine.stream(request_id):
+            if t_first is None:
+                t_first = time.perf_counter()
             if await http_request.is_disconnected():
                 await engine.cancel(request_id)
                 return
@@ -567,5 +604,12 @@ async def _stream(
         yield A.sse("message_stop", A.MessageStopEvent().model_dump())
     finally:
         engine.release(request_id)
+        if record is not None:
+            record(
+                engine,
+                n_prompt=n_prompt, n_completion=n_completion,
+                cached_before=cached_before,
+                t_submit=t_submit, t_first=t_first, model=model_name,
+            )
         if on_finished is not None:
             on_finished()

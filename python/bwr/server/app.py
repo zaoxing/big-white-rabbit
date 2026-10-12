@@ -683,6 +683,9 @@ def build_app(
         render_prompt=render_pairs,
         request_started=request_started,
         request_finished=request_finished,
+        # The same counters, through the same helpers, as the OpenAI route.
+        record=lambda engine, **counts: _record(stats, engine, **counts),
+        prefix_tokens=_prefix_tokens,
     )
     app.include_router(anthropic_router)
 
