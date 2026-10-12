@@ -27,6 +27,7 @@ from .._bwr_metal import Model
 from ..engine.async_engine import AsyncEngine
 from ..engine.config import RequestParams, StopSequenceFilter, normalize_stops
 from ..engine.mlx_engine import MLXEngine
+from ..engine.pool import ModelPoolError
 from . import anthropic_schemas as A
 from .common import (
     block_text,
@@ -276,7 +277,13 @@ def register_anthropic_routes(
         if resolve is None:
             served, engine_r, renderer_r = model_name, async_engine, model
         else:
-            served, engine_r, renderer_r, _overlay = await resolve(req.model)
+            try:
+                served, engine_r, renderer_r, _overlay = await resolve(req.model)
+            except ModelPoolError as exc:
+                # A model id the pool does not know is the client's mistake, and
+                # the OpenAI route already says so with this exact 400. Letting it
+                # escape here turned the same typo into a 500 on this surface.
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         def _finished(mid: str) -> None:
             if request_finished is not None:

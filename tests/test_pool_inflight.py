@@ -270,3 +270,30 @@ def test_prefix_tokens_reads_the_metal_counter_too():
     assert _prefix_tokens(neither) == 0
     # The AsyncEngine wrapper is unwrapped the same way for both.
     assert _prefix_tokens(types.SimpleNamespace(engine=metal_like)) == 11
+
+
+# -- the two surfaces answer the same pool conditions the same way -----------
+
+
+def _both(app, model: str, *, stream: bool = False):
+    """One request per surface for `model`, as (openai, anthropic) responses."""
+
+    async def go():
+        async with app.router.lifespan_context(app):
+            r_o = await _post(app, "/v1/chat/completions", _chat(model, stream=stream))
+            r_a = await _post(app, "/v1/messages", _messages(model, stream=stream))
+            return r_o, r_a
+
+    return asyncio.run(go())
+
+
+def test_unknown_model_is_a_400_on_both_surfaces(pool_app):
+    """The pool's "no such model" is a client error, and the OpenAI route says
+    so with a 400 naming the available ids. /v1/messages let the same
+    exception escape as a 500, so an Anthropic client typo'ing a model id was
+    told the server was broken."""
+    r_o, r_a = _both(pool_app, "nope")
+    assert r_o.status_code == 400, r_o.text
+    assert r_a.status_code == 400, r_a.text
+    assert r_o.json()["detail"] == "unknown model 'nope'; available: a, b"
+    assert r_a.json()["detail"] == r_o.json()["detail"]
