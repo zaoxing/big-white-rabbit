@@ -77,6 +77,26 @@ async def _drain(runner, bench_id, timeout=5.0):
     raise AssertionError(f"benchmark did not finish: {runner.get(bench_id)}")
 
 
+async def _drain_any(runner, bench_id, timeout=5.0):
+    """`_drain` for a run EXPECTED to fail: no assertion on `error`."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        body = runner.get(bench_id)
+        if body["status"] != "running":
+            return body
+        await asyncio.sleep(0.005)
+    raise AssertionError(f"benchmark did not finish: {runner.get(bench_id)}")
+
+
+class _SubmitRaises(_StubEngine):
+    """An engine that resolves fine and then blows up on submit -- a failure
+    past `_one`'s resolve guard, which is the runner's `failed` branch."""
+
+    async def submit(self, prompt, params):
+        raise RuntimeError("boom")
+
+
 # -- the test matrix ---------------------------------------------------------
 
 
@@ -271,6 +291,43 @@ def test_a_run_finishing_frees_the_slot_for_the_next_one():
         second = runner.start("m", prompt_lengths=[8], batch_sizes=[1],
                               generation_length=2)
         await _drain(runner, second["bench_id"])
+
+    _run(main())
+
+
+def test_a_failure_past_resolve_fails_the_run_with_the_exception():
+    """An unknown model is a per-row result; anything the engine throws
+    after that is the run's failure, named so the page can show it."""
+    async def main():
+        runner = BenchRunner(_resolver(_SubmitRaises()))
+        started = runner.start("m", prompt_lengths=[8], batch_sizes=[1],
+                               generation_length=2)
+        body = await _drain_any(runner, started["bench_id"])
+        assert body["status"] == "failed"
+        # The runner submits through the serving path, which maps an
+        # engine RuntimeError to the 503 a client would have seen; the
+        # run's error names that wrapper and keeps the engine's message.
+        assert body["error"] == "HTTPException: 503: boom"
+        assert body["results"] == []
+
+    _run(main())
+
+
+def test_a_failed_run_releases_the_active_slot():
+    """`finally: _active = None` -- without it one engine failure would
+    refuse every benchmark until the server restarted."""
+    async def main():
+        runner = BenchRunner(_resolver(_SubmitRaises()))
+        first = runner.start("m", prompt_lengths=[8], batch_sizes=[1],
+                             generation_length=2)
+        assert runner.active_summary()["bench_id"] == first["bench_id"]
+        await _drain_any(runner, first["bench_id"])
+        assert runner.active_summary() is None
+        assert runner.active is None
+        second = runner.start("m", prompt_lengths=[8], batch_sizes=[1],
+                              generation_length=2)
+        assert second["bench_id"] != first["bench_id"]
+        await _drain_any(runner, second["bench_id"])
 
     _run(main())
 
