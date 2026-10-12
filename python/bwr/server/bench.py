@@ -301,7 +301,7 @@ class BenchRunner:
         batch: int,
     ) -> BenchResult:
         from ..engine.config import RequestParams
-        from .common import submit_request
+        from .common import counts_as_token, submit_request
 
         prompt = _prompt_of_length(renderer, pp)
         # Greedy and EOG-free: the run must generate exactly `gen` tokens, or
@@ -319,8 +319,7 @@ class BenchRunner:
                 async for out in engine.stream(rid):
                     if first is None:
                         first = time.perf_counter()
-                    if not (out.finished and out.piece == ""
-                            and out.finish_reason == "eog"):
+                    if counts_as_token(out):
                         n += 1
             finally:
                 engine.release(rid)

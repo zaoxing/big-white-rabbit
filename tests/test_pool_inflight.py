@@ -30,11 +30,14 @@ N_TOKENS = 20
 
 
 class _FakeRaw:
-    """A synchronous engine that produces `N_TOKENS` pieces, one per step.
+    """A synchronous engine that produces `N_TOKENS` pieces, one per step,
+    then an eog retire of its own.
 
-    Only the worker thread calls `add_request` / `step` / `cancel`, as with
-    the real engines; the renderer methods run on the loop thread and touch
-    nothing shared.
+    As with the real engines, the retire is not a generated token: it
+    carries no text and comes one step after the last piece. Only the
+    worker thread calls `add_request` / `step` / `cancel`, as with the real
+    engines; the renderer methods run on the loop thread and touch nothing
+    shared.
     """
 
     def __init__(self, entry, step_delay: float = 0.005) -> None:
@@ -80,10 +83,10 @@ class _FakeRaw:
             for rid in list(self._emitted):
                 self._emitted[rid] += 1
                 n = self._emitted[rid]
-                done = n >= N_TOKENS
+                done = n > N_TOKENS
                 out.append(
                     StepOutput(
-                        request_id=rid, token=n, piece="t ",
+                        request_id=rid, token=n, piece="" if done else "t ",
                         finished=done, finish_reason="eog" if done else None,
                     )
                 )

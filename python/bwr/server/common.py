@@ -99,6 +99,26 @@ def block_text(block: dict[str, Any]) -> str | None:
     return None
 
 
+# --- completion-token counting ------------------------------------------------
+
+
+def counts_as_token(out: Any) -> bool:
+    """Whether a ``StepOutput`` is a generated token for usage accounting.
+
+    Both engines retire on end-of-generation WITHOUT appending the eog token
+    to ``output_tokens`` (``mlx_engine._feed``, ``metal_engine._advance``):
+    it is a control token, not text. The retire's piece is whatever the
+    detokenizer still held -- usually nothing, but a character spelled over
+    several tokens that the eog cut short comes out as ``"\ufffd"``. The
+    routes used to count the retire whenever its piece was non-empty, so
+    such a turn reported ``completion_tokens`` one above ``len(tokens_of)``.
+    The invariant is per retire, not per piece: an eog retire is never a
+    generated token, whatever it carries. Every surface and the benchmark
+    count through this one predicate so they cannot drift again.
+    """
+    return not (out.finished and out.finish_reason == "eog")
+
+
 # --- route preamble -------------------------------------------------------------
 
 

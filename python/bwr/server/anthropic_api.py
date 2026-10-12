@@ -33,6 +33,7 @@ from . import anthropic_schemas as A
 from .common import (
     block_text,
     count_tokens,
+    counts_as_token,
     sse_response,
     submit_request,
     text_from_blocks,
@@ -387,7 +388,7 @@ def register_anthropic_routes(
                     if await http_request.is_disconnected():
                         await engine_r.cancel(request_id)
                         break
-                    if not (out.finished and out.piece == "" and out.finish_reason == "eog"):
+                    if counts_as_token(out):
                         n_completion += 1
                     emittable, hit = stopper.push(out.piece)
                     parts.append(emittable)
@@ -536,7 +537,7 @@ async def _stream(
                 await engine.cancel(request_id)
                 return
 
-            if not (out.finished and out.piece == "" and out.finish_reason == "eog"):
+            if counts_as_token(out):
                 n_completion += 1
             piece, hit = stopper.push(out.piece)
             try:

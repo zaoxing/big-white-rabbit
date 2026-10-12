@@ -828,7 +828,9 @@ def test_joined_pieces_are_the_text_when_characters_span_tokens(batch: bool) -> 
         # A cap can land mid-character; only such a trailing remainder may be
         # a replacement character, and the retire carries it as its piece.
         assert "\ufffd" not in joined.rstrip("\ufffd")
-        assert len([o for o in outs if not (o.finished and o.piece == "")]) == len(
+        # An eog retire is never a generated token, whatever piece it flushed;
+        # a length retire is one (its token is appended before the retire).
+        assert len([o for o in outs if not (o.finished and o.finish_reason == "eog")]) == len(
             eng.tokens_of(rid)
         )
     finally:

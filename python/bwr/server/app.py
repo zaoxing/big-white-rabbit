@@ -36,7 +36,13 @@ from ..engine.mlx_engine import MLXEngine
 from ..engine.pool import ModelPoolBusy, ModelPoolError
 from .anthropic_api import register_anthropic_routes
 from .bench import BenchRunner
-from .common import count_tokens, sse_response, submit_request, text_from_blocks
+from .common import (
+    count_tokens,
+    counts_as_token,
+    sse_response,
+    submit_request,
+    text_from_blocks,
+)
 from .ctxbench import ContextBenchRunner
 from .downloads import DownloadManager, HubIndex, ModelScopeIndex, MSFetcher
 from .params import build_params
@@ -615,11 +621,11 @@ def build_app(
                     if await http_request.is_disconnected():
                         await engine_r.cancel(request_id)
                         break
-                    # The engine's natural-end retirement (eog) yields an empty
-                    # piece and does not append to output_tokens / n_generated,
-                    # so counting it would make `completion_tokens` off by one
-                    # (10 vs 9). Only count tokens that carried text.
-                    if not (out.finished and out.piece == "" and out.finish_reason == "eog"):
+                    # The engine's natural-end retirement (eog) does not append
+                    # to output_tokens / n_generated, so counting it would make
+                    # `completion_tokens` off by one (10 vs 9) -- see
+                    # `counts_as_token` for why its piece does not decide this.
+                    if counts_as_token(out):
                         n_completion += 1
                     emittable, hit = stopper.push(out.piece)
                     parts.append(emittable)
@@ -844,8 +850,8 @@ async def _sse(
             if t_first is None:
                 t_first = time.perf_counter()
             # Same rule as the non-streaming path: the natural-end retirement
-            # carries no text and must not count as a generated token.
-            if not (out.finished and out.piece == "" and out.finish_reason == "eog"):
+            # is not a generated token, whatever piece it flushed.
+            if counts_as_token(out):
                 n_completion += 1
             # A client that hangs up mid-stream should stop costing us decodes.
             if await http_request.is_disconnected():
