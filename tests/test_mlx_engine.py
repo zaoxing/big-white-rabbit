@@ -544,3 +544,146 @@ def test_bad_knobs_are_refused_before_the_weights_load(
         MLXEngine("/nonexistent/weights", EngineConfig(engine="mlx", **bad))
     assert loaded == []
 
+
+# --- _retire / _prefix_insert_final ----------------------------------------
+
+
+def _finished_request(eng: MLXEngine, tokens: list[int], nxt: int):
+    """A request whose cache holds `tokens` with a lookahead pending whose
+    argmax is `nxt` -- the state `_retire` finds at the end of a request."""
+    import mlx.core as mx
+
+    req = _admit(eng, tokens[:2], max_tokens=4, drafts=None)
+    rid = req.request_id
+    cache = _TrackingCache()
+    cache.tokens = list(tokens)
+    eng._caches[rid] = [cache]
+    eng._cache_tokens[rid] = [tokens[0], *(mx.array(t) for t in tokens[1:])]
+    logits = mx.zeros((1, 1, _VOCAB))
+    logits[0, 0, nxt] = 1.0
+    eng._pending[rid] = (mx.argmax(logits[0, -1]), logits, None)
+    return req
+
+
+@needs_mlx_lib
+def test_a_normal_retire_stores_the_cache_under_the_tokens_it_holds() -> None:
+    import mlx.core as mx
+
+    eng = _stub_engine(_spec_cfg())
+    req = _finished_request(eng, [1, 2, 3, 4], nxt=5)
+    cache = eng._caches[req.request_id][0]
+    eng._retire(req, "length")
+    assert list(eng._prefix) == [(1, 2, 3, 4)]
+    stored, base, mcache, hidden, last = eng._prefix[(1, 2, 3, 4)]
+    assert base == 5
+    assert int(mx.argmax(last).item()) == 5
+    assert stored[0].tokens == [1, 2, 3, 4] and stored[0] is not cache
+    assert mcache is None and hidden is None
+    # Everything per-request is released.
+    assert req.request_id not in eng._caches
+    assert req.request_id not in eng._cache_tokens
+    assert req.request_id not in eng._pending
+    assert req.finished and req.finish_reason == "length"
+
+
+@needs_mlx_lib
+def test_an_error_retire_stores_nothing() -> None:
+    eng = _stub_engine(_spec_cfg())
+    req = _finished_request(eng, [1, 2, 3, 4], nxt=5)
+    eng._retire(req, "error")
+    assert eng._prefix == {}
+    assert req.request_id not in eng._caches
+
+
+@needs_mlx_lib
+def test_a_disabled_prefix_cache_stores_nothing_at_retire() -> None:
+    cfg = _spec_cfg()
+    cfg.mlx_prefix_cache = False
+    eng = _stub_engine(cfg)
+    req = _finished_request(eng, [1, 2, 3, 4], nxt=5)
+    eng._retire(req, "length")
+    assert eng._prefix == {}
+
+
+@needs_mlx_lib
+@pytest.mark.parametrize("missing", ["_caches", "_cache_tokens", "_pending"])
+def test_retire_without_cache_tokens_or_pending_stores_nothing(missing: str) -> None:
+    """A request that never reached the lookahead (admitted, not stepped;
+    or failed mid-prefill) has nothing to store, and must not raise."""
+    eng = _stub_engine(_spec_cfg())
+    req = _finished_request(eng, [1, 2, 3, 4], nxt=5)
+    getattr(eng, missing).pop(req.request_id)
+    eng._retire(req, "cancelled")
+    assert eng._prefix == {}
+
+
+@needs_mlx_lib
+def test_retire_below_min_tokens_stores_nothing() -> None:
+    cfg = _spec_cfg()
+    cfg.prefix_cache_min_tokens = 5
+    eng = _stub_engine(cfg)
+    req = _finished_request(eng, [1, 2, 3, 4], nxt=5)
+    eng._retire(req, "length")
+    assert eng._prefix == {}
+
+
+# --- _prefix_lookup ----------------------------------------------------------
+
+
+def _store(eng: MLXEngine, key: tuple[int, ...], base: int = 0) -> None:
+    import mlx.core as mx
+
+    cache = _TrackingCache()
+    cache.tokens = list(key)
+    eng._prefix[key] = ([cache], base, None, None, mx.zeros((_VOCAB,)))
+
+
+def _probe(eng: MLXEngine, prompt: list[int]):
+    return eng._prefix_lookup(_admit(eng, prompt, max_tokens=4, drafts=None))
+
+
+@needs_mlx_lib
+def test_an_exact_hit_returns_a_copy_of_the_stored_cache() -> None:
+    eng = _stub_engine(_spec_cfg())
+    _store(eng, (1, 2, 3), base=4)
+    found = _probe(eng, [1, 2, 3])
+    assert found is not None
+    cache, base, entry, matched = found
+    assert base == 4 and matched == 3
+    assert entry is eng._prefix[(1, 2, 3)]
+    assert cache[0].tokens == [1, 2, 3] and cache[0] is not entry[0][0]
+    assert (eng.prefix_hits, eng.prefix_partial_hits, eng.prefix_hit_tokens) == (1, 0, 3)
+
+
+@needs_mlx_lib
+def test_a_strict_prefix_of_a_stored_entry_misses() -> None:
+    """The stored cache holds MORE than the prompt; recurrent state cannot
+    be cut back, so it is unusable, however tempting."""
+    eng = _stub_engine(_spec_cfg())
+    _store(eng, (1, 2, 3, 4, 5))
+    assert _probe(eng, [1, 2, 3]) is None
+    assert (eng.prefix_hits, eng.prefix_misses) == (0, 1)
+
+
+@needs_mlx_lib
+def test_the_longest_extendable_entry_wins_and_becomes_most_recent() -> None:
+    eng = _stub_engine(_spec_cfg())
+    _store(eng, (1, 2, 3, 4))
+    _store(eng, (1, 2))
+    _store(eng, (9, 9, 9))
+    found = _probe(eng, [1, 2, 3, 4, 5, 6])
+    assert found is not None
+    cache, base, entry, matched = found
+    assert base is None and matched == 4
+    assert cache[0].tokens == [1, 2, 3, 4]
+    assert entry is eng._prefix[(1, 2, 3, 4)]
+    assert list(eng._prefix)[-1] == (1, 2, 3, 4)
+    assert (eng.prefix_hits, eng.prefix_partial_hits, eng.prefix_hit_tokens) == (1, 1, 4)
+
+
+@needs_mlx_lib
+def test_a_diverging_prompt_misses() -> None:
+    eng = _stub_engine(_spec_cfg())
+    _store(eng, (1, 2, 3, 4))
+    assert _probe(eng, [1, 2, 9, 4, 5]) is None
+    assert (eng.prefix_hits, eng.prefix_misses) == (0, 1)
