@@ -309,7 +309,7 @@ def register_anthropic_routes(
                     _stream(
                         engine_r,
                         request_id,
-                        model_name,
+                        served,
                         known,
                         n_prompt,
                         http_request,

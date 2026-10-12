@@ -297,3 +297,18 @@ def test_unknown_model_is_a_400_on_both_surfaces(pool_app):
     assert r_a.status_code == 400, r_a.text
     assert r_o.json()["detail"] == "unknown model 'nope'; available: a, b"
     assert r_a.json()["detail"] == r_o.json()["detail"]
+
+
+def test_anthropic_stream_names_the_model_the_request_resolved_to(pool_app):
+    """`message_start.message.model` must be the model the request picked, as
+    the non-streaming body and the OpenAI stream already report. The streaming
+    path was handed the registration-time name instead, which in pool mode is
+    the first model in the directory, so a stream for "b" opened as "a"."""
+    r_o, r_a = _both(pool_app, "b", stream=True)
+    assert r_o.status_code == 200 and r_a.status_code == 200, r_a.text
+    first = r_a.text.split("\n\n")[0]
+    assert first.startswith("event: message_start")
+    start = json.loads(first.split("\ndata: ", 1)[1])
+    assert start["message"]["model"] == "b"
+    chunk = json.loads(r_o.text.split("\n\n")[0][6:])
+    assert chunk["model"] == start["message"]["model"]
