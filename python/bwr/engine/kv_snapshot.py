@@ -98,7 +98,11 @@ class KVSnapStore:
         req = self.engine._lookup(request_id)
         if req.seq_id == self.snapshot_seq:
             raise ValueError("cannot snapshot the snapshot seq itself")
-        # Copy full KV (the snapshot seq is otherwise unused)
+        # Clear the previous snapshot before copying. With a unified KV cache
+        # seq_cp only adds the destination tag to the source's cells, so without
+        # this a second save stacks on top of the first and the restored seq
+        # carries two cells per position.
+        self.engine.ctx.memory_seq_rm(self.snapshot_seq, -1, -1)
         self.engine.ctx.memory_seq_cp(req.seq_id, self.snapshot_seq, -1, -1)
         snap = _Snap(
             prompt=list(req.prompt),

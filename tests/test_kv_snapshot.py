@@ -120,3 +120,34 @@ def test_snapshot_binary_roundtrip_identical(tmp_path) -> None:
     assert "snap_bin" not in store2.list()
     assert not (tmp_path / "snap_bin.bin").exists()
     assert not (tmp_path / "snap_bin.json").exists()
+
+
+def test_second_save_replaces_first_snapshot(tmp_path) -> None:
+    """Two saves in a row, then load the second one.
+
+    With kv_unified=True llama.cpp's same-stream seq_cp only adds the
+    destination tag to cells, so unless `save` clears the snapshot seq
+    first, the second snapshot stacks on top of the first and the restored
+    seq has two cells per position -- decode then fails. The restored
+    request must match a plain prefill of the same prompt."""
+    cfg = EngineConfig(n_ctx=512, n_seq_max=2, record_experts=False, kv_unified=True)
+    engine = MetalEngine(bwr.Model(MODEL_PATH, bwr.ModelParams()), cfg)
+    store = KVSnapStore(engine, kv_dir=tmp_path)
+    params = bwr.RequestParams(max_tokens=N_TOKENS, stop_at_eog=False, temp=0.0)
+
+    long_prompt = " ".join(str(i) for i in range(60))
+    rid_a = engine.add_request(long_prompt, params)
+    engine.step()
+    store.save("a", rid_a)
+    list(engine.drain())
+
+    rid_b = engine.add_request(PROMPT, params)
+    engine.step()
+    store.save("b", rid_b)
+    list(engine.drain())
+    ref_tokens = engine.tokens_of(rid_b)
+
+    rid_c = store.load("b")
+    list(engine.drain())
+    assert engine.tokens_of(rid_c) == ref_tokens
+    assert engine.state(rid_c).finish_reason == "length"
