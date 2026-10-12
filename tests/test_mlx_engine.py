@@ -511,3 +511,36 @@ def test_spec_round_keeps_cache_tokens_in_step_with_the_cache(
     (key, entry), = eng._prefix.items() if len(eng._prefix) == 1 else [max(eng._prefix.items(), key=lambda kv: len(kv[0]))]
     assert list(key) == held
     assert entry[0][0].tokens == held
+
+
+@pytest.mark.parametrize(
+    "bad, message",
+    [
+        ({"mlx_kv_bits": 3}, "mlx_kv_bits must be 0, 4 or 8"),
+        ({"spec_max_drafts": -1}, "spec_max_drafts must be >= 0"),
+        ({"prefix_cache_min_tokens": 0}, "prefix_cache_min_tokens must be >= 1"),
+    ],
+    ids=["kv-bits", "spec-max-drafts", "prefix-min-tokens"],
+)
+def test_bad_knobs_are_refused_before_the_weights_load(
+    monkeypatch: pytest.MonkeyPatch, bad: dict, message: str
+) -> None:
+    """Validation runs in the constructor ahead of load(): a bad value
+    fails in milliseconds naming the knob, not after the weights are in
+    (mlx_kv_bits used to surface at the first request's cache build)."""
+    from bwr.engine import mlx_engine as engine_module
+
+    loaded = []
+
+    def fake_require():
+        def load(path):
+            loaded.append(path)
+            raise AssertionError("load() ran before validation")
+
+        return load, None
+
+    monkeypatch.setattr(engine_module, "_require_mlx", fake_require)
+    with pytest.raises(ValueError, match=message):
+        MLXEngine("/nonexistent/weights", EngineConfig(engine="mlx", **bad))
+    assert loaded == []
+

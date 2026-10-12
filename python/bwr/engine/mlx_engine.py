@@ -157,6 +157,22 @@ class MLXEngine:
         config: EngineConfig | None = None,
     ) -> None:
         self.config = config or EngineConfig()
+        # Knob validation BEFORE load(): a bad value fails in milliseconds
+        # with an error naming it, not after pulling in the weights (or,
+        # for mlx_kv_bits, at the first request's cache build).
+        if self.config.spec_max_drafts < 0:
+            raise ValueError(
+                f"spec_max_drafts must be >= 0; got {self.config.spec_max_drafts}"
+            )
+        if self.config.prefix_cache_min_tokens < 1:
+            raise ValueError(
+                f"prefix_cache_min_tokens must be >= 1; got "
+                f"{self.config.prefix_cache_min_tokens}"
+            )
+        if self.config.mlx_kv_bits not in (None, 0, 4, 8):
+            raise ValueError(
+                f"mlx_kv_bits must be 0, 4 or 8; got {self.config.mlx_kv_bits}"
+            )
         # Effective KV width. Normally the configured value; batching forces
         # f16 (see below), so the engine tracks its own rather than mutating
         # the caller's EngineConfig, which may be shared across engines.
@@ -190,10 +206,8 @@ class MLXEngine:
                 )
         # MTP-head speculation (SPEC-mlx-mtp-draft.md). Mutually exclusive
         # with n-gram: both feed the one verify path, so allowing both would
-        # silently pick a winner. Validated BEFORE load() so a misconfigured
-        # run fails in milliseconds instead of after pulling in ~19 GB of
-        # weights (and with an error naming the real problem, not a missing
-        # config.json).
+        # silently pick a winner. Also before load(), so the error names the
+        # real problem rather than a missing config.json.
         self._mtp = None
         self._mtp_caches: dict[int, list] = {}
         self._mtp_hidden: dict[int, object] = {}
@@ -310,6 +324,8 @@ class MLXEngine:
         if bits == 0:
             return cache  # manual-loop f16 control (no swap)
         if bits not in (4, 8):
+            # Unreachable through __init__ (validated there); kept for an
+            # engine built without it.
             raise ValueError(f"mlx_kv_bits must be 0, 4 or 8; got {bits}")
         return [
             QuantizedKVCache(group_size=64, bits=bits)
