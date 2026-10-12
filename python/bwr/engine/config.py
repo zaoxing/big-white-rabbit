@@ -40,20 +40,27 @@ class EngineConfig:
     flash_attn: bool = True
     # Backend selection (SPEC-mlx-engine.md). "mlx" is the default: plain MLX
     # decode measured ~1.24x the Metal path in-harness with identical serving
-    # semantics. "metal" keeps the llama.cpp backend (speculation, prefix
-    # cache, MoE placement, KV quant live there). Geometry knobs below still
-    # apply where meaningful (n_ctx caps MLX admissions); the rest are
-    # Metal-only and ignored.
+    # semantics. "metal" keeps the llama.cpp backend. Each backend has its
+    # own spelling of the same levers: speculation is `speculative` on both
+    # plus `mlx_mtp` / `draft_max_drafts`; the prompt cache is
+    # `mlx_prefix_cache` / `prefix_cache`; KV quantisation is `mlx_kv_bits` /
+    # `kv_type`. Only MoE expert placement (record_experts, ssd_hotlist*) is
+    # Metal-only. Geometry knobs below still apply where meaningful (n_ctx
+    # caps MLX admissions); the rest are per-backend and ignored by the other.
     engine: str = "mlx"
-    # Exact-prefix prompt cache for the MLX backend (agent-loop TTFT).
-    # Off by default: entries hold full prompt KV (256MB at 8K on 27B),
-    # which only pays when prompts repeat byte-identically. On an exact
-    # hit the request skips prefill entirely (cache + first token are
-    # replayed deterministically); misses prefill normally and insert a
-    # snapshot when len(prompt) >= prefix_cache_min_tokens. Bounded by
-    # count (LRU); mlx_lm's own LRUPromptCache is unusable here because
-    # ArraysCache (48/64 qwen3_5 layers) implements neither nbytes nor
-    # trim, so only exact matches are served (no partial-prefix reuse).
+    # Prompt cache for the MLX backend (agent-loop TTFT). Off by default:
+    # entries hold full prompt KV (256MB at 8K on 27B), which only pays
+    # when prompts repeat or extend. A lookup serves the LONGEST stored
+    # entry the prompt begins with: an exact hit skips prefill entirely
+    # (a greedy request replays the stored first token; a sampled one
+    # draws its own from the stored logits row), and an extension installs
+    # the stored cache and prefills only the remainder. Finished requests
+    # are stored under prompt + answer + end token, which is exactly what
+    # the next chat turn extends, so that turn prefills only the new
+    # message. Extension only, never truncation: the hybrid models'
+    # recurrent state (ArraysCache) cannot be cut back to an earlier
+    # position, which is also why mlx_lm's own LRUPromptCache (needs
+    # trim/nbytes) is unusable here. Bounded by entry count (LRU).
     mlx_prefix_cache: bool = False
     mlx_prefix_cache_size: int = 2
     # Quantized live KV for the MLX backend (mlx_lm QuantizedKVCache).
@@ -99,8 +106,11 @@ class EngineConfig:
     # MLX's quantized kernel does not amortise rows the way a batched GEMM
     # would. Turn it on for CONCURRENCY LATENCY -- without it the Nth
     # simultaneous request waits for N-1 whole generations. Mutually
-    # exclusive with the per-request manual-loop features (speculative,
-    # mlx_mtp, mlx_prefix_cache, mlx_kv_bits), which own their own caches.
+    # exclusive with the draft sources (speculative, mlx_mtp), which own a
+    # per-request cache where batching owns one shared batched cache;
+    # MLXEngine raises on either. It composes with mlx_prefix_cache (partial
+    # hits are taken on admission). mlx_kv_bits is downgraded to f16 with a
+    # warning, not refused: mlx-lm has no batched QuantizedKVCache.
     mlx_batch: bool = False
     # Prefix-cache TTFT (SPEC-prefix-cache.md). Off by default: pins hold
     # seq slots outside the free pool, which only pays when prompts repeat.
