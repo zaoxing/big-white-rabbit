@@ -62,36 +62,66 @@ class KVSnapStore:
         # Hydrate in-memory map from disk files already present (survives restart)
         for p in self.kv_dir.glob("*.json"):
             try:
-                data = json.loads(p.read_text())
-                params = None
-                if data.get("params"):
-                    try:
-                        from .config import RequestParams
-
-                        pd = data["params"]
-                        params = RequestParams(
-                            temp=pd.get("temp", 0.0),
-                            top_k=pd.get("top_k", 40),
-                            top_p=pd.get("top_p", 0.95),
-                            seed=pd.get("seed", 0xFFFFFFFF),
-                            max_tokens=pd.get("max_tokens", 128),
-                            stop_at_eog=pd.get("stop_at_eog", True),
-                            stop=tuple(pd.get("stop", ())),
-                        )
-                    except Exception:  # noqa: BLE001 - best-effort disk hydration, ignore malformed params
-                        params = None
-                self._snaps[p.stem] = _Snap(
-                    prompt=data["prompt"],
-                    output_tokens=data["output_tokens"],
-                    n_pos=data["n_pos"],
-                    n_prefilled=data["n_prefilled"],
-                    seq_id=self.snapshot_seq,
-                    params=params,
-                    next_token=data.get("next_token"),
-                    live=False,  # disk-hydrated: no live KV in this engine
-                )
+                self._snaps[p.stem] = self._snap_from_json(json.loads(p.read_text()))
             except Exception:  # noqa: BLE001 - best-effort disk hydration, ignore malformed snapshot file
                 continue
+
+    def _snap_from_json(self, data: dict) -> _Snap:
+        """A disk-hydrated `_Snap`: no live KV in this engine, params best-effort."""
+        params = None
+        if data.get("params"):
+            try:
+                from .config import RequestParams
+
+                pd = data["params"]
+                params = RequestParams(
+                    temp=pd.get("temp", 0.0),
+                    top_k=pd.get("top_k", 40),
+                    top_p=pd.get("top_p", 0.95),
+                    seed=pd.get("seed", 0xFFFFFFFF),
+                    max_tokens=pd.get("max_tokens", 128),
+                    stop_at_eog=pd.get("stop_at_eog", True),
+                    stop=tuple(pd.get("stop", ())),
+                )
+            except Exception:  # noqa: BLE001 - best-effort disk hydration, ignore malformed params
+                params = None
+        return _Snap(
+            prompt=data["prompt"],
+            output_tokens=data["output_tokens"],
+            n_pos=data["n_pos"],
+            n_prefilled=data["n_prefilled"],
+            seq_id=self.snapshot_seq,
+            params=params,
+            next_token=data.get("next_token"),
+            live=False,
+        )
+
+    def _rehydrate(self, snap: _Snap, seq_id: int, new_request_id: int | None) -> int:
+        """Install a RequestState for `snap` on `seq_id` (whose KV is already in
+        place) and return its request id. Bypasses tokenization / prompt-length
+        checks -- the snapshot was validated when it was taken."""
+        from .batching import RequestState
+
+        rid = new_request_id if new_request_id is not None else self.engine._next_request_id
+        if new_request_id is None:
+            self.engine._next_request_id += 1
+        else:
+            self.engine._next_request_id = max(self.engine._next_request_id, rid + 1)
+        state = RequestState(
+            request_id=rid,
+            seq_id=seq_id,
+            prompt=list(snap.prompt),
+            params=snap.params,  # type: ignore[arg-type]
+        )
+        state.output_tokens = list(snap.output_tokens)
+        state.n_pos = snap.n_pos
+        state.n_prefilled = snap.n_prefilled
+        state.n_generated = len(snap.output_tokens)
+        state.next_token = snap.next_token
+        # n_pos already includes prompt + output, so next decode continues
+        self.engine._states[rid] = state
+        self.engine.ctx.set_seq_sampler(seq_id, snap.params.to_sampler_params())  # type: ignore[union-attr]
+        return rid
 
     def save(self, name: str, request_id: int) -> None:
         """Snapshot `request_id`'s KV and prompt state under `name`."""
@@ -169,34 +199,7 @@ class KVSnapStore:
             p = self.kv_dir / f"{name}.json"
             if p.exists():
                 try:
-                    data = json.loads(p.read_text())
-                    params = None
-                    if data.get("params"):
-                        try:
-                            from .config import RequestParams
-
-                            pd = data["params"]
-                            params = RequestParams(
-                                temp=pd.get("temp", 0.0),
-                                top_k=pd.get("top_k", 40),
-                                top_p=pd.get("top_p", 0.95),
-                                seed=pd.get("seed", 0xFFFFFFFF),
-                                max_tokens=pd.get("max_tokens", 128),
-                                stop_at_eog=pd.get("stop_at_eog", True),
-                                stop=tuple(pd.get("stop", ())),
-                            )
-                        except Exception:  # noqa: BLE001 - best-effort disk hydration, ignore malformed params
-                            params = None
-                    snap = _Snap(
-                        prompt=data["prompt"],
-                        output_tokens=data["output_tokens"],
-                        n_pos=data["n_pos"],
-                        n_prefilled=data["n_prefilled"],
-                        seq_id=self.snapshot_seq,
-                        params=params,
-                        next_token=data.get("next_token"),
-                        live=False,
-                    )
+                    snap = self._snap_from_json(json.loads(p.read_text()))
                     self._snaps[name] = snap
                 except Exception as exc:  # noqa: BLE001 - disk read failure, re-raised as KeyError
                     raise KeyError(f"unknown snapshot {name!r}") from exc
@@ -205,7 +208,7 @@ class KVSnapStore:
         # If snapshot has no live KV (disk-hydrated after restart, or params None),
         # try T12c fast path: restore binary KV via state_seq_set_data if .bin exists.
         # Falls back to re-prefill (slow but correct) when bin missing or incompatible.
-        if not getattr(snap, "live", False) or snap.params is None:
+        if not snap.live or snap.params is None:
             bin_path = self.kv_dir / f"{name}.bin"
             if bin_path.exists():
                 try:
@@ -218,27 +221,7 @@ class KVSnapStore:
                         # state_seq_set_data returns bytes consumed (0 on failure)
                         consumed = self.engine.ctx.state_seq_set_data(seq_id, data)  # type: ignore[attr-defined]
                         if consumed and consumed > 0:
-                            from .batching import RequestState
-
-                            rid = new_request_id if new_request_id is not None else self.engine._next_request_id
-                            if new_request_id is None:
-                                self.engine._next_request_id += 1
-                            else:
-                                self.engine._next_request_id = max(self.engine._next_request_id, rid + 1)
-                            state = RequestState(
-                                request_id=rid,
-                                seq_id=seq_id,
-                                prompt=list(snap.prompt),
-                                params=snap.params,  # type: ignore[arg-type]
-                            )
-                            state.output_tokens = list(snap.output_tokens)
-                            state.n_pos = snap.n_pos
-                            state.n_prefilled = snap.n_prefilled
-                            state.n_generated = len(snap.output_tokens)
-                            state.next_token = snap.next_token
-                            self.engine._states[rid] = state
-                            self.engine.ctx.set_seq_sampler(seq_id, snap.params.to_sampler_params())  # type: ignore[union-attr]
-                            return rid
+                            return self._rehydrate(snap, seq_id, new_request_id)
                         # set_data failed — return seq to free list for fallback
                         self.engine._free_seq_ids.insert(0, seq_id)
                 except Exception:  # noqa: BLE001 - best-effort binary restore, fallback to re-prefill
@@ -262,31 +245,7 @@ class KVSnapStore:
         seq_id = self.engine._free_seq_ids.pop(0)
         # Copy snapshot KV to the new seq
         self.engine.ctx.memory_seq_cp(self.snapshot_seq, seq_id, -1, -1)
-        # Rehydrate RequestState (reuse Engine's bookkeeping but bypass
-        # tokenization / prompt-length checks — snapshot is already validated)
-        from .batching import RequestState
-
-        rid = new_request_id if new_request_id is not None else self.engine._next_request_id
-        if new_request_id is None:
-            self.engine._next_request_id += 1
-        else:
-            self.engine._next_request_id = max(self.engine._next_request_id, rid + 1)
-        state = RequestState(
-            request_id=rid,
-            seq_id=seq_id,
-            prompt=list(snap.prompt),
-            params=snap.params,  # type: ignore[arg-type]
-        )
-        state.output_tokens = list(snap.output_tokens)
-        state.n_pos = snap.n_pos
-        state.n_prefilled = snap.n_prefilled
-        state.n_generated = len(snap.output_tokens)
-        state.next_token = snap.next_token
-        # n_pos already includes prompt + output, so next decode continues
-        self.engine._states[rid] = state
-        # Re-install sampler
-        self.engine.ctx.set_seq_sampler(seq_id, snap.params.to_sampler_params())  # type: ignore[union-attr]
-        return rid
+        return self._rehydrate(snap, seq_id, new_request_id)
 
     def list(self) -> list[str]:
         # Merge in-memory and on-disk (on-disk may have entries not yet hydrated)
