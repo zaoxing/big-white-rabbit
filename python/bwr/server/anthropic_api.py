@@ -42,7 +42,7 @@ from .params import build_params
 # Single source -- see server/reasons.py. Re-exported so
 # `from server.anthropic_api import _STOP_REASONS` keeps working.
 from .reasons import STOP_REASONS as _STOP_REASONS  # noqa: F401
-from .schemas import max_tokens_error
+from .schemas import ChatCompletionRequest, max_tokens_error
 from .tools import (
     ParsedToolCall,
     ToolCallStreamParser,
@@ -212,6 +212,27 @@ def _request_params(req: A.MessagesRequest) -> RequestParams:
     )
 
 
+def _sampling_request(req: A.MessagesRequest) -> ChatCompletionRequest:
+    """This request's sampling fields in the OpenAI spelling.
+
+    The merge of an exposed profile's defaults with a request's explicit values
+    lives in `app._request_params` ("a profile is a default, not an override").
+    Rather than copy that rule here and let the two surfaces disagree about it,
+    the Anthropic request is re-spelled as the sampling-only subset of the OpenAI
+    one and handed to the same builder. `messages` is not part of sampling and is
+    left empty; the builder never reads it.
+    """
+    return ChatCompletionRequest(
+        messages=[],
+        model=req.model,
+        max_tokens=req.max_tokens,
+        stop=req.stop_sequences,
+        temperature=req.temperature,
+        top_p=req.top_p,
+        top_k=req.top_k,
+    )
+
+
 def _input_object(call: ParsedToolCall) -> dict[str, Any]:
     """`arguments` (a JSON string, OpenAI's spelling) -> `input` (an object).
 
@@ -238,6 +259,7 @@ def register_anthropic_routes(
     request_finished=None,
     record: Callable[..., None] | None = None,
     prefix_tokens: Callable[[object], int] | None = None,
+    request_params: Callable[..., RequestParams] | None = None,
 ) -> None:
     """Mount /v1/messages. `render_prompt(renderer, pairs)` is injected rather than
     reimplemented so the Anthropic surface cannot drift from the OpenAI one on prompt
@@ -252,6 +274,11 @@ def register_anthropic_routes(
     `_prefix_tokens` the OpenAI route uses (app.build_app binds the ServerStats): a
     request on this surface is a request that happened, and /admin/api/stats
     reported zero of them until it was folded in from the same finally blocks.
+
+    `request_params(req, defaults=overlay)` is the OpenAI route's builder, injected
+    so an exposed profile's sampling bundle is merged by ONE rule on both surfaces;
+    see `_sampling_request`. Without it the overlay `resolve` returns is ignored,
+    which is what this route used to do.
     """
 
     def _cached_tokens(engine: object) -> int:
@@ -289,11 +316,12 @@ def register_anthropic_routes(
         # to fall back on. Rendering first, against the registration-time
         # renderer, 500'd every /v1/messages on a pool server. The OpenAI
         # route has always done it in this order.
+        overlay: dict[str, object] = {}
         if resolve is None:
             served, engine_r, renderer_r = model_name, async_engine, model
         else:
             try:
-                served, engine_r, renderer_r, _overlay = await resolve(req.model)
+                served, engine_r, renderer_r, overlay = await resolve(req.model)
             except ModelPoolError as exc:
                 # A model id the pool does not know is the client's mistake, and
                 # the OpenAI route already says so with this exact 400. Letting it
@@ -311,7 +339,12 @@ def register_anthropic_routes(
         streaming = False
         try:
             prompt = render_prompt(renderer_r, pairs)
-            params = _request_params(req)
+            # The profile supplies DEFAULTS: an explicit value on the request
+            # always wins, exactly as on /v1/chat/completions.
+            if request_params is not None:
+                params = request_params(_sampling_request(req), defaults=overlay)
+            else:
+                params = _request_params(req)
             n_prompt = count_tokens(renderer_r, prompt)
             # Read BEFORE submitting, as the OpenAI route does: the delta across
             # the request is how many prompt tokens the prefix cache served.

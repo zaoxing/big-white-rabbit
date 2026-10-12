@@ -686,6 +686,9 @@ def build_app(
         # The same counters, through the same helpers, as the OpenAI route.
         record=lambda engine, **counts: _record(stats, engine, **counts),
         prefix_tokens=_prefix_tokens,
+        # One defaults-merge for an exposed profile's sampling bundle, so the
+        # two surfaces cannot disagree about what "default, not override" means.
+        request_params=_request_params,
     )
     app.include_router(anthropic_router)
 

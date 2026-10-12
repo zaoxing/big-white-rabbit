@@ -339,3 +339,58 @@ def test_anthropic_requests_are_counted_in_server_stats(pool_app, stream):
     by_id = {m["model_id"]: m for m in stats.usage()["models"]}
     assert by_id["a"]["requests"] == 1
     assert by_id["a"]["total_tokens"] == 2 + N_TOKENS
+
+
+# -- an exposed profile's sampling defaults apply on /v1/messages too ----------
+
+
+@pytest.fixture
+def captured_params(pool_app):
+    """The RequestParams each admitted request handed the engine, in order."""
+    seen: list = []
+
+    class _Capturing(_FakeRaw):
+        def add_request(self, prompt, params, *, add_special=True) -> int:
+            seen.append(params)
+            return super().add_request(prompt, params, add_special=add_special)
+
+    pool_app.state.pool._factory = lambda entry, _cfg: _Capturing(entry)
+    return seen
+
+
+def test_exposed_profile_is_a_default_on_the_anthropic_surface(pool_app, captured_params):
+    """`a:precise` names model `a` plus a sampling bundle. The OpenAI route
+    applies the bundle as DEFAULTS (an explicit request value still wins);
+    the Anthropic route resolved the id, bound the overlay to a throwaway and
+    sampled with the engine's defaults, so the profile a client picked from
+    the model list did nothing there."""
+    pool_app.state.profiles.create_profile(
+        "a", "precise",
+        settings={"temperature": 0.11, "top_k": 7, "top_p": 0.5},
+        expose_as_model=True,
+    )
+
+    async def go():
+        async with pool_app.router.lifespan_context(pool_app):
+            r1 = await _post(pool_app, "/v1/chat/completions", _chat("a:precise"))
+            r2 = await _post(pool_app, "/v1/messages", _messages("a:precise"))
+            r3 = await _post(
+                pool_app, "/v1/messages", {**_messages("a:precise"), "temperature": 0.9}
+            )
+            r4 = await _post(pool_app, "/v1/messages", _messages("a"))
+            return r1, r2, r3, r4
+
+    r1, r2, r3, r4 = asyncio.run(go())
+    for r in (r1, r2, r3, r4):
+        assert r.status_code == 200, r.text
+    assert r2.json()["model"] == "a"
+    openai, anthropic, explicit, plain = captured_params
+    assert (anthropic.temp, anthropic.top_k, anthropic.top_p) == (0.11, 7, 0.5)
+    assert (anthropic.temp, anthropic.top_k, anthropic.top_p) == (
+        openai.temp, openai.top_k, openai.top_p
+    )
+    # A profile is a default, not an override.
+    assert explicit.temp == pytest.approx(0.9)
+    assert (explicit.top_k, explicit.top_p) == (7, 0.5)
+    # And a plain id is untouched by it.
+    assert plain.temp != pytest.approx(0.11)
