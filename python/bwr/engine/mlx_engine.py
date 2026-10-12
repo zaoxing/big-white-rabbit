@@ -1,12 +1,16 @@
 """MLXEngine: mlx-lm behind the MetalEngine interface (SPEC-mlx-engine.md).
 
-Each request owns an independent mlx generator (stream path) or an owned
-cache (speculative path); the worker thread drives them one step at a time.
-N-gram speculation (SPEC-mlx-engine.md M12) reuses ``NgramTable`` verbatim --
-only the verify loop is backend-specific, because mlx-lm 0.31.3 has no hybrid
-rewind: on any mismatch the cache is rebuilt exactly by re-feeding (never
-lossy), and a per-request rolling acceptance disables drafting below 0.5
-after 8 drafted. Greedy only, like Metal.
+Every request owns a cache and runs the manual loop (`_start_spec` then
+`_verify` per step); the worker thread drives them one step at a time, and
+each step queues the next forward before forcing the current token (see
+`_lookahead`). Sampling is per request: greedy by default, mlx-lm's sampler
+for temp > 0. Drafting is greedy-only and comes from either the n-gram table
+(``NgramTable``, reused verbatim) or the model's MTP head; the engine-wide
+`spec_gate` decides first whether a step drafts at all, by timing drafting
+and plain steps on this engine, and a per-request rolling acceptance then
+disables drafting below 0.5 after 8 drafted. A mismatch rewinds the cache
+through a snapshot taken before the verify forward (`_snapshot_cache`) and
+re-feeds only the accepted prefix, so output is identical to plain decode.
 
 mlx-lm is a core dependency (it ships with big-white-rabbit). Nothing in this
 module imports it at top level anyway: the import happens in ``__init__``
@@ -139,7 +143,7 @@ class _MLXContext:
 
 
 class MLXEngine:
-    """One mlx-lm generator per request, stepped in lockstep.
+    """One owned cache per request, stepped in lockstep on the manual loop.
 
     Greedy by default like everywhere else here; temp/top_p/top_k map onto
     mlx-lm's sampler. NOTE on temp > 0: mlx-lm samplers take no seed, so
