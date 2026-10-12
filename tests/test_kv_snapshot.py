@@ -161,6 +161,38 @@ def test_second_save_replaces_first_snapshot(tmp_path) -> None:
     assert engine.state(rid_c).finish_reason == "length"
 
 
+@needs_model
+def test_load_of_an_earlier_save_restores_its_own_kv(tmp_path) -> None:
+    """save a, save b, load a: the restored request must continue a's prompt.
+
+    There is one snapshot seq, and the second save overwrites it with b's
+    KV. If a's entry still claims its KV is live there, load("a") copies
+    b's cells under a's token history and generates b's continuation."""
+    cfg = EngineConfig(n_ctx=512, n_seq_max=2, record_experts=False)
+    engine = MetalEngine(bwr.Model(MODEL_PATH, bwr.ModelParams()), cfg)
+    store = KVSnapStore(engine, kv_dir=tmp_path)
+    params = bwr.RequestParams(max_tokens=N_TOKENS, stop_at_eog=False, temp=0.0)
+
+    prompt_a = "The capital of France is"
+    rid_a = engine.add_request(prompt_a, params)
+    engine.step()
+    store.save("a", rid_a)
+    list(engine.drain())
+    ref_a = engine.tokens_of(rid_a)
+
+    rid_b = engine.add_request(PROMPT, params)
+    engine.step()
+    store.save("b", rid_b)
+    list(engine.drain())
+    ref_b = engine.tokens_of(rid_b)
+    assert ref_a != ref_b  # the two prompts must be distinguishable
+
+    rid_c = store.load("a")
+    list(engine.drain())
+    assert engine.tokens_of(rid_c) == ref_a
+    assert engine.state(rid_c).finish_reason == "length"
+
+
 # --- stub-level: no weights needed -----------------------------------------
 
 
@@ -169,8 +201,9 @@ class _FakeCtx:
 
     n_seq_max = 2
 
-    def __init__(self) -> None:
+    def __init__(self, set_data_raises: bool = False) -> None:
         self.calls: list[tuple] = []
+        self.set_data_raises = set_data_raises
 
     def memory_seq_rm(self, *a) -> None:
         self.calls.append(("rm", *a))
@@ -182,20 +215,37 @@ class _FakeCtx:
         return b"kv"
 
     def state_seq_set_data(self, seq_id, data):
+        self.calls.append(("set_data", seq_id))
+        if self.set_data_raises:
+            raise RuntimeError("incompatible state blob")
         return len(data)
 
     def set_seq_sampler(self, seq_id, params) -> None:
         self.calls.append(("sampler", seq_id))
 
 
-def _stub_engine() -> MetalEngine:
+def _stub_engine(**ctx_kwargs) -> MetalEngine:
     eng = MetalEngine.__new__(MetalEngine)
-    eng.ctx = _FakeCtx()
+    eng.ctx = _FakeCtx(**ctx_kwargs)
     eng._free_seq_ids = [0, 1]
     eng._states = {}
     eng._retired = {}
+    eng._pins = {}
     eng._next_request_id = 0
     return eng
+
+
+def _live_request(rid: int, seq_id: int, prompt: list[int], output: list[int]):
+    """An in-flight request: prompt fully prefilled, `output` generated so far."""
+    from bwr.engine.batching import RequestState
+
+    st = RequestState(request_id=rid, seq_id=seq_id, prompt=list(prompt), params=bwr.RequestParams(max_tokens=50))
+    st.n_prefilled = len(prompt)
+    st.n_pos = len(prompt) + len(output)
+    st.output_tokens = list(output)
+    st.n_generated = len(output)
+    st.next_token = output[-1]
+    return st
 
 
 def _finished_request(rid: int, seq_id: int):
@@ -254,3 +304,33 @@ def test_load_refuses_a_dead_snapshot_file(tmp_path) -> None:
     assert eng._states == {}
     assert eng._free_seq_ids == [0]
     assert not eng.has_work
+
+
+def test_second_save_demotes_the_first_to_its_bin_file(tmp_path) -> None:
+    """There is one snapshot seq. After save("a"), save("b") the live KV in it
+    is b's, so load("a") must not seq_cp from it: it has to come back through
+    a.bin (state_seq_set_data) and carry a's token history, not b's."""
+    eng = _stub_engine()
+    eng.ctx.n_seq_max = 5  # seqs 0 and 2 in flight, 1 is the snapshot seq
+    eng._free_seq_ids = [3, 4]
+    store = KVSnapStore(eng, kv_dir=tmp_path)
+    eng._states[0] = _live_request(0, 0, [1, 2, 3], [10])
+    eng._states[1] = _live_request(1, 2, [7, 7, 7, 7], [20])
+    store.save("a", 0)
+    store.save("b", 1)
+    eng.ctx.calls.clear()
+
+    rid = store.load("a")
+    cps = [c for c in eng.ctx.calls if c[0] == "cp"]
+    assert cps == [], f"load('a') copied the snapshot seq, which holds b's KV: {cps}"
+    assert ("set_data", 3) in eng.ctx.calls
+    assert eng._states[rid].prompt == [1, 2, 3]
+    assert eng._states[rid].seq_id == 3
+    assert eng._free_seq_ids == [4]
+
+    # The latest save is still the live one and restores by seq_cp.
+    eng.ctx.calls.clear()
+    rid_b = store.load("b")
+    assert ("cp", store.snapshot_seq, 4, -1, -1) in eng.ctx.calls
+    assert eng._states[rid_b].prompt == [7, 7, 7, 7]
+    assert eng._free_seq_ids == []

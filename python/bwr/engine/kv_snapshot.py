@@ -142,6 +142,11 @@ class KVSnapStore:
         # carries two cells per position.
         self.engine.ctx.memory_seq_rm(self.snapshot_seq, -1, -1)
         self.engine.ctx.memory_seq_cp(req.seq_id, self.snapshot_seq, -1, -1)
+        # That clear also took every earlier snapshot's KV with it: only the
+        # save just made is live in the snapshot seq. The earlier ones restore
+        # from their .bin (or re-prefill), never by copying this seq.
+        for other in self._snaps.values():
+            other.live = False
         snap = _Snap(
             prompt=list(req.prompt),
             output_tokens=list(req.output_tokens),
