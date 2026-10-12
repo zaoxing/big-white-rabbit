@@ -233,8 +233,10 @@ def register_anthropic_routes(
     resolve=None,
     render_prompt,
 ) -> None:
-    """Mount /v1/messages. `render_prompt` is injected rather than reimplemented so the
-    Anthropic surface cannot drift from the OpenAI one on prompt construction."""
+    """Mount /v1/messages. `render_prompt(renderer, pairs)` is injected rather than
+    reimplemented so the Anthropic surface cannot drift from the OpenAI one on prompt
+    construction; it takes the renderer per call because in pool mode that is a
+    per-request object, not a per-server one."""
 
     @router.post("/v1/messages")
     async def create_message(req: A.MessagesRequest, http_request: Request):
@@ -259,13 +261,18 @@ def register_anthropic_routes(
         pairs = inject_tools(pairs, oai_tools, oai_choice)
         known = _parsing_names(oai_tools, oai_choice)
 
-        prompt = render_prompt(pairs)
-        params = _request_params(req)
-        n_prompt = count_tokens(model, prompt)
+        # Resolve BEFORE rendering: in pool mode the tokenizer belongs to
+        # whichever model the request named, and there is no server-wide one
+        # to fall back on. Rendering first, against the registration-time
+        # renderer, 500'd every /v1/messages on a pool server. The OpenAI
+        # route has always done it in this order.
         if resolve is None:
-            served, engine_r = model_name, async_engine
+            served, engine_r, renderer_r = model_name, async_engine, model
         else:
-            served, engine_r, _renderer, _overlay = await resolve(req.model)
+            served, engine_r, renderer_r, _overlay = await resolve(req.model)
+        prompt = render_prompt(renderer_r, pairs)
+        params = _request_params(req)
+        n_prompt = count_tokens(renderer_r, prompt)
         request_id = await submit_request(engine_r, prompt, params)
 
         # Read back off the params the ENGINE was given, so the sequences the engine

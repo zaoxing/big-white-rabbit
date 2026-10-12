@@ -654,7 +654,7 @@ def build_app(
         async_engine=async_engine,
         model_name=model_name,
         resolve=resolve,
-        render_prompt=lambda pairs: render_pairs(renderer, pairs),
+        render_prompt=render_pairs,
     )
     app.include_router(anthropic_router)
 
