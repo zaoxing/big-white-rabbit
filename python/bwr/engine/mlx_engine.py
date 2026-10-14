@@ -244,7 +244,6 @@ class MLXEngine:
         self._detoks: dict[int, TokenDetokenizer] = {}
         self._states: dict[int, RequestState] = {}
         self._retired: dict[int, RequestState] = {}
-        self._retired_limit = max(8, MIN_RETAINED_FINISHED)
         self._decode_calls = 0
         # Speculative state, populated only when config.speculative is on (so
         # a default engine allocates nothing extra per request): per-request
@@ -344,7 +343,7 @@ class MLXEngine:
             if 0 <= request_id < self._next_request_id:
                 raise KeyError(
                     f"request {request_id} finished and is no longer retained "
-                    f"(only the last {self._retired_limit} finished requests are)"
+                    f"(only the last {self.retained_finished_limit} finished requests are)"
                 )
             raise KeyError(f"unknown request {request_id}")
         return req
@@ -372,7 +371,7 @@ class MLXEngine:
             self._batch.leave([req.request_id])
         self._states.pop(req.request_id, None)
         self._retired[req.request_id] = req
-        while len(self._retired) > self._retired_limit:
+        while len(self._retired) > self.retained_finished_limit:
             del self._retired[next(iter(self._retired))]
         return StepOutput(req.request_id, token, piece, True, reason)
 
@@ -1265,6 +1264,19 @@ class MLXEngine:
     @property
     def n_free_seq_slots(self) -> int:
         return max(0, self.config.n_seq_max - len(self._states))
+
+    @property
+    def n_retained_finished(self) -> int:
+        """Finished requests still readable through `state` / `tokens_of` / `text_of`."""
+        return len(self._retired)
+
+    @property
+    def retained_finished_limit(self) -> int:
+        """Cap on `n_retained_finished`: MetalEngine's rule, the window must
+        cover a full batch's worth of retirements (every request in flight
+        together is read after IT ends while its peers still run), and never
+        shrink below the floor for a narrow configuration."""
+        return max(self.config.n_seq_max, MIN_RETAINED_FINISHED)
 
     @property
     def spec_acceptance_rate(self) -> float | None:

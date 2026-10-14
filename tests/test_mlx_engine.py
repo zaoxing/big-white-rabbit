@@ -16,7 +16,7 @@ import os
 
 import pytest
 from bwr.engine import EngineConfig, RequestParams
-from bwr.engine.mlx_engine import MLXEngine
+from bwr.engine.mlx_engine import MLXEngine, _MLXContext
 
 MODEL_PATH = os.environ.get("BWR_MLX_MODEL")
 
@@ -438,7 +438,7 @@ def _stub_engine(config: EngineConfig) -> MLXEngine:
     eng._detoks = {}
     eng._states = {}
     eng._retired = OrderedDict()
-    eng._retired_limit = 8
+    eng.ctx = _MLXContext(eng)
     eng._decode_calls = 0
     eng._spec_tables = {}
     eng._caches = {}
@@ -470,6 +470,25 @@ def _admit(eng: MLXEngine, prompt: list[int], max_tokens: int, drafts: list[int]
     if drafts is not None:
         eng._spec_tables[rid] = _FixedTable(drafts)
     return req
+
+
+@needs_mlx_lib
+def test_the_retention_window_covers_at_least_a_full_batch() -> None:
+    """tests/test_states_pruning.py's pin, for MLX: every request of a batch
+    is read after IT ends while its peers are still running, so the window
+    of finished requests kept readable must be at least n_seq_max wide.
+    `max(8, MIN_RETAINED_FINISHED)` was a tautology (both are 8), so a
+    16-wide batch retiring in one step lost its first eight."""
+    n_seq_max = 16
+    eng = _stub_engine(EngineConfig(n_ctx=4096, n_seq_max=n_seq_max))
+    assert eng.retained_finished_limit >= eng.ctx.n_seq_max
+    reqs = [_feed_only(eng, [1, 2, 3], max_tokens=1) for _ in range(n_seq_max)]
+    for req in reqs:
+        assert eng._feed(req, 4, "4").finished
+    assert eng.n_retained_finished == n_seq_max
+    for req in reqs:
+        assert eng.state(req.request_id).finish_reason == "length"
+        assert eng.tokens_of(req.request_id) == [4]
 
 
 def _spec_cfg() -> EngineConfig:
