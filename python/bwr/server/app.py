@@ -46,7 +46,7 @@ from .common import (
 from .ctxbench import ContextBenchRunner
 from .downloads import DownloadManager, HubIndex, ModelScopeIndex, MSFetcher
 from .params import build_params
-from .profiles import ProfileStore
+from .profiles import ProfileError, ProfileStore, normalise_sampling
 from .schemas import (
     ChatCompletion,
     ChatCompletionChunk,
@@ -192,7 +192,17 @@ def _request_params(
     # `defaults` is an exposed profile's sampling bundle. It fills only fields
     # the REQUEST left unset: a profile is a default, not an override, so
     # `temperature=0` sent explicitly still beats a profile that prefers 0.7.
-    d = defaults or {}
+    #
+    # The store normalises a bundle on every write, but profiles.json can be
+    # hand-edited, and a value the request schema would refuse must fail the
+    # request the way a bad request field does -- a 400 naming the field --
+    # not as a ValueError here or a TypeError inside engine admission.
+    try:
+        d = normalise_sampling(defaults or {})
+    except ProfileError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"exposed profile: {exc}"
+        ) from exc
 
     def pick(field: str, value: object) -> object:
         return d.get(field) if value is None else value
@@ -207,7 +217,7 @@ def _request_params(
     # says wins lost to a default.
     if (req.max_tokens is None and req.max_completion_tokens is None
             and d.get("max_tokens")):
-        max_tokens = int(d["max_tokens"])
+        max_tokens = d["max_tokens"]
     return build_params(
         max_tokens=max_tokens,
         # `stop` may be a bare string or a list of them; the engine takes the normalised

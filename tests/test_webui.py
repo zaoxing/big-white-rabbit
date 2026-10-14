@@ -1372,3 +1372,37 @@ def test_pool_entries_report_the_model_s_own_context_length(ctx_client):
     c, _ = ctx_client
     models = c.get("/admin/api/models").json()["models"]
     assert all(m["model_context_length"] == 32768 for m in models)
+
+
+@pytest.mark.parametrize("settings", [
+    {"max_tokens": "abc"}, {"seed": -2}, {"top_k": 2**40}, {"temperature": "warm"},
+])
+def test_bad_profile_sampling_settings_are_400_not_stored(pool_client, settings):
+    """A profile's sampling bundle reaches the engine as request defaults,
+    so a value the request schema would refuse is refused here too -- at
+    creation, with a 400 naming the problem, instead of a 500 on every
+    request that later selects the profile."""
+    client, _ = pool_client
+    r = client.post("/admin/api/models/a/profiles",
+                    json={"name": "bad", "settings": settings})
+    assert r.status_code == 400, r.text
+    assert next(iter(settings)) in r.json()["detail"]
+    assert client.get("/admin/api/models/a/profiles").json()["profiles"] == []
+
+    client.post("/admin/api/models/a/profiles",
+                json={"name": "fast", "settings": {"temperature": 0.1}})
+    r = client.put("/admin/api/models/a/profiles/fast", json={"settings": settings})
+    assert r.status_code == 400, r.text
+    r = client.post("/admin/api/profile-templates",
+                    json={"name": "badt", "settings": settings})
+    assert r.status_code == 400, r.text
+
+
+def test_a_profile_seed_of_minus_one_is_normalised_like_a_request(pool_client):
+    from bwr.server.schemas import LLAMA_DEFAULT_SEED
+
+    client, _ = pool_client
+    r = client.post("/admin/api/models/a/profiles",
+                    json={"name": "rnd", "settings": {"seed": -1, "max_tokens": "50"}})
+    assert r.status_code == 200, r.text
+    assert r.json()["profile"]["settings"] == {"seed": LLAMA_DEFAULT_SEED, "max_tokens": 50}

@@ -549,3 +549,71 @@ def test_exposed_profile_is_a_default_on_the_anthropic_surface(pool_app, capture
     assert (explicit.top_k, explicit.top_p) == (7, 0.5)
     # And a plain id is untouched by it.
     assert plain.temp != pytest.approx(0.11)
+
+
+# -- a profile's sampling values obey the request schema's rules -------------
+
+
+def test_a_profile_seed_of_minus_one_is_served_not_500(pool_app, captured_params):
+    """`seed: -1` is the "random seed" idiom the request schema normalises;
+    stored in a profile it used to reach `SamplerParams.seed` verbatim and
+    blow up in pybind as a 500 on both surfaces."""
+    from bwr.server.schemas import LLAMA_DEFAULT_SEED
+
+    pool_app.state.profiles.create_profile(
+        "a", "rnd", settings={"seed": -1, "max_tokens": "50", "temperature": "0.7"},
+        expose_as_model=True,
+    )
+
+    async def go():
+        async with pool_app.router.lifespan_context(pool_app):
+            r1 = await _post(pool_app, "/v1/chat/completions", _chat("a:rnd"))
+            r2 = await _post(pool_app, "/v1/messages", _messages("a:rnd"))
+            return r1, r2
+
+    r1, r2 = asyncio.run(go())
+    for r in (r1, r2):
+        assert r.status_code == 200, r.text
+    for p in captured_params:
+        assert p.seed == LLAMA_DEFAULT_SEED
+        assert p.temp == pytest.approx(0.7)
+        assert p.max_tokens == 64  # the request's cap still wins
+
+
+def test_a_bad_stored_profile_value_is_a_400_not_a_500(pool_app, tmp_path):
+    """A hand-edited profiles.json can hold anything. A value the request
+    schema would refuse must fail the request as a 400 naming the field, not
+    as a ValueError/TypeError 500 from inside the builder or the engine."""
+    import json as _json
+
+    from bwr.server.app import _request_params
+    from bwr.server.schemas import ChatCompletionRequest
+    from fastapi import HTTPException
+
+    req = ChatCompletionRequest(messages=[{"role": "user", "content": "hi"}])
+    for bad in ({"max_tokens": "abc"}, {"seed": -2}, {"top_k": 2**40},
+                {"temperature": "warm"}):
+        with pytest.raises(HTTPException) as info:
+            _request_params(req, bad)
+        assert info.value.status_code == 400
+        assert next(iter(bad)) in str(info.value.detail)
+
+    path = tmp_path / ".bwr" / "profiles.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_json.dumps({"models": {"a": {
+        "bad": {"settings": {"max_tokens": "abc"}, "expose_as_model": True},
+    }}}))
+    # The routes close over the store built at app construction; re-read the
+    # file through it, as a restart would.
+    pool_app.state.profiles._load()
+
+    async def go():
+        async with pool_app.router.lifespan_context(pool_app):
+            r1 = await _post(pool_app, "/v1/chat/completions", _chat("a:bad"))
+            r2 = await _post(pool_app, "/v1/messages", _messages("a:bad"))
+            return r1, r2
+
+    r1, r2 = asyncio.run(go())
+    for r in (r1, r2):
+        assert r.status_code == 400, r.text
+        assert "max_tokens" in r.text

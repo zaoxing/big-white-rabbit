@@ -39,6 +39,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel, ValidationError, field_validator
+
+from .schemas import max_tokens_error, validate_seed, validate_top_k
+
 # Settings fixed when the engine is built. A profile touching any of these
 # cannot be applied to a loaded model, only to the next load. Mirrors
 # EngineConfig's profile-settable knobs; tests/test_profiles.py cross-checks
@@ -67,7 +71,70 @@ EXPOSE_SEP = ":"
 
 
 class ProfileError(ValueError):
-    """Bad name, duplicate, missing, or an attempt to edit a built-in."""
+    """Bad name, duplicate, missing, an attempt to edit a built-in, or a
+    sampling value the request schema would refuse."""
+
+
+class _SamplingSettings(BaseModel):
+    """The request schema's sampling fields under the request schema's rules.
+
+    A profile's sampling bundle is handed to the engine as the DEFAULTS of a
+    request, filling whatever the request left unset -- so it has to be
+    exactly what the request field would have been after validation: the
+    engine's type (an `int` cap, a `float` temperature), the engine's range
+    (`validate_seed` / `validate_top_k` bound the C++ fields), and the same
+    idioms (`seed: -1` means "random"). The bounds are the schema's own
+    functions, not copies, so the two cannot drift.
+    """
+
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    max_tokens: int | None = None
+    seed: int | None = None
+    stop: str | list[str] | None = None
+
+    _bound_seed = field_validator("seed")(validate_seed)
+    _bound_top_k = field_validator("top_k")(validate_top_k)
+
+
+def normalise_sampling(settings: dict[str, Any]) -> dict[str, Any]:
+    """`settings` with its request-schema fields validated and coerced.
+
+    Other keys (engine fields, the sampling knobs the request schema does not
+    expose) pass through untouched. Raises ProfileError naming the field.
+    """
+    checked = {k: v for k, v in settings.items() if k in _SamplingSettings.model_fields}
+    try:
+        model = _SamplingSettings(**checked)
+    except ValidationError as exc:
+        detail = "; ".join(
+            f"{'.'.join(str(x) for x in e['loc'])}: {e['msg']}" for e in exc.errors()
+        )
+        raise ProfileError(f"invalid sampling setting: {detail}") from exc
+    cap = max_tokens_error(("max_tokens", model.max_tokens))
+    if cap is not None:
+        raise ProfileError(f"invalid sampling setting: {cap}")
+    out = dict(settings)
+    for key in checked:
+        out[key] = getattr(model, key)
+    return out
+
+
+def _loaded_settings(settings: Any) -> dict[str, Any]:
+    """Settings read from disk, normalised where they can be.
+
+    profiles.json may be hand-edited. A value that can be read the request
+    way (`seed: -1`, a numeric string) is stored as the request would have
+    it; one that cannot is kept VERBATIM rather than dropped, so the user
+    can see and fix it in the dashboard -- a request that selects it is
+    refused with a 400 by `app._request_params`, not served with a guess.
+    """
+    raw = dict(settings or {})
+    try:
+        return normalise_sampling(raw)
+    except ProfileError:
+        return raw
 
 
 def _now() -> str:
@@ -191,11 +258,17 @@ class ProfileStore:
         for name, body in (raw.get("templates") or {}).items():
             if name in self._templates:
                 continue  # a built-in name is never overridden from disk
-            self._templates[name] = Profile(**{**body, "name": name, "is_builtin": False})
+            self._templates[name] = Profile(**{
+                **body, "name": name, "is_builtin": False,
+                "settings": _loaded_settings(body.get("settings")),
+            })
         self._profiles = {}
         for model_id, bundle in (raw.get("models") or {}).items():
             self._profiles[model_id] = {
-                name: Profile(**{**body, "name": name})
+                name: Profile(**{
+                    **body, "name": name,
+                    "settings": _loaded_settings(body.get("settings")),
+                })
                 for name, body in (bundle or {}).items()
             }
 
@@ -244,7 +317,8 @@ class ProfileStore:
                 raise ProfileError(f"template {name!r} already exists")
             t = Profile(
                 name=name, display_name=display_name or name, description=description,
-                settings=dict(settings or {}), created_at=_now(), updated_at=_now(),
+                settings=normalise_sampling(dict(settings or {})),
+                created_at=_now(), updated_at=_now(),
             )
             self._templates[name] = t
             self._save()
@@ -306,6 +380,7 @@ class ProfileStore:
                     raise ProfileError(f"unknown template {source_template!r}")
                 # Explicit settings win over the template they came from.
                 merged = {**tmpl.settings, **merged}
+            merged = normalise_sampling(merged)
             p = Profile(
                 name=name, display_name=display_name or name, description=description,
                 settings=merged, source_template=source_template,
@@ -422,7 +497,7 @@ def _apply_changes(p: Profile, changes: dict[str, Any]) -> Profile:
         if changes.get(key) is not None:
             setattr(out, key, changes[key])
     if changes.get("settings") is not None:
-        out.settings = dict(changes["settings"])
+        out.settings = normalise_sampling(dict(changes["settings"]))
     if changes.get("source_template") is not None:
         out.source_template = changes["source_template"]
     if changes.get("expose_as_model") is not None:

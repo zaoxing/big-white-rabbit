@@ -238,3 +238,65 @@ def test_engine_fields_cover_every_engine_config_knob():
     assert excluded <= knobs, excluded - knobs
     assert not (excluded & ENGINE_FIELDS), excluded & ENGINE_FIELDS
     assert knobs - excluded == set(ENGINE_FIELDS)
+
+
+# -- sampling settings are validated where they enter the store -------------
+
+
+def test_sampling_settings_are_normalised_like_a_request(store):
+    """A profile's sampling bundle is handed to the engine as request
+    defaults, so it must obey the request schema's rules: `seed: -1` is the
+    "random seed" idiom and is normalised the way the request field is,
+    numeric strings are coerced, and the result is of the engine's type."""
+    from bwr.server.schemas import LLAMA_DEFAULT_SEED
+
+    p = store.create_profile(
+        "m1", "fast",
+        settings={"seed": -1, "max_tokens": "50", "temperature": "0.7", "top_k": "40"},
+    )
+    assert p.settings == {
+        "seed": LLAMA_DEFAULT_SEED, "max_tokens": 50, "temperature": 0.7, "top_k": 40,
+    }
+    assert isinstance(p.settings["max_tokens"], int)
+    assert isinstance(p.settings["temperature"], float)
+
+
+@pytest.mark.parametrize("settings", [
+    {"max_tokens": "abc"},
+    {"max_tokens": 0},
+    {"seed": -2},
+    {"top_k": 2**40},
+    {"temperature": "warm"},
+])
+def test_bad_sampling_settings_are_refused_at_creation(store, settings):
+    with pytest.raises(ProfileError):
+        store.create_profile("m1", "bad", settings=settings)
+    with pytest.raises(ProfileError):
+        store.create_template("bad", settings=settings)
+    assert store.get_profile("m1", "bad") is None
+
+
+def test_bad_sampling_settings_are_refused_on_update(store):
+    store.create_profile("m1", "fast", settings={"temperature": 0.1})
+    with pytest.raises(ProfileError):
+        store.update_profile("m1", "fast", settings={"seed": -2})
+    assert store.get_profile("m1", "fast").settings == {"temperature": 0.1}
+
+
+def test_a_hand_written_file_is_normalised_on_load(tmp_path):
+    """profiles.json may be edited by hand; a `seed: -1` there means the same
+    thing as on a request and loads normalised, while an unreadable value is
+    kept (so the user can see and fix it) rather than dropped."""
+    from bwr.server.schemas import LLAMA_DEFAULT_SEED
+
+    path = tmp_path / ".bwr" / "profiles.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"models": {"m1": {
+        "ok": {"settings": {"seed": -1, "max_tokens": "50"}, "expose_as_model": True},
+        "bad": {"settings": {"max_tokens": "abc"}, "expose_as_model": True},
+    }}}))
+    store = ProfileStore(tmp_path)
+    assert store.get_profile("m1", "ok").settings == {
+        "seed": LLAMA_DEFAULT_SEED, "max_tokens": 50,
+    }
+    assert store.get_profile("m1", "bad").settings == {"max_tokens": "abc"}
