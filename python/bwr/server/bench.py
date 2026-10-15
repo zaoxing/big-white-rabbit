@@ -336,7 +336,7 @@ class BenchRunner:
         tasks = [asyncio.create_task(one_row()) for _ in range(batch)]
         try:
             rows = await asyncio.gather(*tasks)
-        except BaseException:
+        except BaseException:  # noqa: BLE001 - must catch cancellation too
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
